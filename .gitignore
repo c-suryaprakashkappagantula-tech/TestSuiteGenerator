@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+outputs/*.xlsx
+checkpoints/*.xlsx
+checkpoints/CHECKPOINT_FULL_V1.0/
+attachments/*
+inputs/*
+logs/*
+*.log
+storage_state.json
+.env
