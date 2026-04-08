@@ -296,27 +296,35 @@ def _parse_feature_section(lines, data: ChalkData, feature_id: str, log=print):
 
 
 def _parse_numbered_format(lines, data, fid, numbered_row_pat, log=print):
-    """Parse Format B: N\tScenario\tValidation rows. Skips API mapping tables."""
+    """Parse Format B: N\tScenario\tValidation rows. Skips API mapping tables.
+    Captures all text before first numbered row as feature description."""
     API_KEYWORDS = ['get', 'post', 'put', 'delete', 'sync', 'async', 'inbound', 'outbound']
     current_scenario = None
     current_section = ''
+    found_first_scenario = False
 
     for ln in lines:
         ln_upper = ln.upper().strip()
-
-        # Scope / Rules
-        if ln_upper.startswith('SCOPE') or ln_upper.startswith('FEATURE:') or ln_upper.startswith('SUMMARY'):
-            data.scope += ln + '\n'; continue
-        if ln_upper.startswith('RULES:'):
-            data.rules += ln + '\n'; continue
 
         # Skip header row
         if ln_upper.startswith('SNO') or ln_upper.startswith('SCENARIO NUMBER'):
             continue
 
-        # Numbered row: N\tScenario\tValidation
+        # Check if this is a numbered scenario row
         m = numbered_row_pat.match(ln)
+
+        # Before first scenario: capture everything as scope/description
+        if not found_first_scenario and not m:
+            # Skip the feature ID line itself
+            if fid in ln_upper:
+                continue
+            if ln.strip():
+                data.scope += ln.strip() + '\n'
+            continue
+
+        # Numbered row: N\tScenario\tValidation
         if m:
+            found_first_scenario = True
             num = m.group(1)
             rest = m.group(2)
             parts = [p.strip() for p in rest.split('\t')]
@@ -403,21 +411,31 @@ def _parse_freeform(lines, data, fid, log=print):
     log('[CHALK]   Parsed %d scenarios (freeform/verify-list)' % len(data.scenarios))
 
 def _parse_ts_format(lines, data, fid, ts_pattern, log=print):
-    """Parse Format A: TS_MWTGPROV-XXXX_N scenario blocks."""
+    """Parse Format A: TS_MWTGPROV-XXXX_N scenario blocks.
+    Captures all text before first TS_ pattern as feature description."""
     current_scenario = None
     current_section = ''
+    found_first_scenario = False
 
 
     for ln in lines:
         ln_upper = ln.upper().strip()
 
-        # Scope / Rules
-        if ln_upper.startswith('SCOPE') or ln_upper.startswith('FEATURE:'):
-            data.scope += ln + '\n'; continue
-        if ln_upper.startswith('RULES:'):
-            data.rules += ln + '\n'; continue
+        # Before first TS_ scenario: capture as scope/description
+        if not found_first_scenario and not ts_pattern.search(ln):
+            if fid in ln_upper:
+                continue  # skip feature ID line itself
+            if ln_upper.startswith('RULES:'):
+                data.rules += ln + '\n'; continue
+            if 'OPEN ITEM' in ln_upper:
+                current_section = 'open_items'; continue
+            if current_section == 'open_items' and ln.strip():
+                data.open_items.append(ln.strip()); continue
+            if ln.strip() and ln_upper not in ('SCOPE', 'SCOPE:'):
+                data.scope += ln.strip() + '\n'
+            continue
 
-        # Open items
+        # Open items (can appear after scenarios too)
         if 'OPEN ITEM' in ln_upper:
             current_section = 'open_items'; continue
         if current_section == 'open_items' and ln.strip():
@@ -429,6 +447,7 @@ def _parse_ts_format(lines, data, fid, ts_pattern, log=print):
         # New scenario
         m = ts_pattern.search(ln)
         if m:
+            found_first_scenario = True
             if current_scenario:
                 data.scenarios.append(current_scenario)
             current_scenario = ChalkScenario(scenario_id=f'TS_{fid}_{m.group(1)}')

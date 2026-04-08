@@ -723,7 +723,8 @@ _NO_EXPAND_CATEGORIES = ['Negative', 'Edge Case', 'Edge Cases', 'Rollback', 'Tim
 
 
 def _expand_by_matrix(suite, options, log=print):
-    """Expand core/positive TCs by device matrix. Returns new TC list or None."""
+    """Expand core/positive TCs by device matrix. Returns new TC list or None.
+    Smart detection: only expands if feature is device/SIM-dependent."""
     channels = options.get('channel', ['ITMBO'])
     if isinstance(channels, str): channels = [channels]
     devices = options.get('devices', ['Mobile'])
@@ -744,12 +745,41 @@ def _expand_by_matrix(suite, options, log=print):
                 })
                 combo_id += 1
 
-    # If only 1 combo, no expansion needed
     if len(combos) <= 1:
         suite.combinations = combos
         return None
 
     suite.combinations = combos
+
+    # ── Smart detection: should this feature be expanded? ──
+    all_text = ' '.join([tc.summary + ' ' + tc.description + ' ' +
+                         ' '.join(s.summary + ' ' + s.expected for s in tc.steps)
+                         for tc in suite.test_cases]).lower()
+
+    # Keywords that indicate device/SIM-dependent feature (SHOULD expand)
+    DEVICE_KEYWORDS = ['esim', 'psim', 'sim type', 'sim card', 'iccid', 'imei',
+                       'mobile', 'tablet', 'smartwatch', 'wearable', 'phone',
+                       'activation', 'activate', 'swap', 'change sim', 'change imei',
+                       'port-in', 'device type', 'product type']
+
+    # Keywords that indicate device-independent feature (should NOT expand)
+    NO_EXPAND_KEYWORDS = ['report', 'batch', 'differential', 'file format',
+                          'csv', 'column', 'notification', 'suppress',
+                          'kafka', 'dpfo', 'usage', 'throttle', 'speed reduction',
+                          'billing', 'mediation', 'cdr', 'prr']
+
+    device_score = sum(1 for kw in DEVICE_KEYWORDS if kw in all_text)
+    no_expand_score = sum(1 for kw in NO_EXPAND_KEYWORDS if kw in all_text)
+
+    log('[ENGINE]   Device-dependent score: %d | Device-independent score: %d' % (device_score, no_expand_score))
+
+    if no_expand_score > device_score:
+        log('[ENGINE]   Feature is device-independent (report/batch/notification) -- skipping matrix expansion')
+        return None
+
+    if device_score < 3:
+        log('[ENGINE]   Low device relevance (%d) -- skipping matrix expansion' % device_score)
+        return None
 
     # Split TCs into expandable and non-expandable
     expandable = []
