@@ -12,8 +12,27 @@ Rules:
 3. Don't flood — cap at 50% of existing count
 4. Every added TC must be justifiable from sample patterns
 """
-from .test_engine import TestCase, TestStep
 from .step_templates import get_step_chain
+
+
+def _make_tc(idx, fid, title, val, category, preconditions, ctx):
+    """Import TestCase here to avoid circular import."""
+    from .test_engine import TestCase, TestStep
+    chain = get_step_chain(title, val, ctx)
+    steps = [TestStep(i+1, s, e) for i, (s, e) in enumerate(chain)]
+    return TestCase(sno=str(idx),
+        summary='TC%02d_%s - %s' % (idx, fid, title),
+        description=val, preconditions=preconditions,
+        steps=steps, story_linkage=fid, label=fid, category=category)
+
+
+def _neg(idx, fid, title, val, ctx):
+    return _make_tc(idx, fid, title, val, 'Negative',
+        '1.\tSystem in ready state\n2.\tPrepare error condition as per scenario', ctx)
+
+def _pos(idx, fid, title, val, ctx):
+    return _make_tc(idx, fid, title, val, 'Happy Path',
+        '1.\tActive TMO subscriber line\n2.\tSystem in ready state', ctx)
 
 
 def enrich_scenarios(test_cases, feature_id, feature_context, log=print):
@@ -173,21 +192,3 @@ def _is_api_feature(ctx, text):
     kw = ['api', 'http', 'nsl', 'apollo', 'mbo', 'swap', 'activation',
           'change', 'port', 'deactivat', 'suspend', 'hotline', 'trigger']
     return any(k in ctx or k in text for k in kw)
-
-def _neg(idx, fid, title, val, ctx):
-    chain = get_step_chain(title, val, ctx)
-    steps = [TestStep(i+1, s, e) for i, (s, e) in enumerate(chain)]
-    return TestCase(sno=str(idx),
-        summary='TC%02d_%s - %s' % (idx, fid, title),
-        description=val,
-        preconditions='1.\tSystem in ready state\n2.\tPrepare error condition as per scenario',
-        steps=steps, story_linkage=fid, label=fid, category='Negative')
-
-def _pos(idx, fid, title, val, ctx):
-    chain = get_step_chain(title, val, ctx)
-    steps = [TestStep(i+1, s, e) for i, (s, e) in enumerate(chain)]
-    return TestCase(sno=str(idx),
-        summary='TC%02d_%s - %s' % (idx, fid, title),
-        description=val,
-        preconditions='1.\tActive TMO subscriber line\n2.\tSystem in ready state',
-        steps=steps, story_linkage=fid, label=fid, category='Happy Path')
