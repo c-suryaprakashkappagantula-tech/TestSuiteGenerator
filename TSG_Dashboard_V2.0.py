@@ -32,6 +32,13 @@ if sys.platform.startswith('win'):
         asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
     except Exception:
         pass
+    # Suppress CMD window popups from Playwright subprocess
+    import subprocess
+    _orig_popen = subprocess.Popen.__init__
+    def _patched_popen(self, *args, **kwargs):
+        kwargs.setdefault('creationflags', subprocess.CREATE_NO_WINDOW)
+        _orig_popen(self, *args, **kwargs)
+    subprocess.Popen.__init__ = _patched_popen
 
 # ================================================================
 # PAGE CONFIG
@@ -143,20 +150,25 @@ with left:
         if ss['selected_pi'] in ss.get('all_pi_features', {}):
             ss['pi_features'] = ss['all_pi_features'][ss['selected_pi']]
             st.rerun()
+        elif ss.get('all_pi_features'):
+            # Cache exists but this PI not in it — show empty
+            st.caption('No features cached for %s. Click Reload Chalk to refresh.' % ss['selected_pi'])
         else:
-            if st.button('Fetch Features from %s' % ss['selected_pi'], key='fetch_feats', use_container_width=True):
-                with st.spinner('Scanning %s...' % ss['selected_pi']):
+            # No cache at all — offer to fetch ALL PIs at once
+            if st.button('Fetch All PI Features (one-time)', key='fetch_all_feats', use_container_width=True):
+                with st.spinner('Fetching features from ALL PIs (one-time, will be cached)...'):
                     try:
                         _pw = sync_playwright().start()
                         _br = _pw.chromium.launch(headless=True, channel=BROWSER_CHANNEL)
                         _cx = _br.new_context(viewport={'width': 1920, 'height': 1080})
                         _pg = _cx.new_page()
-                        _feats = discover_features_on_pi(_pg, ss['selected_pi_url'], log=lambda m: None)
-                        ss['pi_features'] = _feats
-                        # Cache it
-                        if 'all_pi_features' not in ss:
-                            ss['all_pi_features'] = {}
-                        ss['all_pi_features'][ss['selected_pi']] = _feats
+                        _all = {}
+                        for _pi_label, _pi_url in ss['pi_list']:
+                            st.toast('Scanning %s...' % _pi_label)
+                            _feats = discover_features_on_pi(_pg, _pi_url, log=lambda m: None)
+                            _all[_pi_label] = _feats
+                        ss['all_pi_features'] = _all
+                        ss['pi_features'] = _all.get(ss['selected_pi'], [])
                         _cx.close(); _br.close(); _pw.stop()
                         st.rerun()
                     except Exception as _e:
@@ -411,20 +423,29 @@ if history_btn:
         st.sidebar.info('No history yet.')
 
 if refresh_pi_btn:
-    with st.spinner('Refreshing PI iterations from Chalk...'):
+    with st.spinner('Refreshing ALL PIs and features from Chalk...'):
         try:
             pw = sync_playwright().start()
             browser = pw.chromium.launch(headless=True, channel=BROWSER_CHANNEL)
             ctx = browser.new_context(viewport={'width': 1920, 'height': 1080})
             page = ctx.new_page()
+            # Refresh PI list
             pi_links = discover_pi_links(page, log=lambda m: None)
             ss['pi_list'] = [(p.label, p.url) for p in pi_links]
+            # Re-fetch ALL features
+            _all = {}
+            for _pi_label, _pi_url in ss['pi_list']:
+                st.toast('Scanning %s...' % _pi_label)
+                _feats = discover_features_on_pi(page, _pi_url, log=lambda m: None)
+                _all[_pi_label] = _feats
+            ss['all_pi_features'] = _all
             ss['selected_pi'] = None
             ss['selected_pi_url'] = ''
+            ss['pi_features'] = []
             ctx.close(); browser.close(); pw.stop()
             st.rerun()
         except Exception as e:
-            st.error(f'Failed to refresh PIs: {e}')
+            st.error('Failed: %s' % e)
             try: ctx.close()
             except: pass
             try: browser.close()
