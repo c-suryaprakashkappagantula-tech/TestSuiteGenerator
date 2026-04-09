@@ -354,7 +354,7 @@ def _chalk_scenario_to_tc(sc, idx, feature_id):
             steps.append(TestStep(step_num, clean, exp))
             step_num += 1
     else:
-        # No Chalk steps -- add context-aware flow
+        # No Chalk steps -- derivation rule only (for CDR features)
         if sc.derivation_rule:
             rule_text = sc.derivation_rule.replace('Derivation Rule:', '').strip()
             steps.append(TestStep(step_num,
@@ -371,16 +371,8 @@ def _chalk_scenario_to_tc(sc, idx, feature_id):
                 'Connect to SFTP and download PRR file',
                 'PRR file downloaded successfully'))
             step_num += 1
-        elif has_api and not sc.derivation_rule:
-            steps.append(TestStep(step_num,
-                'Execute API call with specified parameters',
-                'API returns expected response'))
-            step_num += 1
-        elif has_ui and not sc.derivation_rule:
-            steps.append(TestStep(step_num,
-                'Navigate to the relevant UI section and perform the action',
-                'UI action completed successfully'))
-            step_num += 1
+        # For API/UI/Workflow: DON'T add generic steps here
+        # Let the template fallback handle it with proper step chains
 
     # Final Verify step with FULL validation as expected result
     # But ONLY if we already have other steps (don't make verify the only step)
@@ -404,15 +396,6 @@ def _chalk_scenario_to_tc(sc, idx, feature_id):
         chain = get_step_chain(sc.title, sc.validation, context)
         for i, (step_sum, step_exp) in enumerate(chain, 1):
             steps.append(TestStep(i, step_sum, step_exp))
-
-        # Extra: if validation has multiple sentences, add individual verify steps
-        if sc.validation and len(steps) < 6:
-            val_parts = [p.strip() for p in re.split(r'[.;]\s+', sc.validation) if p.strip() and len(p.strip()) > 15]
-            if len(val_parts) >= 2:
-                for vp in val_parts:
-                    # Don't duplicate if already in a step
-                    if not any(vp.lower()[:30] in s.expected.lower() for s in steps):
-                        steps.append(TestStep(len(steps)+1, 'Verify: %s' % vp, vp))
 
     return TestCase(
         sno=str(idx),
@@ -810,8 +793,8 @@ def _expand_by_matrix(suite, options, log=print, max_combos=4):
 
     # Keywords that indicate device/SIM-dependent feature (SHOULD expand)
     DEVICE_KEYWORDS = ['esim', 'psim', 'sim type', 'sim card', 'iccid', 'imei',
-                       'mobile', 'tablet', 'smartwatch', 'wearable', 'phone',
-                       'activation', 'activate', 'swap', 'change sim', 'change imei',
+                       'mobile device', 'tablet device', 'smartwatch', 'wearable',
+                       'activate subscriber', 'swap mdn', 'change sim', 'change imei',
                        'port-in', 'device type', 'product type']
 
     # Keywords that indicate device-independent feature (should NOT expand)
