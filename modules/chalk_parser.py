@@ -149,20 +149,10 @@ EXTRACT_TABLES_JS = """() => {
 def discover_features_on_pi(page, pi_url: str, log=print) -> List[Tuple[str, str]]:
     """Navigate to a PI page and extract all MWTGPROV-XXXX feature IDs with titles."""
     log('[CHALK] Navigating to PI page...')
-    page.goto(pi_url, timeout=PAGE_LOAD_TIMEOUT_MS, wait_until='domcontentloaded')
-    try: page.wait_for_load_state('networkidle', timeout=20000)
+    page.goto(pi_url, timeout=PAGE_LOAD_TIMEOUT_MS, wait_until='commit')
+    try: page.wait_for_load_state('domcontentloaded', timeout=10000)
     except: pass
-    time.sleep(5)  # let heavy Chalk pages fully render
-
-    # Try to expand any collapsed sections/tabs
-    try:
-        page.evaluate("""() => {
-            document.querySelectorAll('[aria-expanded="false"]').forEach(function(el) {
-                try { el.click(); } catch(e) {}
-            });
-        }""")
-        time.sleep(1)
-    except: pass
+    time.sleep(2)
 
     log('[CHALK] Scanning for features...')
     features = page.evaluate("""() => {
