@@ -175,8 +175,14 @@ with left:
     st.markdown("</div>", unsafe_allow_html=True)
 
     # ── Step 3: Test Matrix ──
-    st.markdown("<div class='sec-title'><span class='icon'>&#9881;</span> Step 3: Test Matrix</div>", unsafe_allow_html=True)
+    st.markdown("<div class='sec-title'><span class='icon'>&#9881;</span> Step 3: Test Matrix & Strategy</div>", unsafe_allow_html=True)
     st.markdown("<div class='glass'>", unsafe_allow_html=True)
+
+    # Suite Strategy selector
+    strategy = st.radio('Suite Strategy', ['Smart Suite (Recommended)', 'Full Matrix', 'Custom Instructions'],
+                        horizontal=True, key='suite_strategy',
+                        help='Smart=representative combos | Full=every combination | Custom=your rules')
+
     mc1, mc2 = st.columns(2)
     with mc1:
         channel = st.multiselect('Channel', CHANNELS, default=['ITMBO'])
@@ -184,6 +190,39 @@ with left:
     with mc2:
         networks = st.multiselect('Network Types', NETWORK_TYPES, default=['4G', '5G'])
         sim_types = st.multiselect('SIM Types', SIM_TYPES, default=['eSIM', 'pSIM'])
+
+    # Custom Instructions (only shown for Custom mode)
+    custom_instructions = ''
+    if strategy == 'Custom Instructions':
+        st.markdown("**Custom Instructions** — tell the engine what you want:")
+        suggestions = [
+            'Focus on eSIM only, skip pSIM',
+            'Only NBOP channel',
+            'Include wearable scenarios',
+            'Skip 4G completely, 5G only',
+            'Add extra negative cases for timeout and rollback',
+            'Include rollback for every swap type',
+            'Only Mobile devices, no Tablet',
+            'Prioritize E2E scenarios',
+            'Limit to 5 test cases per group',
+            'Include boundary testing for MDN format',
+            'Add API authentication failure scenarios',
+            'Focus on Change BCD and Change Rateplan only',
+            'Include Syniverse and MBO integration checks',
+            'Add data integrity checks after each operation',
+        ]
+        st.caption('Suggestions (click to copy):')
+        # Show suggestions in 2 columns of chips
+        sg1, sg2 = st.columns(2)
+        with sg1:
+            for s in suggestions[:7]:
+                st.code(s, language=None)
+        with sg2:
+            for s in suggestions[7:]:
+                st.code(s, language=None)
+        custom_instructions = st.text_area('Your instructions:', value='', height=100,
+            placeholder='Type your instructions here...\ne.g. Focus on eSIM Mobile 5G, add rollback scenarios, skip 4G')
+
     st.markdown("</div>", unsafe_allow_html=True)
 
     # ── Step 4: Options ──
@@ -425,6 +464,8 @@ if run_btn:
                     'sim_types': sim_types, 'include_positive': inc_positive,
                     'include_negative': inc_negative, 'include_e2e': inc_e2e,
                     'include_edge': inc_edge, 'include_attachments': inc_attachments,
+                    'strategy': strategy,
+                    'custom_instructions': custom_instructions,
                 }
                 suite = build_test_suite(jira, chalk, parsed_docs, options, log=logger)
                 total_steps = sum(len(tc.steps) for tc in suite.test_cases)

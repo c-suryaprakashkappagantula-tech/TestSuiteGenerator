@@ -11,6 +11,7 @@ from .jira_fetcher import JiraIssue
 from .chalk_parser import ChalkData, ChalkScenario
 from .doc_parser import ParsedDoc
 from .step_templates import get_step_chain
+from .instruction_parser import parse_instructions, apply_adjustments
 
 
 @dataclass
@@ -67,6 +68,18 @@ class TestSuite:
 # ================================================================
 
 def build_test_suite(jira, chalk, parsed_docs, options, log=print):
+    # Parse custom instructions if provided
+    strategy = options.get('strategy', 'Smart Suite (Recommended)')
+    custom_text = options.get('custom_instructions', '')
+    adjustments = {}
+    if strategy == 'Custom Instructions' and custom_text:
+        log('[ENGINE] Parsing custom instructions...')
+        adjustments = parse_instructions(custom_text, options, log)
+        options = apply_adjustments(options, adjustments)
+        log('[ENGINE]   Adjusted options applied')
+    elif strategy == 'Full Matrix':
+        log('[ENGINE] Full Matrix mode — all combinations will be generated')
+
     suite = TestSuite(
         feature_id=jira.key, feature_title=jira.summary,
         channel=options.get('channel', jira.channel),
@@ -117,6 +130,63 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print):
     log('[ENGINE] Step 6: Preparing for expansion...')
     # Renumbering happens after matrix expansion (Step 9)
 
+    # Step 6b: Apply custom instruction extras
+    if adjustments:
+        _next = len(suite.test_cases) + 1
+        # Extra scenarios from custom instructions
+        for desc in adjustments.get('extra_scenarios', []):
+            suite.test_cases.append(TestCase(
+                sno=str(_next), summary='TC%02d_%s - Custom: %s' % (_next, jira.key, desc[:60]),
+                description=desc, preconditions='As per custom instruction',
+                story_linkage=jira.key, label=jira.key, category='Happy Path',
+                steps=[TestStep(1,'Execute: %s'%desc,'Completed'),TestStep(2,'Verify results','Results match expected')]))
+            _next += 1
+            log('[ENGINE]   Added custom scenario: %s' % desc[:50])
+        # Boundary testing
+        if adjustments.get('include_boundary'):
+            suite.test_cases.append(TestCase(
+                sno=str(_next), summary='TC%02d_%s - Boundary: Verify field length and format limits' % (_next, jira.key),
+                description='Verify system handles boundary values: max length MDN, special chars, empty strings, min/max numeric values.',
+                preconditions='System in ready state', story_linkage=jira.key, label=jira.key, category='Edge Case',
+                steps=[TestStep(1,'Test max length input','Accepted or rejected gracefully'),
+                       TestStep(2,'Test min length input','Handled correctly'),
+                       TestStep(3,'Test special characters','No injection or crash'),
+                       TestStep(4,'Verify error messages for boundary violations','Clear error messages returned')]))
+            _next += 1; log('[ENGINE]   Added boundary testing TC')
+        # Data integrity
+        if adjustments.get('include_data_integrity'):
+            suite.test_cases.append(TestCase(
+                sno=str(_next), summary='TC%02d_%s - Data Integrity: Verify no data corruption after operation' % (_next, jira.key),
+                description='Verify data integrity across NSL DB, MBO, Syniverse, and NBOP after the operation.',
+                preconditions='Operation completed successfully', story_linkage=jira.key, label=jira.key, category='Happy Path',
+                steps=[TestStep(1,'Compare pre and post operation data in NSL DB','Data consistent'),
+                       TestStep(2,'Verify MBO data matches NSL','MBO in sync'),
+                       TestStep(3,'Verify NBOP tables reflect correct state','NBOP consistent'),
+                       TestStep(4,'Verify no orphaned or duplicate records','No data anomalies')]))
+            _next += 1; log('[ENGINE]   Added data integrity TC')
+        # Auth failure
+        if adjustments.get('include_auth_failure'):
+            suite.test_cases.append(TestCase(
+                sno=str(_next), summary='TC%02d_%s - Negative: Verify API with expired/invalid OAuth token' % (_next, jira.key),
+                description='Verify API rejects requests with expired, invalid, or missing OAuth token.',
+                preconditions='Expired or invalid OAuth token', story_linkage=jira.key, label=jira.key, category='Negative',
+                steps=[TestStep(1,'Send API request with expired token','Request sent'),
+                       TestStep(2,'Verify HTTP 401 Unauthorized returned','401 returned with clear message'),
+                       TestStep(3,'Verify no data modified','System state unchanged')]))
+            _next += 1; log('[ENGINE]   Added auth failure TC')
+        # Rollback for all
+        if adjustments.get('include_rollback_all'):
+            suite.test_cases.append(TestCase(
+                sno=str(_next), summary='TC%02d_%s - Rollback: Verify rollback on mid-operation failure' % (_next, jira.key),
+                description='Verify system rolls back all changes when operation fails midway.',
+                preconditions='Simulate failure at each step', story_linkage=jira.key, label=jira.key, category='Negative',
+                steps=[TestStep(1,'Execute operation until failure point','Operation fails at expected step'),
+                       TestStep(2,'Verify rollback triggered automatically','Rollback initiated'),
+                       TestStep(3,'Verify all prior changes reverted','Original state restored'),
+                       TestStep(4,'Verify MBO and Syniverse notified of rollback','External systems notified'),
+                       TestStep(5,'Verify transaction history records rollback','Audit trail complete')]))
+            _next += 1; log('[ENGINE]   Added rollback TC')
+
     log('[ENGINE] Step 7: Building AC traceability...')
     suite.ac_traceability = _build_ac_traceability(suite)
 
@@ -145,7 +215,11 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print):
 
     # Step 8: Device Matrix Expansion (only for core/positive TCs)
     log('[ENGINE] Step 8: Device matrix expansion...')
-    expanded = _expand_by_matrix(suite, options, log)
+    _strategy = options.get('strategy', 'Smart Suite (Recommended)')
+    if _strategy == 'Full Matrix':
+        expanded = _expand_by_matrix(suite, options, log, max_combos=999)
+    else:
+        expanded = _expand_by_matrix(suite, options, log, max_combos=4)
     if expanded:
         suite.test_cases = expanded
         log('[ENGINE]   Expanded to %d TCs' % len(suite.test_cases))
@@ -691,7 +765,7 @@ def _build_ac_traceability(suite):
 _NO_EXPAND_CATEGORIES = ['Negative', 'Edge Case', 'Edge Cases', 'Rollback', 'Timeout', 'Audit', 'E2E', 'End-to-End']
 
 
-def _expand_by_matrix(suite, options, log=print):
+def _expand_by_matrix(suite, options, log=print, max_combos=4):
     """Expand core/positive TCs by device matrix. Returns new TC list or None.
     Smart detection: only expands if feature is device/SIM-dependent."""
     channels = options.get('channel', ['ITMBO'])
@@ -716,7 +790,7 @@ def _expand_by_matrix(suite, options, log=print):
 
     # Smart reduction: if too many combos, pick representative subset
     # Rule: max 6 combos. Ensure each channel, device, SIM appears at least once.
-    MAX_COMBOS = 6
+    MAX_COMBOS = max_combos
     if len(all_combos) > MAX_COMBOS:
         combos = _pick_representative_combos(all_combos, channels, devices, sim_types, networks, MAX_COMBOS)
         log('[ENGINE]   Reduced %d combos to %d representative' % (len(all_combos), len(combos)))
@@ -803,39 +877,60 @@ def _expand_by_matrix(suite, options, log=print):
 
 
 def _pick_representative_combos(all_combos, channels, devices, sim_types, networks, max_count):
-    """Pick representative subset ensuring each value appears at least once.
-    Prioritizes: all devices, all SIM types, primary channel. Limits 4G-only combos."""
+    """Pick lean representative subset.
+    Rules:
+    - Primary channel gets most coverage
+    - Secondary channel gets 1-2 combos only
+    - Each device type appears at least once
+    - Each SIM type appears at least once
+    - 4G-only combos limited to 1 max
+    - 5G preferred over 4G
+    """
     picked = []
     used_keys = set()
-
-    # Phase 1: Ensure each device + SIM type covered (primary channel)
     primary_ch = channels[0]
-    for dev in devices:
-        for sim in sim_types:
-            for c in all_combos:
-                if c['device'] == dev and c['sim'] == sim and c['channel'] == primary_ch:
-                    if c['key'] not in used_keys:
-                        picked.append(c)
-                        used_keys.add(c['key'])
-                    break
 
-    # Phase 2: Add at least one combo per secondary channel
-    for ch in channels[1:]:
-        if len(picked) >= max_count:
-            break
+    # Phase 1: Primary channel — one combo per device (alternate SIM types)
+    for di, dev in enumerate(devices):
+        sim = sim_types[di % len(sim_types)]  # alternate eSIM/pSIM
         for c in all_combos:
-            if c['channel'] == ch and c['key'] not in used_keys:
-                picked.append(c)
-                used_keys.add(c['key'])
+            if c['device'] == dev and c['sim'] == sim and c['channel'] == primary_ch:
+                if c['key'] not in used_keys:
+                    picked.append(c); used_keys.add(c['key'])
                 break
 
-    # Phase 3: Fill remaining slots with variety
-    for c in all_combos:
-        if len(picked) >= max_count:
-            break
-        if c['key'] not in used_keys:
-            picked.append(c)
-            used_keys.add(c['key'])
+    # Phase 2: Ensure each SIM type covered (if not already)
+    for sim in sim_types:
+        if not any(p['sim'] == sim for p in picked):
+            for c in all_combos:
+                if c['sim'] == sim and c['channel'] == primary_ch and c['key'] not in used_keys:
+                    picked.append(c); used_keys.add(c['key'])
+                    break
+
+    # Phase 3: Secondary channel — just 1 combo (different device than primary)
+    for ch in channels[1:]:
+        if len(picked) >= max_count: break
+        used_devs = [p['device'] for p in picked if p['channel'] == primary_ch]
+        for c in all_combos:
+            if c['channel'] == ch and c['key'] not in used_keys:
+                picked.append(c); used_keys.add(c['key'])
+                break
+
+    # Cap at max_count
+    picked = picked[:max_count]
+
+    # Assign network: most get 5G, last one gets 4G (if both selected)
+    has_4g = '4G' in [n for n in networks if '5G' not in n] if networks else False
+    has_5g = any('5G' in n for n in networks) if networks else False
+    for i, c in enumerate(picked):
+        if has_5g and has_4g:
+            c['network'] = '4G' if i == len(picked) - 1 else '5G'
+        elif has_5g:
+            c['network'] = '5G'
+        elif has_4g:
+            c['network'] = '4G'
+        else:
+            c['network'] = '/'.join(networks)
 
     # Renumber
     for i, c in enumerate(picked, 1):
