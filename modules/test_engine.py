@@ -12,6 +12,7 @@ from .chalk_parser import ChalkData, ChalkScenario
 from .doc_parser import ParsedDoc
 from .step_templates import get_step_chain
 from .instruction_parser import parse_instructions, apply_adjustments
+from .scenario_enricher import enrich_scenarios
 
 
 @dataclass
@@ -129,6 +130,12 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print):
 
     log('[ENGINE] Step 6: Preparing for expansion...')
     # Renumbering happens after matrix expansion (Step 9)
+
+    # Step 5b: Scenario Enrichment (universal gap filler)
+    log('[ENGINE] Step 5b: Scenario enrichment...')
+    enriched = enrich_scenarios(suite.test_cases, jira.key, _scenario_context_from_suite(suite), log)
+    if enriched:
+        suite.test_cases.extend(enriched)
 
     # Step 6b: Apply custom instruction extras
     if adjustments:
@@ -500,6 +507,11 @@ def _step_expected_result(step_text, sc):
     return 'Step completed successfully'
 
 
+def _scenario_context_from_suite(suite):
+    """Get feature context string from suite for enricher."""
+    return suite.feature_title + ' ' + ' '.join(tc.summary for tc in suite.test_cases[:5])
+
+
 def _format_validation_bullets(validation):
     """Convert validation text into bullet-point format."""
     parts = re.split(r'[.;]\s+', validation)
@@ -776,7 +788,7 @@ def _expand_by_matrix(suite, options, log=print, max_combos=4):
 
     # Smart reduction: if too many combos, pick representative subset
     # Rule: max 6 combos. Ensure each channel, device, SIM appears at least once.
-    MAX_COMBOS = max_combos if max_combos != 4 else 5  # 5 for smart mode (covers all 5 dimensions)
+    MAX_COMBOS = max_combos if max_combos != 4 else 6  # 6 for smart mode (covers all 5 dimensions + variety)
     if len(all_combos) > MAX_COMBOS:
         combos = _pick_representative_combos(all_combos, channels, devices, sim_types, networks, MAX_COMBOS)
         log('[ENGINE]   Reduced %d combos to %d representative' % (len(all_combos), len(combos)))
@@ -798,7 +810,9 @@ def _expand_by_matrix(suite, options, log=print, max_combos=4):
     DEVICE_KEYWORDS = ['esim', 'psim', 'sim type', 'sim card', 'iccid', 'imei',
                        'mobile device', 'tablet device', 'smartwatch', 'wearable',
                        'activate subscriber', 'swap mdn', 'change sim', 'change imei',
-                       'port-in', 'device type', 'product type']
+                       'port-in', 'port-out', 'portout', 'port out',
+                       'device type', 'product type',
+                       'hotline', 'suspend', 'reconnect', 'deactivat']
 
     # Keywords that indicate device-independent feature (should NOT expand)
     NO_EXPAND_KEYWORDS = ['report', 'batch', 'differential', 'file format',
