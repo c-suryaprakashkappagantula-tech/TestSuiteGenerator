@@ -24,6 +24,7 @@ from modules.doc_parser import parse_file
 from modules.test_engine import build_test_suite
 from modules.excel_generator import generate_excel
 from modules.theme_v2 import CSS
+from modules.transaction_log import log_generation, get_history
 
 if sys.platform.startswith('win'):
     try:
@@ -248,7 +249,7 @@ with left:
     st.markdown("</div>", unsafe_allow_html=True)
 
     # ── Action Buttons ──
-    bc1, bc2, bc3, bc4 = st.columns([1.5, 0.6, 0.6, 0.6])
+    bc1, bc2, bc3, bc4, bc5 = st.columns([1.5, 0.5, 0.5, 0.5, 0.5])
     with bc1:
         run_btn = st.button('Execute - Generate Test Suite', type='primary', use_container_width=True)
     with bc2:
@@ -256,6 +257,8 @@ with left:
     with bc3:
         reload_btn = st.button('Reload', use_container_width=True)
     with bc4:
+        history_btn = st.button('History', use_container_width=True)
+    with bc5:
         cp_btn = st.button('Checkpoints', use_container_width=True)
 
 # ────────────────────────────────────────────────────────────────
@@ -273,10 +276,14 @@ with right:
         cli_log.markdown("<div class='cli-box'><pre>%s</pre></div>" % escape(view), unsafe_allow_html=True)
 
     # ── Output Panel ──
+    st.markdown("<div id='output'></div>", unsafe_allow_html=True)
     st.markdown("<div class='sec-title'><span class='icon'>&#128230;</span> Output</div>", unsafe_allow_html=True)
     output_area = st.container()
 
     if ss.get('result_path') and Path(ss['result_path']).exists():
+        # Auto-scroll to output
+        st.markdown("<script>document.getElementById('output').scrollIntoView({behavior:'smooth'});</script>",
+                    unsafe_allow_html=True)
         with output_area:
             info = ss.get('suite_info', {})
             st.markdown("""<div class='stats-row'>
@@ -366,6 +373,23 @@ if cp_btn:
             st.sidebar.download_button(cp.name, data=cp.read_bytes(), file_name=cp.name, key=f'cp_{cp.stem}')
     else:
         st.sidebar.info('No checkpoints yet.')
+
+if history_btn:
+    hist = get_history()
+    st.sidebar.title('Generation History')
+    if hist:
+        for h in hist[:20]:
+            with st.sidebar.expander('%s | %s | %d TCs' % (h['timestamp'][:16], h['feature_id'], h['tc_count'])):
+                st.write('PI: %s' % h.get('pi', 'N/A'))
+                st.write('Strategy: %s' % h.get('strategy', 'N/A'))
+                st.write('Steps: %d' % h.get('step_count', 0))
+                st.write('Status: %s' % h.get('status', 'N/A'))
+                fp = Path(h.get('file_path', ''))
+                if fp.exists():
+                    st.download_button('Download', data=fp.read_bytes(), file_name=fp.name,
+                                       key='hist_%s' % h['timestamp'].replace(' ','_').replace(':',''))
+    else:
+        st.sidebar.info('No history yet.')
 
 if refresh_pi_btn:
     with st.spinner('Refreshing PI iterations from Chalk...'):
@@ -498,6 +522,11 @@ if run_btn:
                     'footer': 'Completed at %s | Duration: %dm %ds | PI: %s' % (
                         datetime.now().strftime('%Y-%m-%d %H:%M:%S'), m, s, ss['selected_pi']),
                 }
+
+                # Log transaction
+                log_generation(feature_id, ss['selected_pi'],
+                    len(suite.test_cases), total_steps, strategy, str(out_path))
+
                 st.rerun()
 
             except Exception as e:
@@ -513,6 +542,7 @@ if run_btn:
                     'footer': 'Failed at %s | Duration: %dm %ds' % (
                         datetime.now().strftime('%Y-%m-%d %H:%M:%S'), m, s),
                 }
+                log_generation(feature_id, ss.get('selected_pi',''), 0, 0, strategy, '', status='FAILED')
                 try: context.close()
                 except: pass
                 try: browser.close()

@@ -173,8 +173,14 @@ def discover_features_on_pi(page, pi_url: str, log=print) -> List[Tuple[str, str
                 seen[fid] = true;
                 var idx = line.toUpperCase().indexOf(fid);
                 var title = line.substring(idx + fid.length).replace(/^[\\s\\-:]+/, '').trim();
-                if (title.length < 5) title = line.replace(new RegExp(fid,'gi'), '').replace(/^[\\s\\-:]+/, '').trim();
-                if (title.length > 100) title = title.substring(0, 100) + '...';
+                // If title too short, grab next non-empty line as description
+                if (title.length < 10 && i + 1 < lines.length) {
+                    var nextLine = lines[i + 1].trim();
+                    if (nextLine && nextLine.length > 5 && !nextLine.match(/^\\d+\\t/) && !nextLine.match(/MWTGPROV/i)) {
+                        title = nextLine;
+                    }
+                }
+                if (title.length > 120) title = title.substring(0, 120) + '...';
                 result.push({id: fid, title: title});
             }
         }

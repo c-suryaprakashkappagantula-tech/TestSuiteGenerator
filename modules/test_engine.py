@@ -948,11 +948,14 @@ _GROUP_RULES = [
     ('Rollback',        ['rollback', 'restore']),
     ('Timeout',         ['timeout']),
     ('E2E',             ['end-to-end', 'e2e']),
+    ('eSIM-to-eSIM',    ['esim to esim', 'esim swap', 'transaction type: em', 'type: em']),
+    ('pSIM-to-pSIM',    ['psim to psim', 'psim swap', 'transaction type: sm', 'type: sm']),
+    ('pSIM-to-eSIM',    ['psim to esim', 'esim to psim', 'transaction type: am', 'type: am']),
     ('Integration',     ['mbo', 'syniverse', 'connection manager', 'kafka', 'apollo', 'upstream']),
     ('UI',              ['ui', 'menu', 'display']),
     ('Audit',           ['transaction history', 'audit trail']),
     ('Edge Cases',      ['handles', 'retry', 'multiple', 'ported', 'different', 'wearable', 'identical', 'add-on']),
-    ('Core',            ['successful', 'esim', 'psim', 'verify swap']),
+    ('Core',            ['successful', 'verify swap']),
     ('API',             ['api', 'change sim', 'change imei']),
 ]
 
@@ -993,7 +996,8 @@ def _auto_group_tcs(test_cases):
             final[gname] = gtcs
 
     # Sort groups: Core first, then alphabetical, General last
-    order = ['Core', 'UI', 'API', 'Integration', 'E2E', 'Edge Cases',
+    order = ['Core', 'eSIM-to-eSIM', 'pSIM-to-pSIM', 'pSIM-to-eSIM',
+             'UI', 'API', 'Integration', 'E2E', 'Edge Cases',
              'Negative', 'Rollback', 'Timeout', 'Audit', 'General']
     sorted_groups = {}
     for g in order:
