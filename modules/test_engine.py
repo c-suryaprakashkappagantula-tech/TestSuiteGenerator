@@ -940,54 +940,85 @@ def _pick_representative_combos(all_combos, channels, devices, sim_types, networ
 
 
 # ================================================================
-# AUTO-GROUPING: Detect patterns in TC titles, group into sheets
+# AUTO-GROUPING: Feature-aware sheet naming
 # ================================================================
 
-_GROUP_RULES = [
+# Generic rules (fallback for any feature)
+_GENERIC_GROUP_RULES = [
     ('Negative',        ['fail', 'reject', 'invalid', 'error', 'expires', 'not in active', 'not exist', 'unavailable']),
     ('Rollback',        ['rollback', 'restore']),
     ('Timeout',         ['timeout']),
     ('E2E',             ['end-to-end', 'e2e']),
-    ('eSIM-to-eSIM',    ['esim to esim', 'esim swap', 'transaction type: em', 'type: em']),
-    ('pSIM-to-pSIM',    ['psim to psim', 'psim swap', 'transaction type: sm', 'type: sm']),
-    ('pSIM-to-eSIM',    ['psim to esim', 'esim to psim', 'transaction type: am', 'type: am']),
     ('Integration',     ['mbo', 'syniverse', 'connection manager', 'kafka', 'apollo', 'upstream']),
     ('UI',              ['ui', 'menu', 'display']),
     ('Audit',           ['transaction history', 'audit trail']),
     ('Edge Cases',      ['handles', 'retry', 'multiple', 'ported', 'different', 'wearable', 'identical', 'add-on']),
-    ('Core',            ['successful', 'verify swap']),
     ('API',             ['api', 'change sim', 'change imei']),
 ]
 
-# Minimum TCs to justify a separate sheet
+# Feature-specific rules (checked FIRST before generic)
+_FEATURE_GROUP_RULES = {
+    'swap': [
+        ('eSIM-to-eSIM',    ['esim to esim', 'transaction type: em', 'type: em', '(em)']),
+        ('pSIM-to-pSIM',    ['psim to psim', 'transaction type: sm', 'type: sm', '(sm)']),
+        ('pSIM-eSIM',       ['psim to esim', 'esim to psim', 'transaction type: am', 'type: am', '(am)']),
+    ],
+    'activation': [
+        ('Phone-eSIM',      ['phone', 'mobile'] ),
+        ('Tablet',          ['tablet']),
+        ('Wearable',        ['wearable', 'smartwatch', 'watch']),
+    ],
+    'change feature': [
+        ('Feature-Add',     ['add feature', 'add optional', 'include', 'add nc_']),
+        ('Feature-Remove',  ['remove feature', 'remove optional', 'remove nc_']),
+        ('Feature-Reset',   ['reset feature', 'reset']),
+    ],
+    'change bcd': [
+        ('BCD-Update',      ['update', 'change bcd', 'dpfo', 'reset day']),
+        ('BCD-Validation',  ['verify', 'validate', 'check']),
+    ],
+    'notification': [
+        ('Suppress',        ['suppress', 'block', 'filter']),
+        ('Forward',         ['forward', 'send', 'trigger', 'notify']),
+    ],
+}
+
 _MIN_GROUP_SIZE = 2
-# If total TCs <= this, don't split into groups (single sheet is fine)
 _MAX_SINGLE_SHEET = 15
 
 
 def _auto_group_tcs(test_cases):
-    """Auto-detect groups from TC titles. Returns dict of group_name -> [TestCase]."""
+    """Auto-detect groups from TC titles. Feature-aware sheet naming."""
     if len(test_cases) <= _MAX_SINGLE_SHEET:
-        # Small suite — single group, no splitting
         return {'All': list(test_cases)}
 
-    groups = {}
-    assigned = set()
+    # Detect feature type from all TC titles
+    all_text = ' '.join(tc.summary.lower() for tc in test_cases)
+    feature_type = None
+    for ft in _FEATURE_GROUP_RULES:
+        if ft in all_text:
+            feature_type = ft
+            break
 
+    # Build combined rules: feature-specific FIRST, then generic
+    rules = []
+    if feature_type and feature_type in _FEATURE_GROUP_RULES:
+        rules.extend(_FEATURE_GROUP_RULES[feature_type])
+    rules.extend(_GENERIC_GROUP_RULES)
+
+    groups = {}
     for tc in test_cases:
         tl = tc.summary.lower() + ' ' + tc.description.lower()
         matched = False
-        for group_name, keywords in _GROUP_RULES:
+        for group_name, keywords in rules:
             if any(kw in tl for kw in keywords):
                 groups.setdefault(group_name, []).append(tc)
-                assigned.add(tc.sno)
                 matched = True
                 break
         if not matched:
             groups.setdefault('General', []).append(tc)
-            assigned.add(tc.sno)
 
-    # Merge tiny groups (< _MIN_GROUP_SIZE) into 'General'
+    # Merge tiny groups into General
     final = {}
     for gname, gtcs in groups.items():
         if len(gtcs) < _MIN_GROUP_SIZE and gname != 'General':
@@ -995,10 +1026,13 @@ def _auto_group_tcs(test_cases):
         else:
             final[gname] = gtcs
 
-    # Sort groups: Core first, then alphabetical, General last
-    order = ['Core', 'eSIM-to-eSIM', 'pSIM-to-pSIM', 'pSIM-to-eSIM',
-             'UI', 'API', 'Integration', 'E2E', 'Edge Cases',
-             'Negative', 'Rollback', 'Timeout', 'Audit', 'General']
+    # Sort: feature-specific first, then generic, General last
+    order = []
+    if feature_type and feature_type in _FEATURE_GROUP_RULES:
+        order.extend([r[0] for r in _FEATURE_GROUP_RULES[feature_type]])
+    order.extend(['Core', 'UI', 'API', 'Integration', 'E2E', 'Edge Cases',
+                  'Negative', 'Rollback', 'Timeout', 'Audit', 'General'])
+
     sorted_groups = {}
     for g in order:
         if g in final:
