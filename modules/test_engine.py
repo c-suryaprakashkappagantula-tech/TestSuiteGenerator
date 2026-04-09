@@ -10,6 +10,7 @@ from typing import List, Dict, Optional, Tuple
 from .jira_fetcher import JiraIssue
 from .chalk_parser import ChalkData, ChalkScenario
 from .doc_parser import ParsedDoc
+from .step_templates import get_step_chain
 
 
 @dataclass
@@ -324,52 +325,20 @@ def _chalk_scenario_to_tc(sc, idx, feature_id):
 
     # Fallback if no steps at all (numbered format scenarios land here)
     if not steps:
-        # Build meaningful steps from title + validation for numbered format scenarios
+        # Use domain-specific step templates
         context = _scenario_context(sc)
-        title_low = sc.title.lower()
+        chain = get_step_chain(sc.title, sc.validation, context)
+        for i, (step_sum, step_exp) in enumerate(chain, 1):
+            steps.append(TestStep(i, step_sum, step_exp))
 
-        # Step 1: Setup/Precondition
-        if 'active' in title_low or 'line' in title_low or 'subscriber' in title_low:
-            steps.append(TestStep(1, 'Ensure TMO subscriber line is active and in ready state',
-                                  'Subscriber line active in TMO'))
-        elif 'api' in title_low or 'http' in title_low:
-            steps.append(TestStep(1, 'Prepare API request with valid parameters as per scenario',
-                                  'API request prepared with correct payload'))
-        elif 'ui' in title_low or 'menu' in title_low or 'display' in title_low:
-            steps.append(TestStep(1, 'Login to NBOP portal and navigate to the relevant section',
-                                  'Portal loaded and user authenticated'))
-        else:
-            steps.append(TestStep(1, 'Set up preconditions as per scenario requirements',
-                                  'Preconditions met'))
-
-        # Step 2: Execute action from title
-        steps.append(TestStep(2, sc.title, _step_expected_result(sc.title, sc)))
-
-        # Step 3+: Break validation into multiple verify steps
-        if sc.validation:
-            val_parts = [p.strip() for p in re.split(r'[.;]\s+', sc.validation) if p.strip() and len(p.strip()) > 10]
+        # Extra: if validation has multiple sentences, add individual verify steps
+        if sc.validation and len(steps) < 6:
+            val_parts = [p.strip() for p in re.split(r'[.;]\s+', sc.validation) if p.strip() and len(p.strip()) > 15]
             if len(val_parts) >= 2:
-                for vi, vp in enumerate(val_parts):
-                    steps.append(TestStep(3 + vi, 'Verify: %s' % vp, vp))
-            else:
-                steps.append(TestStep(3,
-                    'Verify expected results:\n- %s' % sc.validation.replace('. ', '\n- '),
-                    sc.validation))
-        else:
-            steps.append(TestStep(3, 'Verify results match expected behavior',
-                                  'Scenario completed successfully'))
-
-        # Extra: API response validation step
-        if ('api' in title_low or 'http' in title_low) and len(steps) < 5:
-            steps.append(TestStep(len(steps) + 1,
-                'Validate API response code and payload structure',
-                'Response matches expected schema and status code'))
-
-        # Extra: Upstream system verification step
-        if any(kw in title_low for kw in ['mbo', 'syniverse', 'apollo', 'upstream', 'kafka']) and len(steps) < 6:
-            steps.append(TestStep(len(steps) + 1,
-                'Verify upstream system received correct data',
-                'Upstream system updated with expected values'))
+                for vp in val_parts:
+                    # Don't duplicate if already in a step
+                    if not any(vp.lower()[:30] in s.expected.lower() for s in steps):
+                        steps.append(TestStep(len(steps)+1, 'Verify: %s' % vp, vp))
 
     return TestCase(
         sno=str(idx),
@@ -731,19 +700,28 @@ def _expand_by_matrix(suite, options, log=print):
     networks = options.get('networks', ['4G', '5G'])
     sim_types = options.get('sim_types', ['eSIM', 'pSIM'])
 
-    # Build combinations
-    combos = []
+    # Build combinations — SMART: pick representative combos, not full cartesian
+    all_combos = []
     combo_id = 1
     for ch in channels:
         for sim in sim_types:
             for dev in devices:
-                combos.append({
+                all_combos.append({
                     'id': 'CMB-%03d' % combo_id,
                     'channel': ch, 'sim': sim, 'device': dev,
                     'network': '/'.join(networks),
                     'key': '%s|%s|%s' % (ch, sim, dev),
                 })
                 combo_id += 1
+
+    # Smart reduction: if too many combos, pick representative subset
+    # Rule: max 6 combos. Ensure each channel, device, SIM appears at least once.
+    MAX_COMBOS = 6
+    if len(all_combos) > MAX_COMBOS:
+        combos = _pick_representative_combos(all_combos, channels, devices, sim_types, networks, MAX_COMBOS)
+        log('[ENGINE]   Reduced %d combos to %d representative' % (len(all_combos), len(combos)))
+    else:
+        combos = all_combos
 
     if len(combos) <= 1:
         suite.combinations = combos
@@ -822,6 +800,48 @@ def _expand_by_matrix(suite, options, log=print):
     # Add non-expandable TCs at the end (negative scenarios)
     expanded.extend(non_expandable)
     return expanded
+
+
+def _pick_representative_combos(all_combos, channels, devices, sim_types, networks, max_count):
+    """Pick representative subset ensuring each value appears at least once.
+    Prioritizes: all devices, all SIM types, primary channel. Limits 4G-only combos."""
+    picked = []
+    used_keys = set()
+
+    # Phase 1: Ensure each device + SIM type covered (primary channel)
+    primary_ch = channels[0]
+    for dev in devices:
+        for sim in sim_types:
+            for c in all_combos:
+                if c['device'] == dev and c['sim'] == sim and c['channel'] == primary_ch:
+                    if c['key'] not in used_keys:
+                        picked.append(c)
+                        used_keys.add(c['key'])
+                    break
+
+    # Phase 2: Add at least one combo per secondary channel
+    for ch in channels[1:]:
+        if len(picked) >= max_count:
+            break
+        for c in all_combos:
+            if c['channel'] == ch and c['key'] not in used_keys:
+                picked.append(c)
+                used_keys.add(c['key'])
+                break
+
+    # Phase 3: Fill remaining slots with variety
+    for c in all_combos:
+        if len(picked) >= max_count:
+            break
+        if c['key'] not in used_keys:
+            picked.append(c)
+            used_keys.add(c['key'])
+
+    # Renumber
+    for i, c in enumerate(picked, 1):
+        c['id'] = 'CMB-%03d' % i
+
+    return picked
 
 
 # ================================================================
