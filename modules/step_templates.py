@@ -39,7 +39,7 @@ def get_step_chain(sc_title, sc_validation, feature_context):
     if _is_api_flow(t, ctx):
         return _api_flow_steps(sc_title, sc_validation)
     if _is_deactivation(t, ctx):
-        return _deactivation_steps(sc_title, sc_validation)
+        return _deactivation_steps(sc_title, sc_validation, t)
 
     return _default_workflow_steps(sc_title, sc_validation)
 
@@ -149,107 +149,114 @@ def _swap_mdn_steps(title, validation, t):
 
 
 def _activation_steps(title, validation, t):
-    """Activation: V6 pipeline - Validate Device → Activate → Century → Validate."""
+    """Activation: V6 pipeline - 7 steps with Comprehensive + NBOP MIG."""
     val = validation or title
-    return [
-        ('Obtain OAuth Token for API authentication',
-         'OAuth token generated successfully'),
-        ('Trigger Validate Device API with IMEI',
-         'Device validated successfully. Equipment type and compatibility confirmed'),
-        ('Trigger Activate Subscriber API with device and SIM details',
+    steps = [
+        ('Step 1: Validate Device IMEI via API',
+         'Device validated. Equipment type and compatibility confirmed'),
+        ('Step 2: Trigger Activate Subscriber API (eSIM/pSIM) with device and SIM details',
          'NSL acknowledges activation with 200 OK. Transaction ID generated'),
-        ('Verify NSL sends activation request to TMO via APOLLO_NE',
+        ('Step 3: Verify NSL sends activation request to TMO via APOLLO_NE',
          'TMO processes activation. Line status changes to Active'),
-        ('Download Century Report (Service Grouping)',
-         'Century Report downloaded. SERVICE_GROUPING HTML available'),
-        ('Validate Service Grouping: verify line status, features, device details',
-         'Service Grouping shows correct activation state'),
-        ('Verify NBOP MIG tables (Feature, Device, SIM, Line, Transaction History)',
-         'All NBOP tables populated with correct activation data'),
-        ('Verify in TMO Genesis Portal: subscriber line is active',
+        ('Step 4: Download Century Report (Service Grouping + NBOP Tables)',
+         'Century Report downloaded. SERVICE_GROUPING HTML and NBOP tables available'),
+        ('Step 4b: Verify NE Portal transactions (APOLLO-NE outbound calls)',
+         'NE Portal shows activation transaction completed'),
+        ('Step 5: Analyze and Validate Service Grouping HTML',
+         'Service Grouping shows correct line status, features, device/SIM details'),
+        ('Step 5b: Run Comprehensive Validation (12-layer)',
+         'Comprehensive validation PASS. All 12 layers verified'),
+        ('Step 6: Validate NBOP MIG Tables (Feature, Device, SIM, Line, Transaction History, Events)',
+         'All NBOP MIG tables populated with correct activation data'),
+        ('Step 7: Verify in TMO Genesis Portal: subscriber line is active',
          val),
     ]
+    return steps
 
 
 def _change_sim_steps(title, validation, t):
-    """Change SIM: V6 pipeline."""
+    """Change SIM: V6 pipeline - 4 steps + NE Portal + Validate SG."""
     val = validation or title
     return [
-        ('Obtain OAuth Token',
-         'Token generated'),
-        ('Trigger Change SIM API with new ICCID and MDN',
-         'NSL accepts Change SIM request with 200 OK'),
-        ('Verify NSL sends Change SIM to APOLLO_NE/TMO',
-         'TMO processes SIM change. New ICCID associated with MDN'),
-        ('Download Century Report (Service Grouping)',
-         'SERVICE_GROUPING HTML downloaded'),
-        ('Verify NE Portal transactions',
+        ('Step 1: Obtain OAuth Token',
+         'OAuth token generated successfully'),
+        ('Step 2: Trigger Change SIM API with new ICCID and MDN',
+         'NSL accepts Change SIM request with 200 OK. Transaction ID generated'),
+        ('Step 3: Download Century Report (Service Grouping)',
+         'SERVICE_GROUPING HTML downloaded with Change SIM transaction'),
+        ('Step 3b: Verify NE Portal transactions (APOLLO-NE outbound calls)',
          'NE Portal shows Change SIM transaction completed'),
-        ('Validate Service Grouping: verify new ICCID, IMSI updated',
+        ('Step 4: Validate Service Grouping: verify new ICCID, IMSI updated',
          val),
-        ('Check audit logs (TRANSACTION_HISTORY & LINE_HISTORY)',
-         'Transaction recorded with correct details'),
+        ('Verify audit logs (TRANSACTION_HISTORY & LINE_HISTORY)',
+         'Transaction recorded with correct Change SIM details'),
     ]
 
 
 def _change_bcd_steps(title, validation, t):
-    """Change BCD: V6 pipeline - from sample 3948."""
+    """Change BCD: V6 pipeline + sample 3948 (9 steps)."""
     val = validation or title
     return [
-        ('Initiate Change BCD transaction',
+        ('Step 1: Obtain OAuth Token',
+         'OAuth token generated successfully'),
+        ('Step 2: Initiate Change BCD transaction with requestType = TMO',
          'NSL accepts and processes Change BCD with Response 200'),
-        ('Verify request routed with requestType = TMO',
-         'Request routed to TMO correctly'),
-        ('Verify NSL fetches line/feature information from DB',
+        ('Step 3: Verify NSL fetches line/feature information from DB',
          'Correct DB details retrieved and outbound request prepared'),
-        ('Verify NSL updates BCD for applicable features',
+        ('Step 4: Verify NSL updates BCD for applicable features',
          'Updated BCD sent for eligible features only'),
-        ('Verify downstream updates complete (NSL DB, Mediation, IT-MBO)',
-         'NSL DB, Mediation, IT-MBO updated'),
-        ('Check Genesis Portal for new BCD',
+        ('Step 5: Download Century Report (Service Grouping)',
+         'SERVICE_GROUPING HTML downloaded'),
+        ('Step 5b: Verify NE Portal transactions',
+         'NE Portal shows Change BCD transaction completed'),
+        ('Step 6: Verify downstream updates complete (NSL DB, Mediation, IT-MBO)',
+         'NSL DB, Mediation, IT-MBO updated with new BCD'),
+        ('Step 7: Check Genesis Portal for new BCD',
          'New BCD reflected in TMO Genesis'),
-        ('Check audit logs (TRANSACTION_HISTORY & LINE_HISTORY)',
+        ('Step 8: Check audit logs (TRANSACTION_HISTORY & LINE_HISTORY)',
          'Transaction recorded correctly'),
-        ('Check events/DPFO notifications',
+        ('Step 9: Check events/DPFO notifications triggered for new BCD date',
          val),
     ]
 
 
 def _change_rateplan_steps(title, validation, t):
-    """Change Rateplan: V6 pipeline."""
+    """Change Rateplan: V6 pipeline - 4 steps + NE Portal + Validate."""
     val = validation or title
     return [
-        ('Obtain OAuth Token',
-         'Token generated'),
-        ('Trigger Change Rateplan API with new plan code',
-         'NSL accepts Change Rateplan with 200 OK'),
-        ('Verify NSL sends rateplan change to APOLLO_NE/TMO',
-         'TMO processes rateplan change'),
-        ('Download Century Report (Service Grouping)',
+        ('Step 1: Obtain OAuth Token',
+         'OAuth token generated successfully'),
+        ('Step 2: Trigger Change Rateplan API with new plan code',
+         'NSL accepts Change Rateplan with 200 OK. Transaction ID generated'),
+        ('Step 3: Download Century Report (Service Grouping)',
          'SERVICE_GROUPING HTML downloaded'),
-        ('Verify NE Portal transactions',
+        ('Step 3b: Verify NE Portal transactions',
          'NE Portal shows rateplan change completed'),
-        ('Validate Service Grouping: verify new plan code and features',
+        ('Step 4: Validate Service Grouping: verify new plan code and features updated',
          val),
-        ('Check audit logs',
+        ('Verify features added/removed per new plan (mandatory + optional)',
+         'Feature set matches new rateplan configuration'),
+        ('Check audit logs (TRANSACTION_HISTORY & LINE_HISTORY)',
          'Transaction recorded correctly'),
     ]
 
 
 def _change_feature_steps(title, validation, t):
-    """Change Feature: V6 pipeline."""
+    """Change Feature: V6 pipeline - 3 steps + NE Portal."""
     val = validation or title
     return [
-        ('Obtain OAuth Token',
-         'Token generated'),
-        ('Trigger Change Feature API (add/remove/reset)',
-         'NSL accepts Change Feature with 200 OK'),
-        ('Verify NSL sends feature change to APOLLO_NE/TMO',
-         'TMO processes feature change'),
-        ('Download Century Report (Service Grouping)',
+        ('Step 1: Obtain OAuth Token',
+         'OAuth token generated successfully'),
+        ('Step 2: Trigger Change Feature API (add/remove/reset) with feature code',
+         'NSL accepts Change Feature with 200 OK. Transaction ID generated'),
+        ('Step 3: Download Century Report (Service Grouping)',
          'SERVICE_GROUPING HTML downloaded'),
-        ('Validate Service Grouping: verify feature added/removed correctly',
+        ('Step 3b: Verify NE Portal transactions',
+         'NE Portal shows feature change completed'),
+        ('Step 4: Validate Service Grouping: verify feature added/removed correctly',
          val),
+        ('Verify feature compatibility rules enforced (non-compatible features blocked)',
+         'Feature compatibility validated per business rules'),
     ]
 
 
@@ -257,16 +264,18 @@ def _deactivation_steps(title, validation, t):
     """Deactivation: V6 pipeline."""
     val = validation or title
     return [
-        ('Trigger Deactivation API with MDN and Line ID',
-         'NSL accepts deactivation request'),
-        ('Verify NSL sends deactivation to TMO via APOLLO_NE',
+        ('Step 1: Trigger Deactivation API with MDN, Line ID, and agent details',
+         'NSL accepts deactivation request with 200 OK'),
+        ('Step 2: Verify NSL sends deactivation to TMO via APOLLO_NE',
          'TMO processes deactivation. Line status changes to Deactivated'),
-        ('Download Century Report (Service Grouping)',
-         'SERVICE_GROUPING HTML downloaded'),
-        ('Validate Service Grouping: verify line status = Deactivated',
+        ('Step 3: Download Century Report (Service Grouping)',
+         'SERVICE_GROUPING HTML downloaded with deactivation transaction'),
+        ('Step 4: Validate Service Grouping: verify line status = Deactivated',
+         'Service Grouping shows Deactivated status'),
+        ('Verify agent details and deactivation reason captured correctly',
          val),
-        ('Verify agent details and deactivation reason captured',
-         'Agent details and reason recorded correctly'),
+        ('Verify NBOP reflects deactivated line',
+         'NBOP shows line as deactivated'),
     ]
 
 
@@ -383,17 +392,19 @@ def _rollback_steps(title, validation, t):
 
 
 def _default_workflow_steps(title, validation):
-    """Default: generic but still follows NSL pattern."""
+    """Default: follows standard NSL workflow pattern from V6."""
     val = validation or title
     return [
-        ('Set up preconditions and prepare request as per scenario',
-         'Preconditions met. Request prepared'),
-        ('Execute the operation/API call',
-         'System processes request successfully'),
-        ('Verify expected output and system state',
+        ('Step 1: Obtain OAuth Token',
+         'OAuth token generated successfully'),
+        ('Step 2: Execute the operation/API call as per scenario',
+         'NSL processes request with 200 OK. Transaction ID generated'),
+        ('Step 3: Download Century Report (Service Grouping)',
+         'SERVICE_GROUPING HTML downloaded'),
+        ('Step 3b: Verify NE Portal transactions',
+         'NE Portal shows transaction completed'),
+        ('Step 4: Validate Service Grouping',
          val),
-        ('Verify downstream systems updated correctly',
-         'All dependent systems reflect the change'),
-        ('Check audit logs and transaction history',
+        ('Check audit logs (TRANSACTION_HISTORY & LINE_HISTORY)',
          'Transaction recorded correctly'),
     ]
