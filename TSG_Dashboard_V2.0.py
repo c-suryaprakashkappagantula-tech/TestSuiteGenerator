@@ -64,7 +64,8 @@ defaults = {
     'pi_list': list(_DEFAULT_PIS),
     'selected_pi': None,
     'selected_pi_url': '',
-    'pi_features': [],
+    'all_pi_features': {},       # {PI_label: [(fid, title), ...]} — cached for ALL PIs
+    'pi_features': [],           # current PI's features (filtered from cache)
     'feature_mode': 'dropdown',
     'logs': [],
     'result_path': None,
@@ -111,9 +112,15 @@ with left:
             is_selected = ss['selected_pi'] == label
             btn_type = 'primary' if is_selected else 'secondary'
             if st.button(label, key=f'pi_{label}', type=btn_type, use_container_width=True):
-                ss['selected_pi'] = label
-                ss['selected_pi_url'] = url
-                ss['pi_features'] = []
+                if ss['selected_pi'] == label:
+                    ss['selected_pi'] = None
+                    ss['selected_pi_url'] = ''
+                    ss['pi_features'] = []
+                else:
+                    ss['selected_pi'] = label
+                    ss['selected_pi_url'] = url
+                    # Use cache if available
+                    ss['pi_features'] = ss.get('all_pi_features', {}).get(label, [])
                 st.rerun()
 
     rc1, rc2 = st.columns([3, 1])
@@ -132,25 +139,34 @@ with left:
     st.markdown("<div class='glass'>", unsafe_allow_html=True)
 
     if ss['selected_pi'] and not ss['pi_features']:
-        if st.button('Fetch Available Features from %s' % ss['selected_pi'], key='fetch_feats', use_container_width=True):
-            with st.spinner('Scanning %s for features...' % ss['selected_pi']):
-                try:
-                    _pw = sync_playwright().start()
-                    _br = _pw.chromium.launch(headless=True, channel=BROWSER_CHANNEL)
-                    _cx = _br.new_context(viewport={'width': 1920, 'height': 1080})
-                    _pg = _cx.new_page()
-                    _feats = discover_features_on_pi(_pg, ss['selected_pi_url'], log=lambda m: None)
-                    ss['pi_features'] = _feats
-                    _cx.close(); _br.close(); _pw.stop()
-                    st.rerun()
-                except Exception as _e:
-                    st.error('Failed: %s' % _e)
-                    try: _cx.close()
-                    except: pass
-                    try: _br.close()
-                    except: pass
-                    try: _pw.stop()
-                    except: pass
+        # Check cache first
+        if ss['selected_pi'] in ss.get('all_pi_features', {}):
+            ss['pi_features'] = ss['all_pi_features'][ss['selected_pi']]
+            st.rerun()
+        else:
+            if st.button('Fetch Features from %s' % ss['selected_pi'], key='fetch_feats', use_container_width=True):
+                with st.spinner('Scanning %s...' % ss['selected_pi']):
+                    try:
+                        _pw = sync_playwright().start()
+                        _br = _pw.chromium.launch(headless=True, channel=BROWSER_CHANNEL)
+                        _cx = _br.new_context(viewport={'width': 1920, 'height': 1080})
+                        _pg = _cx.new_page()
+                        _feats = discover_features_on_pi(_pg, ss['selected_pi_url'], log=lambda m: None)
+                        ss['pi_features'] = _feats
+                        # Cache it
+                        if 'all_pi_features' not in ss:
+                            ss['all_pi_features'] = {}
+                        ss['all_pi_features'][ss['selected_pi']] = _feats
+                        _cx.close(); _br.close(); _pw.stop()
+                        st.rerun()
+                    except Exception as _e:
+                        st.error('Failed: %s' % _e)
+                        try: _cx.close()
+                        except: pass
+                        try: _br.close()
+                        except: pass
+                        try: _pw.stop()
+                        except: pass
 
     fc1, fc2 = st.columns([5, 1])
     with fc2:
@@ -364,7 +380,8 @@ if reload_btn:
     st.cache_data.clear()
     for k in defaults:
         ss[k] = defaults[k]
-    st.toast('Modules reloaded!')
+    ss['all_pi_features'] = {}  # clear feature cache
+    st.toast('Modules reloaded! Feature cache cleared.')
     st.rerun()
 
 if cp_btn:

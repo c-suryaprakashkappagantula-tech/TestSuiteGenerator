@@ -147,15 +147,24 @@ EXTRACT_TABLES_JS = """() => {
 
 
 def discover_features_on_pi(page, pi_url: str, log=print) -> List[Tuple[str, str]]:
-    """Navigate to a PI page and extract all MWTGPROV-XXXX feature IDs with titles.
-    Returns list of (feature_id, title) tuples."""
-    log('[CHALK] Navigating to PI page (fast mode)...')
-    page.goto(pi_url, timeout=PAGE_LOAD_TIMEOUT_MS, wait_until='commit')
-    try: page.wait_for_load_state('domcontentloaded', timeout=15000)
+    """Navigate to a PI page and extract all MWTGPROV-XXXX feature IDs with titles."""
+    log('[CHALK] Navigating to PI page...')
+    page.goto(pi_url, timeout=PAGE_LOAD_TIMEOUT_MS, wait_until='domcontentloaded')
+    try: page.wait_for_load_state('networkidle', timeout=20000)
     except: pass
-    time.sleep(3)
+    time.sleep(5)  # let heavy Chalk pages fully render
 
-    log('[CHALK] Scanning for features (single JS pass)...')
+    # Try to expand any collapsed sections/tabs
+    try:
+        page.evaluate("""() => {
+            document.querySelectorAll('[aria-expanded="false"]').forEach(function(el) {
+                try { el.click(); } catch(e) {}
+            });
+        }""")
+        time.sleep(1)
+    except: pass
+
+    log('[CHALK] Scanning for features...')
     features = page.evaluate("""() => {
         var root = document.querySelector('#main-content, .wiki-content, article');
         if (!root) root = document.body;
@@ -173,11 +182,18 @@ def discover_features_on_pi(page, pi_url: str, log=print) -> List[Tuple[str, str
                 seen[fid] = true;
                 var idx = line.toUpperCase().indexOf(fid);
                 var title = line.substring(idx + fid.length).replace(/^[\\s\\-:]+/, '').trim();
-                // If title too short, grab next non-empty line as description
-                if (title.length < 10 && i + 1 < lines.length) {
-                    var nextLine = lines[i + 1].trim();
-                    if (nextLine && nextLine.length > 5 && !nextLine.match(/^\\d+\\t/) && !nextLine.match(/MWTGPROV/i)) {
-                        title = nextLine;
+                // If title too short, search next 3 non-empty lines for description
+                if (title.length < 10) {
+                    for (var k = 1; k <= 3 && i + k < lines.length; k++) {
+                        var nextLine = lines[i + k].trim();
+                        if (nextLine && nextLine.length > 5
+                            && !nextLine.match(/^\\d+\\t/)
+                            && !nextLine.match(/MWTGPROV/i)
+                            && !nextLine.match(/^SNO/i)
+                            && !nextLine.match(/^Scenario/i)) {
+                            title = nextLine;
+                            break;
+                        }
                     }
                 }
                 if (title.length > 120) title = title.substring(0, 120) + '...';
