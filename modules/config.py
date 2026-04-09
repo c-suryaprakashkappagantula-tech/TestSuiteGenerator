@@ -31,6 +31,7 @@ CHANNELS = ['ITMBO', 'NBOP']
 DEVICE_TYPES = ['Mobile', 'Tablet', 'Smartwatch']
 NETWORK_TYPES = ['4G', '5G']
 SIM_TYPES = ['eSIM', 'pSIM']
+OS_PLATFORMS = ['iOS', 'Android']
 
 EXCEL_HEADERS = ['S.No', 'Summary', 'Description', 'Preconditions',
                  'Step #', 'Step Summary', 'Expected Result',

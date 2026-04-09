@@ -67,6 +67,14 @@ def parse_instructions(text, options, log=print):
         adjustments['filter_networks'] = ['4G']
         log('[CUSTOM]   Filter: 4G only')
 
+    # ── OS/Platform filters ──
+    if 'ios only' in t or 'only ios' in t or 'skip android' in t or 'no android' in t:
+        adjustments['filter_os'] = ['iOS']
+        log('[CUSTOM]   Filter: iOS only')
+    if 'android only' in t or 'only android' in t or 'skip ios' in t or 'no ios' in t:
+        adjustments['filter_os'] = ['Android']
+        log('[CUSTOM]   Filter: Android only')
+
     # ── Channel filters ──
     if 'only nbop' in t or 'nbop only' in t or 'skip itmbo' in t:
         adjustments['filter_channels'] = ['NBOP']
@@ -145,5 +153,7 @@ def apply_adjustments(options, adjustments):
         opts['channel'] = adjustments['filter_channels']
     if adjustments.get('filter_networks'):
         opts['networks'] = adjustments['filter_networks']
+    if adjustments.get('filter_os'):
+        opts['os_platforms'] = adjustments['filter_os']
 
     return opts

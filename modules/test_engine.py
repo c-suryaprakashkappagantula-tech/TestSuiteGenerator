@@ -756,6 +756,7 @@ def _expand_by_matrix(suite, options, log=print, max_combos=4):
     devices = options.get('devices', ['Mobile'])
     networks = options.get('networks', ['4G', '5G'])
     sim_types = options.get('sim_types', ['eSIM', 'pSIM'])
+    os_platforms = options.get('os_platforms', ['iOS', 'Android'])
 
     # Build combinations — SMART: pick representative combos, not full cartesian
     all_combos = []
@@ -763,17 +764,19 @@ def _expand_by_matrix(suite, options, log=print, max_combos=4):
     for ch in channels:
         for sim in sim_types:
             for dev in devices:
-                all_combos.append({
-                    'id': 'CMB-%03d' % combo_id,
-                    'channel': ch, 'sim': sim, 'device': dev,
-                    'network': '/'.join(networks),
-                    'key': '%s|%s|%s' % (ch, sim, dev),
-                })
-                combo_id += 1
+                for os_p in os_platforms:
+                    all_combos.append({
+                        'id': 'CMB-%03d' % combo_id,
+                        'channel': ch, 'sim': sim, 'device': dev,
+                        'os': os_p,
+                        'network': '/'.join(networks),
+                        'key': '%s|%s|%s|%s' % (ch, sim, dev, os_p),
+                    })
+                    combo_id += 1
 
     # Smart reduction: if too many combos, pick representative subset
     # Rule: max 6 combos. Ensure each channel, device, SIM appears at least once.
-    MAX_COMBOS = max_combos
+    MAX_COMBOS = max_combos if max_combos != 4 else 5  # 5 for smart mode (covers all 5 dimensions)
     if len(all_combos) > MAX_COMBOS:
         combos = _pick_representative_combos(all_combos, channels, devices, sim_types, networks, MAX_COMBOS)
         log('[ENGINE]   Reduced %d combos to %d representative' % (len(all_combos), len(combos)))
@@ -838,14 +841,14 @@ def _expand_by_matrix(suite, options, log=print, max_combos=4):
         for combo in combos:
             new_tc = TestCase(
                 sno='',  # renumbered later
-                summary='%s_%s_%s(%s)' % (
-                    tc.summary, combo['device'], combo['sim'], combo['network']),
-                description='%s\nChannel: %s | Device: %s | SIM: %s | Network: %s' % (
+                summary='%s_%s_%s_%s(%s)' % (
+                    tc.summary, combo['device'], combo['os'], combo['sim'], combo['network']),
+                description='%s\nChannel: %s | Device: %s | OS: %s | SIM: %s | Network: %s' % (
                     tc.description, combo['channel'], combo['device'],
-                    combo['sim'], combo['network']),
-                preconditions='%s\n%d.\tDevice: %s - %s\n%d.\tNetwork: %s' % (
+                    combo['os'], combo['sim'], combo['network']),
+                preconditions='%s\n%d.\tDevice: %s - %s - %s\n%d.\tNetwork: %s' % (
                     tc.preconditions,
-                    tc.preconditions.count('\n') + 2, combo['device'], combo['sim'],
+                    tc.preconditions.count('\n') + 2, combo['device'], combo['os'], combo['sim'],
                     tc.preconditions.count('\n') + 3, combo['network']),
                 steps=list(tc.steps),  # same steps
                 story_linkage=tc.story_linkage,
@@ -860,29 +863,23 @@ def _expand_by_matrix(suite, options, log=print, max_combos=4):
 
 
 def _pick_representative_combos(all_combos, channels, devices, sim_types, networks, max_count):
-    """Pick lean representative subset.
-    Rules:
-    - Primary channel gets most coverage
-    - Secondary channel gets 1-2 combos only
-    - Each device type appears at least once
-    - Each SIM type appears at least once
-    - 4G-only combos limited to 1 max
-    - 5G preferred over 4G
-    """
+    """Pick lean representative subset ensuring each dimension covered."""
     picked = []
     used_keys = set()
     primary_ch = channels[0]
+    os_list = list(set(c.get('os', 'iOS') for c in all_combos))
 
-    # Phase 1: Primary channel — one combo per device (alternate SIM types)
+    # Phase 1: Primary channel - one combo per device, alternate SIM + OS
     for di, dev in enumerate(devices):
-        sim = sim_types[di % len(sim_types)]  # alternate eSIM/pSIM
+        sim = sim_types[di % len(sim_types)]
+        os_p = os_list[di % len(os_list)] if os_list else 'iOS'
         for c in all_combos:
-            if c['device'] == dev and c['sim'] == sim and c['channel'] == primary_ch:
+            if c['device'] == dev and c['sim'] == sim and c.get('os') == os_p and c['channel'] == primary_ch:
                 if c['key'] not in used_keys:
                     picked.append(c); used_keys.add(c['key'])
                 break
 
-    # Phase 2: Ensure each SIM type covered (if not already)
+    # Phase 2: Ensure each SIM type covered
     for sim in sim_types:
         if not any(p['sim'] == sim for p in picked):
             for c in all_combos:
@@ -890,10 +887,17 @@ def _pick_representative_combos(all_combos, channels, devices, sim_types, networ
                     picked.append(c); used_keys.add(c['key'])
                     break
 
-    # Phase 3: Secondary channel — just 1 combo (different device than primary)
+    # Phase 3: Ensure each OS covered
+    for os_p in os_list:
+        if not any(p.get('os') == os_p for p in picked):
+            for c in all_combos:
+                if c.get('os') == os_p and c['channel'] == primary_ch and c['key'] not in used_keys:
+                    picked.append(c); used_keys.add(c['key'])
+                    break
+
+    # Phase 4: Secondary channel - just 1 combo
     for ch in channels[1:]:
         if len(picked) >= max_count: break
-        used_devs = [p['device'] for p in picked if p['channel'] == primary_ch]
         for c in all_combos:
             if c['channel'] == ch and c['key'] not in used_keys:
                 picked.append(c); used_keys.add(c['key'])

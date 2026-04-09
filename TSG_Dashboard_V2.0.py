@@ -16,7 +16,7 @@ import streamlit as st
 from playwright.sync_api import sync_playwright
 
 from modules.config import (ROOT, OUTPUTS, CHECKPOINTS, ATTACHMENTS, INPUTS,
-                             CHANNELS, DEVICE_TYPES, NETWORK_TYPES, SIM_TYPES,
+                             CHANNELS, DEVICE_TYPES, NETWORK_TYPES, SIM_TYPES, OS_PLATFORMS,
                              BROWSER_CHANNEL, BROWSER_HEADLESS, ts_short, EXCEL_HEADERS)
 from modules.jira_fetcher import fetch_jira_issue, download_attachments
 from modules.chalk_parser import discover_pi_links, fetch_feature_from_pi, discover_features_on_pi
@@ -184,13 +184,15 @@ with left:
                         horizontal=True, key='suite_strategy',
                         help='Smart=representative combos | Full=every combination | Custom=your rules')
 
-    mc1, mc2 = st.columns(2)
+    mc1, mc2, mc3 = st.columns(3)
     with mc1:
         channel = st.multiselect('Channel', CHANNELS, default=['ITMBO'])
         devices = st.multiselect('Device Types', DEVICE_TYPES, default=['Mobile'])
     with mc2:
         networks = st.multiselect('Network Types', NETWORK_TYPES, default=['4G', '5G'])
         sim_types = st.multiselect('SIM Types', SIM_TYPES, default=['eSIM', 'pSIM'])
+    with mc3:
+        os_platforms = st.multiselect('OS / Platform', OS_PLATFORMS, default=['iOS', 'Android'])
 
     # Custom Instructions (only shown for Custom mode)
     custom_instructions = ''
@@ -485,7 +487,8 @@ if run_btn:
                 logger.set('Building test suite...')
                 options = {
                     'channel': channel, 'devices': devices, 'networks': networks,
-                    'sim_types': sim_types, 'include_positive': inc_positive,
+                    'sim_types': sim_types, 'os_platforms': os_platforms,
+                    'include_positive': inc_positive,
                     'include_negative': inc_negative, 'include_e2e': inc_e2e,
                     'include_edge': inc_edge, 'include_attachments': inc_attachments,
                     'strategy': strategy,

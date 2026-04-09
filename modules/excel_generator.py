@@ -373,7 +373,7 @@ def _build_combinations_sheet(wb, suite: TestSuite):
     ws.column_dimensions['F'].width = 30
 
     # Headers
-    headers = ['Combination_ID', 'Channel', 'Device', 'SIM Type', 'Network', 'Key']
+    headers = ['Combination_ID', 'Channel', 'Device', 'OS', 'SIM Type', 'Network', 'Key']
     for ci, h in enumerate(headers, 1):
         c = ws.cell(row=1, column=ci, value=h)
         c.font = _hf; c.fill = _hfill; c.alignment = _center; c.border = _bdr
@@ -386,9 +386,11 @@ def _build_combinations_sheet(wb, suite: TestSuite):
         ws.cell(row=ri, column=2).alignment = _center
         ws.cell(row=ri, column=3, value=combo.get('device', '')).border = _bdr
         ws.cell(row=ri, column=3).alignment = _center
-        ws.cell(row=ri, column=4, value=combo.get('sim', '')).border = _bdr
+        ws.cell(row=ri, column=4, value=combo.get('os', '')).border = _bdr
         ws.cell(row=ri, column=4).alignment = _center
-        ws.cell(row=ri, column=5, value=combo.get('network', '')).border = _bdr
+        ws.cell(row=ri, column=5, value=combo.get('sim', '')).border = _bdr
         ws.cell(row=ri, column=5).alignment = _center
-        ws.cell(row=ri, column=6, value=combo.get('key', '')).border = _bdr
+        ws.cell(row=ri, column=6, value=combo.get('network', '')).border = _bdr
         ws.cell(row=ri, column=6).alignment = _center
+        ws.cell(row=ri, column=7, value=combo.get('key', '')).border = _bdr
+        ws.cell(row=ri, column=7).alignment = _center
