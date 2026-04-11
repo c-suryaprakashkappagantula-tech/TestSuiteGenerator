@@ -112,6 +112,7 @@ def init_db():
             data_sources    TEXT,
             warnings        TEXT,
             file_path       TEXT,
+            engine_version  TEXT DEFAULT '',
             created_at      TEXT DEFAULT (datetime('now','localtime'))
         );
 
@@ -450,8 +451,8 @@ def save_test_suite(suite, file_path='') -> int:
     try:
         cur = c.execute('''
             INSERT INTO test_suites (feature_id, feature_title, pi, strategy, tc_count, step_count,
-                                     scope, acceptance_criteria, data_sources, warnings, file_path)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                     scope, acceptance_criteria, data_sources, warnings, file_path, engine_version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             suite.feature_id, suite.feature_title, suite.pi,
             ','.join(getattr(suite, 'channel', '')) if isinstance(getattr(suite, 'channel', ''), list) else getattr(suite, 'channel', ''),
@@ -462,6 +463,7 @@ def save_test_suite(suite, file_path='') -> int:
             json.dumps(suite.data_sources),
             json.dumps(suite.warnings),
             str(file_path),
+            getattr(suite, 'engine_version', ''),
         ))
         suite_id = cur.lastrowid
 

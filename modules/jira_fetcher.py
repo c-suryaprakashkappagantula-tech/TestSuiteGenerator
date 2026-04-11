@@ -187,6 +187,61 @@ def fetch_jira_issue(page, issue_key: str, log=print) -> JiraIssue:
     return issue
 
 
+# ================================================================
+# JIRA VALIDATION LAYER (Finding #3 & #4)
+# ================================================================
+
+class JiraValidationError(Exception):
+    """Raised when Jira data fails validation."""
+    pass
+
+
+def validate_jira_issue(issue: JiraIssue, log=print) -> List[str]:
+    """Validate a JiraIssue has the required fields for test generation.
+    Returns list of warnings. Raises JiraValidationError for critical failures."""
+    warnings = []
+
+    # Critical — cannot generate without these
+    if not issue.key:
+        raise JiraValidationError('Jira issue has no key/ID')
+    if not issue.summary or len(issue.summary) < 5:
+        raise JiraValidationError('Jira issue %s has no summary' % issue.key)
+
+    # Important — generation will be degraded
+    if not issue.description or len(issue.description) < 20:
+        warnings.append('No description — TCs will rely on Chalk/attachments only')
+        log('[JIRA-VALIDATE] ⚠️ %s: No meaningful description (%d chars)' % (
+            issue.key, len(issue.description or '')))
+
+    if not issue.acceptance_criteria:
+        warnings.append('No acceptance criteria found — traceability will be limited')
+        log('[JIRA-VALIDATE] ⚠️ %s: No acceptance criteria detected' % issue.key)
+
+    if not issue.status:
+        warnings.append('No status field — may indicate Jira schema change')
+        log('[JIRA-VALIDATE] ⚠️ %s: Missing status field' % issue.key)
+
+    if not issue.priority:
+        warnings.append('No priority field — defaulting to Medium')
+        log('[JIRA-VALIDATE] ⚠️ %s: Missing priority field' % issue.key)
+
+    # Informational
+    if not issue.pi:
+        log('[JIRA-VALIDATE] ℹ️ %s: No PI label detected in Jira labels' % issue.key)
+
+    if not issue.labels:
+        log('[JIRA-VALIDATE] ℹ️ %s: No labels on issue' % issue.key)
+
+    if issue.status and issue.status.lower() in ('closed', 'done', 'cancelled'):
+        warnings.append('Issue is %s — generating tests for a closed issue' % issue.status)
+        log('[JIRA-VALIDATE] ⚠️ %s: Issue status is "%s"' % (issue.key, issue.status))
+
+    if not warnings:
+        log('[JIRA-VALIDATE] ✅ %s: All fields valid' % issue.key)
+
+    return warnings
+
+
 def download_attachments(page, issue: JiraIssue, log=print) -> List[Path]:
     """Download all attachments using browser session. Returns list of local paths.
     Point 2: Uses page.request API for reliable downloads instead of window.location redirect."""

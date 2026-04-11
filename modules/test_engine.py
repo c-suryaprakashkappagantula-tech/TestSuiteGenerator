@@ -7,12 +7,15 @@ specific expected results, and attachment-driven gap coverage.
 import re
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple
-from .jira_fetcher import JiraIssue
+from .jira_fetcher import JiraIssue, validate_jira_issue
 from .chalk_parser import ChalkData, ChalkScenario
 from .doc_parser import ParsedDoc
 from .step_templates import get_step_chain
 from .instruction_parser import parse_instructions, apply_adjustments
 from .scenario_enricher import enrich_scenarios
+
+# Engine version — stored with each suite for rule versioning (Finding #5)
+ENGINE_VERSION = '4.0.1'
 
 
 @dataclass
@@ -62,6 +65,7 @@ class TestSuite:
     attachment_names: List[str] = field(default_factory=list)
     groups: Dict[str, List] = field(default_factory=dict)  # auto-detected TC groups for multi-sheet
     combinations: List[Dict] = field(default_factory=list)  # device matrix combinations
+    engine_version: str = ENGINE_VERSION  # rule versioning (Finding #5)
 
 
 # ================================================================
@@ -69,6 +73,10 @@ class TestSuite:
 # ================================================================
 
 def build_test_suite(jira, chalk, parsed_docs, options, log=print):
+    # Validate Jira data before proceeding (Finding #3 & #4)
+    log('[ENGINE] Validating Jira data...')
+    jira_warnings = validate_jira_issue(jira, log)
+
     # Parse custom instructions if provided
     strategy = options.get('strategy', 'Smart Suite (Recommended)')
     custom_text = options.get('custom_instructions', '')
@@ -93,6 +101,10 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print):
         jira_links=[{'key': l['key'], 'summary': l['summary']} for l in jira.linked_issues],
         attachment_names=[a.filename for a in jira.attachments],
     )
+
+    # Add Jira validation warnings to suite
+    if jira_warnings:
+        suite.warnings.extend(['[Jira] %s' % w for w in jira_warnings])
 
     # Extract a short, clean feature name for use in TC titles
     feature_short = _extract_feature_name(jira.summary, jira.key)
