@@ -141,6 +141,15 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_suites_feature ON test_suites(feature_id);
         CREATE INDEX IF NOT EXISTS idx_cases_suite ON test_cases(suite_id);
         CREATE INDEX IF NOT EXISTS idx_steps_tc ON test_steps(tc_id);
+
+        CREATE TABLE IF NOT EXISTS artifact_hashes (
+            feature_id      TEXT NOT NULL,
+            artifact_type   TEXT NOT NULL,
+            content_hash    TEXT NOT NULL,
+            source          TEXT DEFAULT '',
+            last_seen       TEXT DEFAULT (datetime('now','localtime')),
+            PRIMARY KEY (feature_id, artifact_type, source)
+        );
     ''')
     c.commit()
     c.close()
@@ -689,3 +698,65 @@ def check_suite_staleness(feature_id: str, current_chalk_hash: str = '', current
         'suite_id': row['suite_id'],
         'suite_created': suite_created,
     }
+
+
+# ================================================================
+# ARTIFACT HASH & STALENESS DETECTION (Finding #2 & #11)
+# ================================================================
+
+def save_artifact_hash(feature_id: str, artifact_type: str, content_hash: str, source: str = ''):
+    """Store a content hash for staleness detection.
+    artifact_type: 'chalk' | 'jira' | 'attachment' | 'upload'"""
+    c = _conn()
+    c.execute('''
+        INSERT OR REPLACE INTO artifact_hashes (feature_id, artifact_type, content_hash, source, last_seen)
+        VALUES (?, ?, ?, ?, datetime('now','localtime'))
+    ''', (feature_id, artifact_type, content_hash, source))
+    c.commit()
+    c.close()
+
+
+def check_staleness(feature_id: str) -> List[Dict]:
+    """Check if any artifacts have changed since last suite generation.
+    Returns list of stale artifacts with details."""
+    c = _conn()
+    stale = []
+
+    # Get the latest suite generation time for this feature
+    row = c.execute(
+        'SELECT created_at FROM test_suites WHERE feature_id = ? ORDER BY created_at DESC LIMIT 1',
+        (feature_id,)).fetchone()
+
+    if not row:
+        c.close()
+        return []  # No previous suite — nothing to compare
+
+    last_gen = row['created_at']
+
+    # Find artifacts updated after last generation
+    rows = c.execute('''
+        SELECT artifact_type, content_hash, source, last_seen
+        FROM artifact_hashes
+        WHERE feature_id = ? AND last_seen > ?
+    ''', (feature_id, last_gen)).fetchall()
+
+    for r in rows:
+        stale.append({
+            'type': r['artifact_type'],
+            'hash': r['content_hash'],
+            'source': r['source'],
+            'updated': r['last_seen'],
+        })
+
+    c.close()
+    return stale
+
+
+def get_artifact_hashes(feature_id: str) -> List[Dict]:
+    """Get all stored artifact hashes for a feature."""
+    c = _conn()
+    rows = c.execute(
+        'SELECT artifact_type, content_hash, source, last_seen FROM artifact_hashes WHERE feature_id = ?',
+        (feature_id,)).fetchall()
+    c.close()
+    return [dict(r) for r in rows]

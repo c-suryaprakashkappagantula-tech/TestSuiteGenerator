@@ -37,7 +37,7 @@ from modules.database import (init_db, save_pi_pages, load_pi_pages, save_featur
                                load_chalk_as_object, get_chalk_cache_count,
                                log_generation_db, get_history_db, get_db_stats, is_data_stale,
                                save_test_suite, load_latest_suite, build_ai_review_prompt,
-                               get_all_suite_history)
+                               get_all_suite_history, save_artifact_hash, check_staleness)
 
 if sys.platform.startswith('win'):
     try:
@@ -239,12 +239,14 @@ with left:
         elif ss.get('all_pi_features'):
             st.caption('No features found for %s on Chalk page.' % ss['selected_pi'])
 
-    fc1, fc2, fc3 = st.columns([4, 1, 1])
+    fc1, fc2 = st.columns([4, 2])
     with fc2:
-        manual_mode = st.checkbox('Manual', value=(ss['feature_mode'] == 'manual'), key='manual_toggle')
-        ss['feature_mode'] = 'manual' if manual_mode else 'dropdown'
-    with fc3:
-        batch_mode = st.checkbox('Batch', value=False, key='batch_toggle', help='Select multiple features')
+        _mc1, _mc2 = st.columns(2)
+        with _mc1:
+            manual_mode = st.checkbox('Manual', value=(ss['feature_mode'] == 'manual'), key='manual_toggle')
+            ss['feature_mode'] = 'manual' if manual_mode else 'dropdown'
+        with _mc2:
+            batch_mode = st.checkbox('Batch', value=False, key='batch_toggle', help='Select multiple features')
 
     feature_id = ''
     feature_ids = []  # for batch mode
@@ -514,37 +516,18 @@ with right:
                 file_name=Path(ss['result_path']).name,
                 use_container_width=True, key='dl_main')
 
-    # ── AI Review Prompt (auto-generated) ──
-    if ss.get('last_feature_id'):
-        _ai_prompt = build_ai_review_prompt(ss['last_feature_id'])
-        if _ai_prompt and 'No test suite found' not in _ai_prompt:
-            st.markdown("<div class='sec-title'><span class='icon'>&#129302;</span> AI Review Prompt</div>", unsafe_allow_html=True)
-            st.caption('Auto-generated from DB — copy and paste into Amazon Q, ChatGPT, or any LLM')
-            with st.expander('📋 AI Review Prompt — ready to paste (%d chars)' % len(_ai_prompt), expanded=True):
-                st.code(_ai_prompt, language='markdown')
-            _pr1, _pr2 = st.columns(2)
-            with _pr1:
-                st.download_button('Download as .md',
-                    data=_ai_prompt.encode('utf-8'),
-                    file_name='AI_Review_%s.md' % ss['last_feature_id'],
-                    mime='text/markdown',
-                    use_container_width=True, key='dl_ai_prompt')
-            with _pr2:
-                st.download_button('Download as .txt',
-                    data=_ai_prompt.encode('utf-8'),
-                    file_name='AI_Review_%s.txt' % ss['last_feature_id'],
-                    mime='text/plain',
-                    use_container_width=True, key='dl_ai_txt')
-
-            # ── Paste LLM Response back ──
-            st.markdown("<div class='sec-title'><span class='icon'>&#128172;</span> LLM Response</div>", unsafe_allow_html=True)
-            st.caption('Paste the LLM response here to see suggested additions')
-            llm_response = st.text_area('Paste LLM response:', value='', height=150,
-                placeholder='Paste the AI response here after running the prompt in your LLM...',
-                key='llm_response_input')
-            if llm_response.strip():
-                st.markdown("**Suggested additions from AI:**")
-                st.markdown(llm_response)
+            # Batch mode: show download buttons for ALL generated suites
+            if ss.get('batch_results') and len(ss['batch_results']) > 1:
+                st.markdown("**All generated suites:**")
+                for _bi, _br in enumerate(ss['batch_results']):
+                    _bp = Path(_br['file_path'])
+                    if _bp.exists():
+                        st.download_button(
+                            '%s — %d TCs | %s' % (_br['feature_id'], _br['tc_count'], _br.get('title', '')[:40]),
+                            data=_bp.read_bytes(),
+                            file_name=_bp.name,
+                            use_container_width=True,
+                            key='dl_batch_%d' % _bi)
 
     # ── Exit Report ──
     if ss.get('exit_report'):
@@ -757,7 +740,7 @@ if run_btn:
                     att_paths = download_attachments(page, jira, log=logger)
                     for ap in att_paths:
                         logger.set('Parsing: %s...' % ap.name)
-                        parsed_docs.append(parse_file(ap, log=logger))
+                        parsed_docs.append(parse_file(ap, log=logger, source='Jira Attachment'))
                     exit_items.append('Attachments: %d downloaded & parsed' % len(att_paths))
                 else:
                     exit_items.append('Attachments: skipped')
@@ -950,30 +933,6 @@ if run_btn:
                 if cp_path:
                     exit_items.append('Checkpoint: %s' % Path(cp_path).name)
 
-                # Finalize last timing entry
-                _tick('_end')
-                timings.pop()  # remove the _end placeholder
-
-                elapsed = time.time() - t0
-                m, s = divmod(int(elapsed), 60)
-                logger.set('[10/10] DONE in %dm %ds' % (m, s))
-
-                # Print time matrix
-                print('\n' + '=' * 50, flush=True)
-                print('  TIME MATRIX', flush=True)
-                print('  %-20s %10s %8s' % ('Step', 'Duration', '%'), flush=True)
-                print('  ' + '-' * 42, flush=True)
-                for step_name, dur in timings:
-                    pct = (dur / elapsed * 100) if elapsed > 0 else 0
-                    print('  %-20s %8.1fs %7.1f%%' % (step_name, dur, pct), flush=True)
-                print('  ' + '-' * 42, flush=True)
-                print('  %-20s %8.1fs %7s' % ('TOTAL', elapsed, '100%'), flush=True)
-                print('=' * 50, flush=True)
-
-                sheet_count = len(suite.groups) + 2 if len(suite.groups) > 1 else 3
-                if hasattr(suite, 'combinations') and suite.combinations and len(suite.combinations) > 1:
-                    sheet_count += 1
-
                 ss['result_path'] = str(out_path)
                 ss['cp_path'] = cp_path
                 ss['suite_info'] = {'tc_count': len(suite.test_cases), 'step_count': total_steps, 'sheet_count': sheet_count}
@@ -983,20 +942,29 @@ if run_btn:
                     _suite_id = save_test_suite(suite, file_path=str(out_path))
                     ss['last_suite_id'] = _suite_id
                     ss['last_feature_id'] = feature_id
+                    # Save artifact hashes for staleness detection (Finding #11)
+                    if chalk and chalk.scenarios:
+                        import hashlib as _hl
+                        _chalk_hash = _hl.md5(str(chalk.scenarios).encode()).hexdigest()[:12]
+                        save_artifact_hash(_fid if '_fid' in dir() else feature_id, 'chalk', _chalk_hash, ss.get('selected_pi', ''))
+                    for _pd in parsed_docs:
+                        if _pd.content_hash:
+                            save_artifact_hash(_fid if '_fid' in dir() else feature_id, 'attachment', _pd.content_hash, _pd.filename)
                     exit_items.append('DB: Suite saved (ID: %d)' % _suite_id)
                 except Exception as _db_err:
                     exit_items.append('DB: Save failed — %s' % str(_db_err)[:50])
 
-                    # Track batch results
-                    ss['batch_results'].append({
-                        'feature_id': feature_id, 'tc_count': len(suite.test_cases),
-                        'step_count': total_steps, 'file': out_path.name, 'path': str(out_path)})
+                # Track batch results (MUST be outside try/except)
+                ss['batch_results'].append({
+                    'feature_id': feature_id, 'tc_count': len(suite.test_cases),
+                    'step_count': total_steps, 'file': out_path.name, 'file_path': str(out_path),
+                    'title': jira.summary[:60]})
 
-                    # Log transaction
-                    log_generation(feature_id, ss['selected_pi'],
-                        len(suite.test_cases), total_steps, strategy, str(out_path))
-                    log_generation_db(feature_id, ss['selected_pi'],
-                        len(suite.test_cases), total_steps, strategy, str(out_path))
+                # Log transaction
+                log_generation(feature_id, ss['selected_pi'],
+                    len(suite.test_cases), total_steps, strategy, str(out_path))
+                log_generation_db(feature_id, ss['selected_pi'],
+                    len(suite.test_cases), total_steps, strategy, str(out_path))
 
                 # ── END BATCH LOOP ──
 
