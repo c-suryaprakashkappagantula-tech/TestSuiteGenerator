@@ -11,16 +11,45 @@ from dataclasses import dataclass, field
 class ParsedDoc:
     filename: str = ''
     file_type: str = ''
+    doc_type: str = 'Other'       # Finding #1: LLD | HLD | Solution | Other
+    source: str = 'Upload'        # Finding #1: Jira Attachment | Upload
+    confidence: str = 'medium'    # Finding #1: high | medium | low
+    content_hash: str = ''        # Finding #2 & #11: for staleness detection
     paragraphs: List[str] = field(default_factory=list)
     tables: List[List[List[str]]] = field(default_factory=list)
     open_items: List[str] = field(default_factory=list)
     raw_text: str = ''
 
 
-def parse_file(filepath: Path, log=print) -> ParsedDoc:
-    """Auto-detect file type and parse."""
+def parse_file(filepath: Path, log=print, source='Upload') -> ParsedDoc:
+    """Auto-detect file type, classify document, and parse."""
     fp = Path(filepath)
-    doc = ParsedDoc(filename=fp.name, file_type=fp.suffix.lower())
+    doc = ParsedDoc(filename=fp.name, file_type=fp.suffix.lower(), source=source)
+
+    # Auto-classify document type from filename (Finding #1)
+    fname_low = fp.name.lower()
+    if any(kw in fname_low for kw in ['lld', 'low_level', 'low-level', 'lowlevel']):
+        doc.doc_type = 'LLD'
+        doc.confidence = 'high'
+    elif any(kw in fname_low for kw in ['hld', 'high_level', 'high-level', 'highlevel']):
+        doc.doc_type = 'HLD'
+        doc.confidence = 'high'
+    elif any(kw in fname_low for kw in ['solution', 'design', 'architecture', 'spec']):
+        doc.doc_type = 'Solution'
+        doc.confidence = 'medium'
+    elif any(kw in fname_low for kw in ['test', 'tc', 'scenario', 'suite']):
+        doc.doc_type = 'Test Reference'
+        doc.confidence = 'medium'
+    else:
+        doc.doc_type = 'Other'
+        doc.confidence = 'low'
+
+    # Compute content hash for staleness detection (Finding #2 & #11)
+    import hashlib
+    try:
+        doc.content_hash = hashlib.md5(fp.read_bytes()).hexdigest()[:12]
+    except Exception:
+        doc.content_hash = ''
 
     if doc.file_type == '.docx':
         return _parse_docx(fp, doc, log)

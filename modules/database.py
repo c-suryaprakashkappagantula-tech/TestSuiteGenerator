@@ -640,3 +640,52 @@ def search_tcs(keyword: str, feature_id: str = None, category: str = None, limit
     rows = c.execute(query, params).fetchall()
     c.close()
     return [dict(r) for r in rows]
+
+
+# ================================================================
+# ARTIFACT STALENESS DETECTION (Finding #11)
+# ================================================================
+
+def check_suite_staleness(feature_id: str, current_chalk_hash: str = '', current_jira_hash: str = '') -> Dict:
+    """Check if the latest suite for a feature is stale based on source data changes.
+    Returns dict with is_stale flag and reasons."""
+    c = _conn()
+    row = c.execute(
+        'SELECT suite_id, created_at, engine_version FROM test_suites WHERE feature_id = ? ORDER BY created_at DESC LIMIT 1',
+        (feature_id,)).fetchone()
+    c.close()
+
+    if not row:
+        return {'is_stale': False, 'reason': 'No existing suite', 'suite_id': None}
+
+    reasons = []
+    suite_created = row['created_at']
+
+    # Check if Chalk data is newer than suite
+    c2 = _conn()
+    chalk_row = c2.execute(
+        'SELECT last_fetched FROM chalk_cache WHERE feature_id = ? ORDER BY last_fetched DESC LIMIT 1',
+        (feature_id,)).fetchone()
+    if chalk_row and chalk_row['last_fetched'] and chalk_row['last_fetched'] > suite_created:
+        reasons.append('Chalk data updated since last generation')
+
+    # Check if Jira data is newer than suite
+    jira_row = c2.execute(
+        'SELECT last_fetched FROM jira_cache WHERE feature_id = ?',
+        (feature_id,)).fetchone()
+    if jira_row and jira_row['last_fetched'] and jira_row['last_fetched'] > suite_created:
+        reasons.append('Jira data updated since last generation')
+
+    # Check engine version
+    from .test_engine import ENGINE_VERSION
+    if row['engine_version'] and row['engine_version'] != ENGINE_VERSION:
+        reasons.append('Engine version changed (%s → %s)' % (row['engine_version'], ENGINE_VERSION))
+
+    c2.close()
+
+    return {
+        'is_stale': len(reasons) > 0,
+        'reasons': reasons,
+        'suite_id': row['suite_id'],
+        'suite_created': suite_created,
+    }

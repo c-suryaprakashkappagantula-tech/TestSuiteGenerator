@@ -11,6 +11,9 @@ import json
 import re
 from typing import List, Dict, Optional
 
+# Finding #8: AI prompt versioning — track prompt template versions
+PROMPT_VERSION = '1.0.0'
+
 # ================================================================
 # SYSTEM PROMPTS
 # ================================================================
