@@ -741,7 +741,7 @@ if run_btn:
                     jira = fetch_jira_issue(page, feature_id, log=logger)
                     exit_items.append('%sJira fetched: %s' % (_batch_prefix, jira.summary[:50]))
 
-                parsed_docs = []
+                    parsed_docs = []
                     if inc_attachments and jira.attachments:
                         _tick('Attachments_%s' % feature_id)
                         att_paths = download_attachments(page, jira, log=logger)
@@ -852,7 +852,7 @@ if run_btn:
                     sheet_count += 1
 
                 ss['result_path'] = str(out_path)
-                ss['cp_path'] = cp_path
+                ss['cp_path'] = None
                 ss['suite_info'] = {'tc_count': len(suite.test_cases), 'step_count': total_steps, 'sheet_count': sheet_count}
 
                 # Build exit report
