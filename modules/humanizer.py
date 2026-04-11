@@ -181,6 +181,15 @@ def _step_fingerprint(tc) -> set:
     return set(re.findall(r'\b\w{4,}\b', text))
 
 
+def _title_similarity(title1, title2) -> float:
+    """Jaccard similarity between two TC titles."""
+    words1 = set(re.findall(r'\b\w{4,}\b', title1.lower()))
+    words2 = set(re.findall(r'\b\w{4,}\b', title2.lower()))
+    if not words1 or not words2:
+        return 0.0
+    return len(words1 & words2) / len(words1 | words2)
+
+
 def _step_similarity(tc1, tc2) -> float:
     """Jaccard similarity between two TCs based on step content."""
     fp1 = _step_fingerprint(tc1)
@@ -192,9 +201,14 @@ def _step_similarity(tc1, tc2) -> float:
 
 def dedup_and_merge(test_cases, log=print, threshold=0.85):
     """Find TCs with very high step overlap and merge them.
-    Keeps the first TC and adds variant info to its description."""
+    Keeps the first TC and adds variant info to its description.
+    Only merges if both TCs have the same category AND similar titles."""
     if len(test_cases) < 2:
         return test_cases
+
+    # For smaller suites (<40 TCs), be more conservative — only merge near-duplicates
+    if len(test_cases) < 40:
+        threshold = 0.92
 
     merged_into = {}  # tc_index -> list of merged tc summaries
     to_remove = set()
@@ -207,8 +221,12 @@ def dedup_and_merge(test_cases, log=print, threshold=0.85):
                 continue
             sim = _step_similarity(test_cases[i], test_cases[j])
             if sim >= threshold:
-                # Same category? Merge.
+                # Same category AND similar title? Merge.
                 if test_cases[i].category == test_cases[j].category:
+                    # Also check title similarity — don't merge if titles describe different scenarios
+                    title_sim = _title_similarity(test_cases[i].summary, test_cases[j].summary)
+                    if title_sim < 0.5:
+                        continue  # Different scenarios despite similar steps — keep both
                     if i not in merged_into:
                         merged_into[i] = []
                     merged_into[i].append(test_cases[j].summary)
