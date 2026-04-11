@@ -181,7 +181,6 @@ with left:
 
     # ── Step 2: Feature ID ──
     st.markdown("<div class='sec-title'><span class='icon'>&#128269;</span> Step 2: Feature ID</div>", unsafe_allow_html=True)
-    st.markdown("<div class='glass'>", unsafe_allow_html=True)
 
     # Load features: DB first (instant), Chalk scrape as fallback
     if not ss.get('all_pi_features'):
@@ -239,30 +238,43 @@ with left:
         elif ss.get('all_pi_features'):
             st.caption('No features found for %s on Chalk page.' % ss['selected_pi'])
 
-    fc1, fc2 = st.columns([4, 2])
-    with fc2:
-        _mc1, _mc2 = st.columns(2)
-        with _mc1:
-            manual_mode = st.checkbox('Manual', value=(ss['feature_mode'] == 'manual'), key='manual_toggle')
-            ss['feature_mode'] = 'manual' if manual_mode else 'dropdown'
-        with _mc2:
-            batch_mode = st.checkbox('Batch', value=False, key='batch_toggle', help='Select multiple features')
+    _chk1, _chk2, _chk3 = st.columns([4, 2, 2])
+    with _chk2:
+        manual_mode = st.checkbox('Manual', value=(ss['feature_mode'] == 'manual'), key='manual_toggle')
+        ss['feature_mode'] = 'manual' if manual_mode else 'dropdown'
+    with _chk3:
+        batch_mode = st.checkbox('Batch', value=False, key='batch_toggle')
 
     feature_id = ''
     feature_ids = []  # for batch mode
-    if ss['feature_mode'] == 'manual' or not ss['pi_features']:
-        feature_id = st.text_input('Jira Feature ID(s)', value='',
-            placeholder='e.g. MWTGPROV-4254 or MWTGPROV-4254, MWTGPROV-3949 for batch')
-        if ',' in feature_id:
-            feature_ids = [f.strip().upper() for f in feature_id.split(',') if f.strip()]
-            feature_id = feature_ids[0] if feature_ids else ''
-    elif batch_mode:
+    if batch_mode and ss['pi_features']:
+        # Batch mode with dropdown features
         options = ['%s - %s' % (fid, title) for fid, title in ss['pi_features']]
+        _ba1, _ba2 = st.columns([1, 1])
+        with _ba1:
+            if st.button('Select All', key='batch_select_all', use_container_width=True):
+                ss['_batch_default'] = list(options)
+                st.rerun()
+        with _ba2:
+            if st.button('Clear All', key='batch_clear_all', use_container_width=True):
+                ss['_batch_default'] = []
+                st.rerun()
+        _default = ss.get('_batch_default', [])
+        _default = [d for d in _default if d in options]
         selected_multi = st.multiselect(
             'Select Features (%d available in %s)' % (len(ss['pi_features']), ss['selected_pi']),
-            options=options, key='feature_multiselect')
+            options=options, default=_default, key='feature_multiselect')
         feature_ids = [s.split(' - ')[0].strip() for s in selected_multi]
         feature_id = feature_ids[0] if feature_ids else ''
+    elif batch_mode:
+        # Batch mode manual — comma-separated input
+        feature_id = st.text_input('Jira Feature IDs (comma-separated)', value='',
+            placeholder='e.g. MWTGPROV-4254, MWTGPROV-3949')
+        if feature_id:
+            feature_ids = [f.strip().upper() for f in feature_id.split(',') if f.strip()]
+            feature_id = feature_ids[0] if feature_ids else ''
+    elif ss['feature_mode'] == 'manual' or not ss['pi_features']:
+        feature_id = st.text_input('Jira Feature ID', value='', placeholder='e.g. MWTGPROV-4254')
     else:
         options = ['-- Select a Feature --'] + [
             '%s - %s' % (fid, title) for fid, title in ss['pi_features']
@@ -278,11 +290,8 @@ with left:
     elif ss['pi_features'] and ss['feature_mode'] != 'manual':
         st.caption('%d features available in %s' % (len(ss['pi_features']), ss['selected_pi']))
 
-    st.markdown("</div>", unsafe_allow_html=True)
-
     # ── Step 3: Test Matrix ──
     st.markdown("<div class='sec-title'><span class='icon'>&#9881;</span> Step 3: Test Matrix & Strategy</div>", unsafe_allow_html=True)
-    st.markdown("<div class='glass'>", unsafe_allow_html=True)
 
     # Suite Strategy selector (Smart Suite / Full Matrix as radio, Custom Instructions as checkbox)
     strategy = st.radio('Suite Strategy', ['Smart Suite (Recommended)', 'Full Matrix'],
@@ -340,8 +349,6 @@ with left:
         # If user picked a preset but didn't type anything, use the preset
         if not custom_instructions.strip() and selected_suggestion != '-- Select --':
             custom_instructions = selected_suggestion
-
-    st.markdown("</div>", unsafe_allow_html=True)
 
     # ── Step 4: Options ──
     st.markdown("<div class='sec-title'><span class='icon'>&#128736;</span> Step 4: Options</div>", unsafe_allow_html=True)
@@ -511,7 +518,8 @@ with right:
             </div>""" % (info.get('tc_count', 0), info.get('step_count', 0), info.get('sheet_count', 3)),
             unsafe_allow_html=True)
 
-            st.download_button('Download Test Suite',
+            st.download_button('Download: %s — %s' % (
+                    ss.get('last_feature_id', ''), Path(ss['result_path']).stem[:50]),
                 data=Path(ss['result_path']).read_bytes(),
                 file_name=Path(ss['result_path']).name,
                 use_container_width=True, key='dl_main')
@@ -520,10 +528,10 @@ with right:
             if ss.get('batch_results') and len(ss['batch_results']) > 1:
                 st.markdown("**All generated suites:**")
                 for _bi, _br in enumerate(ss['batch_results']):
-                    _bp = Path(_br['file_path'])
+                    _bp = Path(_br.get('file_path', _br.get('path', '')))
                     if _bp.exists():
                         st.download_button(
-                            '%s — %d TCs | %s' % (_br['feature_id'], _br['tc_count'], _br.get('title', '')[:40]),
+                            'Download: %s — %d TCs | %s' % (_br['feature_id'], _br['tc_count'], _br.get('title', '')[:40]),
                             data=_bp.read_bytes(),
                             file_name=_bp.name,
                             use_container_width=True,
@@ -734,239 +742,87 @@ if run_btn:
                     exit_items.append('%sJira fetched: %s' % (_batch_prefix, jira.summary[:50]))
 
                 parsed_docs = []
-                if inc_attachments and jira.attachments:
-                    _tick('Attachments')
-                    logger.set('[3/8] Downloading %d attachment(s)...' % len(jira.attachments))
-                    att_paths = download_attachments(page, jira, log=logger)
-                    for ap in att_paths:
-                        logger.set('Parsing: %s...' % ap.name)
-                        parsed_docs.append(parse_file(ap, log=logger, source='Jira Attachment'))
-                    exit_items.append('Attachments: %d downloaded & parsed' % len(att_paths))
-                else:
-                    exit_items.append('Attachments: skipped')
+                    if inc_attachments and jira.attachments:
+                        _tick('Attachments_%s' % feature_id)
+                        att_paths = download_attachments(page, jira, log=logger)
+                        for ap in att_paths:
+                            parsed_docs.append(parse_file(ap, log=logger, source='Jira Attachment'))
 
-                _tick('Chalk Fetch')
-                logger.set('[4/8] Fetching Chalk: %s...' % ss['selected_pi'])
-                chalk = None
-                _chalk_source = ''
+                    _tick('Chalk_%s' % feature_id)
+                    logger.set('%sFetching Chalk: %s...' % (_batch_prefix, feature_id))
+                    chalk = load_chalk_as_object(feature_id, ss['selected_pi'])
+                    if not (chalk and chalk.scenarios):
+                        from modules.database import _conn as _db_conn
+                        _c = _db_conn()
+                        _row = _c.execute('SELECT pi_label FROM chalk_cache WHERE feature_id=? AND scenarios_json != "[]" LIMIT 1',
+                                          (feature_id,)).fetchone()
+                        _c.close()
+                        if _row:
+                            chalk = load_chalk_as_object(feature_id, _row['pi_label'])
+                        if not (chalk and chalk.scenarios):
+                            chalk = fetch_feature_from_pi(page, ss['selected_pi_url'], feature_id, log=logger)
+                            if chalk and chalk.scenarios:
+                                save_chalk(feature_id, ss['selected_pi'], chalk)
+                            else:
+                                for _sl, _su in ss['pi_list']:
+                                    if _sl == ss['selected_pi']: continue
+                                    try:
+                                        _sc = fetch_feature_from_pi(page, _su, feature_id, log=lambda m: None)
+                                        if _sc and _sc.scenarios:
+                                            chalk = _sc; save_chalk(feature_id, _sl, chalk); break
+                                    except: pass
+                                if not chalk or not chalk.scenarios:
+                                    from modules.chalk_parser import ChalkData
+                                    chalk = ChalkData(feature_id=feature_id)
 
-                # ── SELF-HEAL CHAIN ──
-                # Step A: DB cache — selected PI
-                chalk = load_chalk_as_object(feature_id, ss['selected_pi'])
-                if chalk and chalk.scenarios:
-                    _chalk_source = 'DB cache (%s)' % ss['selected_pi']
-                    print('[CHALK] Step A: DB hit (%s): %d scenarios' % (ss['selected_pi'], len(chalk.scenarios)), flush=True)
-                else:
-                    # Step B: DB cache — any PI
-                    from modules.database import _conn as _db_conn
-                    _c = _db_conn()
-                    _row = _c.execute('SELECT pi_label FROM chalk_cache WHERE feature_id=? AND scenarios_json != "[]" LIMIT 1',
-                                      (feature_id,)).fetchone()
-                    _c.close()
-                    if _row:
-                        chalk = load_chalk_as_object(feature_id, _row['pi_label'])
-                    if chalk and chalk.scenarios:
-                        _chalk_source = 'DB cache (%s)' % _row['pi_label']
-                        print('[CHALK] Step B: DB hit (%s): %d scenarios' % (_row['pi_label'], len(chalk.scenarios)), flush=True)
-                    else:
-                        # Step C: Live fetch — selected PI
-                        print('[CHALK] Step B: DB miss. Live fetching %s...' % ss['selected_pi'], flush=True)
-                        chalk = fetch_feature_from_pi(page, ss['selected_pi_url'], feature_id, log=logger)
-                        if chalk and chalk.scenarios:
-                            save_chalk(feature_id, ss['selected_pi'], chalk)
-                            _chalk_source = '%s (live, cached)' % ss['selected_pi']
-                        else:
-                            # Step D: Live scan — ALL PIs
-                            print('[CHALK] Step C: Not on %s. Scanning all PIs...' % ss['selected_pi'], flush=True)
-                            for _sl, _su in ss['pi_list']:
-                                if _sl == ss['selected_pi']:
-                                    continue
-                                try:
-                                    _sc = fetch_feature_from_pi(page, _su, feature_id, log=lambda m: None)
-                                    if _sc and _sc.scenarios:
-                                        chalk = _sc
-                                        save_chalk(feature_id, _sl, chalk)
-                                        _chalk_source = '%s (scanned, cached)' % _sl
-                                        print('[CHALK] Step D: Found on %s: %d scenarios' % (_sl, len(chalk.scenarios)), flush=True)
-                                        break
-                                except:
-                                    pass
-                            if not chalk or not chalk.scenarios:
-                                print('[CHALK] Step D: Not found on any PI', flush=True)
-                                _chalk_source = 'not found'
-                                from modules.chalk_parser import ChalkData
-                                chalk = ChalkData(feature_id=feature_id)
+                    if uploaded_files and _fi == 1:
+                        for uf in uploaded_files:
+                            save_path = INPUTS / uf.name
+                            save_path.write_bytes(uf.getvalue())
+                            parsed_docs.append(parse_file(save_path, log=logger))
 
-                if chalk and chalk.scenarios:
-                    exit_items.append('Chalk: %d scenarios from %s' % (len(chalk.scenarios), _chalk_source))
-                else:
-                    exit_items.append('Chalk: Feature %s — %s' % (feature_id, _chalk_source))
+                    _tick('Engine_%s' % feature_id)
+                    logger.set('%sBuilding suite: %s...' % (_batch_prefix, feature_id))
+                    options = {
+                        'channel': channel, 'devices': devices, 'networks': networks,
+                        'sim_types': sim_types, 'os_platforms': os_platforms,
+                        'include_positive': inc_positive,
+                        'include_negative': inc_negative, 'include_e2e': inc_e2e,
+                        'include_edge': inc_edge, 'include_attachments': inc_attachments,
+                        'strategy': strategy, 'custom_instructions': custom_instructions,
+                    }
 
-                if uploaded_files:
-                    _tick('Upload Parse')
-                    for uf in uploaded_files:
-                        logger.set('[4b/8] Parsing upload: %s...' % uf.name)
-                        save_path = INPUTS / uf.name
-                        save_path.write_bytes(uf.getvalue())
-                        parsed_docs.append(parse_file(save_path, log=logger))
-                    exit_items.append('Uploads: %d parsed' % len(uploaded_files))
+                    suite = build_test_suite(jira, chalk, parsed_docs, options, log=logger)
+                    total_steps = sum(len(tc.steps) for tc in suite.test_cases)
 
+                    _tick('Excel_%s' % feature_id)
+                    logger.set('%sGenerating Excel: %s...' % (_batch_prefix, feature_id))
+                    out_path = generate_excel(suite, log=logger)
+
+                    sheet_count = len(suite.groups) + 2 if len(suite.groups) > 1 else 3
+                    if hasattr(suite, 'combinations') and suite.combinations and len(suite.combinations) > 1:
+                        sheet_count += 1
+                    ss['result_path'] = str(out_path)
+                    ss['suite_info'] = {'tc_count': len(suite.test_cases), 'step_count': total_steps, 'sheet_count': sheet_count}
+                    ss['last_feature_id'] = feature_id
+
+                    try:
+                        _suite_id = save_test_suite(suite, file_path=str(out_path))
+                        ss['last_suite_id'] = _suite_id
+                    except: pass
+
+                    ss['batch_results'].append({
+                        'feature_id': feature_id, 'tc_count': len(suite.test_cases),
+                        'step_count': total_steps, 'file': out_path.name, 'file_path': str(out_path),
+                        'title': jira.summary[:60]})
+                    exit_items.append('%s%s: %d TCs | %s' % (_batch_prefix, feature_id, len(suite.test_cases), out_path.name))
+
+                    log_generation(feature_id, ss['selected_pi'], len(suite.test_cases), total_steps, strategy, str(out_path))
+                    log_generation_db(feature_id, ss['selected_pi'], len(suite.test_cases), total_steps, strategy, str(out_path))
+
+                # ── END BATCH LOOP — close browser ──
                 _tick('Browser Close')
                 context.close(); browser.close(); pw.stop()
-                exit_items.append('Browser closed')
-
-                _tick('Test Engine')
-                logger.set('[5/10] Building test suite (rule-based)...')
-                options = {
-                    'channel': channel, 'devices': devices, 'networks': networks,
-                    'sim_types': sim_types, 'os_platforms': os_platforms,
-                    'include_positive': inc_positive,
-                    'include_negative': inc_negative, 'include_e2e': inc_e2e,
-                    'include_edge': inc_edge, 'include_attachments': inc_attachments,
-                    'strategy': strategy,
-                    'custom_instructions': custom_instructions,
-                }
-
-                # ── LLM: Parse custom instructions with NLU ──
-                llm = None
-                if _selected_provider != PROVIDER_NONE:
-                    logger.set('[5a/10] Initializing AI engine...')
-                    llm = LLMClient(
-                        provider=_selected_provider, model=_llm_model, api_key=_llm_api_key,
-                        base_url=_llm_base_url, azure_endpoint=_azure_endpoint,
-                        azure_deployment=_azure_deployment, region=_bedrock_region,
-                        temperature=_llm_temp, log=logger)
-                    if llm.available:
-                        exit_items.append('AI Engine: %s (%s)' % (llm_provider, _llm_model))
-                    else:
-                        exit_items.append('AI Engine: init failed — running rule-based')
-                        llm = None
-
-                if llm and ai_custom_parse and custom_instructions.strip():
-                    _tick('LLM Custom Parse')
-                    logger.set('[5b/10] AI parsing custom instructions...')
-                    llm_directives = parse_custom_instructions_llm(llm, custom_instructions, log=logger)
-                    if llm_directives:
-                        # Apply LLM-parsed filters to options
-                        if llm_directives.get('filter_channels'):
-                            options['channel'] = llm_directives['filter_channels']
-                        if llm_directives.get('filter_devices'):
-                            options['devices'] = llm_directives['filter_devices']
-                        if llm_directives.get('filter_sim'):
-                            options['sim_types'] = llm_directives['filter_sim']
-                        if llm_directives.get('filter_networks'):
-                            options['networks'] = llm_directives['filter_networks']
-                        if llm_directives.get('filter_os'):
-                            options['os_platforms'] = llm_directives['filter_os']
-                        # Pass extra scenarios and flags through
-                        options['llm_directives'] = llm_directives
-                        exit_items.append('AI Custom Parse: %s' % llm_directives.get('interpretation', 'done')[:60])
-
-                suite = build_test_suite(jira, chalk, parsed_docs, options, log=logger)
-                total_steps = sum(len(tc.steps) for tc in suite.test_cases)
-                exit_items.append('Suite built: %d TCs | %d steps' % (len(suite.test_cases), total_steps))
-
-                # ── LLM: Gap Analysis ──
-                if llm and ai_gap_analysis:
-                    _tick('LLM Gap Analysis')
-                    logger.set('[6/10] AI gap analysis — finding missing scenarios...')
-                    from modules.test_engine import TestCase, TestStep
-                    gaps = review_suite_gaps(llm, suite, jira, chalk, log=logger)
-                    _gap_added = 0
-                    if gaps:
-                        _next_idx = len(suite.test_cases) + 1
-                        for g in gaps:
-                            steps = []
-                            for si, s in enumerate(g.get('steps', []), 1):
-                                steps.append(TestStep(si, s.get('action', ''), s.get('expected', '')))
-                            if not steps:
-                                steps = [TestStep(1, g.get('title', 'Execute scenario'), 'Completed'),
-                                         TestStep(2, 'Verify results', 'Results match expected')]
-                            tc = TestCase(
-                                sno=str(_next_idx),
-                                summary='TC%03d_%s_AI_%s' % (_next_idx, suite.feature_id, g.get('title', '')[:80]),
-                                description='%s\nAI Reasoning: %s' % (g.get('description', ''), g.get('reasoning', '')),
-                                preconditions='1.\tActive TMO subscriber line\n2.\tSystem in ready state',
-                                story_linkage=suite.feature_id, label=suite.feature_id,
-                                category=g.get('category', 'Happy Path'),
-                                steps=steps)
-                            suite.test_cases.append(tc)
-                            _next_idx += 1
-                            _gap_added += 1
-                        exit_items.append('AI Gaps: +%d TCs (from %d suggestions)' % (_gap_added, len(gaps)))
-                    else:
-                        exit_items.append('AI Gaps: no new gaps found')
-
-                # ── LLM: Step Improvement ──
-                if llm and ai_step_improve:
-                    _tick('LLM Step Improve')
-                    logger.set('[7/10] AI improving test steps...')
-                    from modules.test_engine import TestStep as _TS
-                    _improved_count = 0
-                    # Only improve TCs with generic/short steps (up to 15 TCs to limit API calls)
-                    _candidates = [tc for tc in suite.test_cases
-                                   if any(len(s.summary) < 40 for s in tc.steps)][:15]
-                    for tc in _candidates:
-                        improved = improve_steps(llm, tc, suite, log=logger)
-                        if improved and len(improved) >= len(tc.steps):
-                            for i, imp in enumerate(improved):
-                                if i < len(tc.steps):
-                                    tc.steps[i].summary = imp.get('action', tc.steps[i].summary)
-                                    tc.steps[i].expected = imp.get('expected', tc.steps[i].expected)
-                                else:
-                                    tc.steps.append(_TS(i + 1, imp.get('action', ''), imp.get('expected', '')))
-                            _improved_count += 1
-                    if _improved_count:
-                        exit_items.append('AI Steps: %d TCs improved' % _improved_count)
-
-                # Recalculate totals after AI additions
-                total_steps = sum(len(tc.steps) for tc in suite.test_cases)
-
-                _tick('Excel Generation')
-                logger.set('[8/10] Generating Excel...')
-                out_path = generate_excel(suite, log=logger)
-                exit_items.append('Excel: %s' % out_path.name)
-
-                _tick('Finalize')
-                cps = sorted(CHECKPOINTS.glob('CHECKPOINT_%s*' % feature_id), reverse=True)
-                cp_path = str(cps[0]) if cps else None
-                if cp_path:
-                    exit_items.append('Checkpoint: %s' % Path(cp_path).name)
-
-                ss['result_path'] = str(out_path)
-                ss['cp_path'] = cp_path
-                ss['suite_info'] = {'tc_count': len(suite.test_cases), 'step_count': total_steps, 'sheet_count': sheet_count}
-
-                # Save full suite to DB for traceability and AI review
-                try:
-                    _suite_id = save_test_suite(suite, file_path=str(out_path))
-                    ss['last_suite_id'] = _suite_id
-                    ss['last_feature_id'] = feature_id
-                    # Save artifact hashes for staleness detection (Finding #11)
-                    if chalk and chalk.scenarios:
-                        import hashlib as _hl
-                        _chalk_hash = _hl.md5(str(chalk.scenarios).encode()).hexdigest()[:12]
-                        save_artifact_hash(_fid if '_fid' in dir() else feature_id, 'chalk', _chalk_hash, ss.get('selected_pi', ''))
-                    for _pd in parsed_docs:
-                        if _pd.content_hash:
-                            save_artifact_hash(_fid if '_fid' in dir() else feature_id, 'attachment', _pd.content_hash, _pd.filename)
-                    exit_items.append('DB: Suite saved (ID: %d)' % _suite_id)
-                except Exception as _db_err:
-                    exit_items.append('DB: Save failed — %s' % str(_db_err)[:50])
-
-                # Track batch results (MUST be outside try/except)
-                ss['batch_results'].append({
-                    'feature_id': feature_id, 'tc_count': len(suite.test_cases),
-                    'step_count': total_steps, 'file': out_path.name, 'file_path': str(out_path),
-                    'title': jira.summary[:60]})
-
-                # Log transaction
-                log_generation(feature_id, ss['selected_pi'],
-                    len(suite.test_cases), total_steps, strategy, str(out_path))
-                log_generation_db(feature_id, ss['selected_pi'],
-                    len(suite.test_cases), total_steps, strategy, str(out_path))
-
-                # ── END BATCH LOOP ──
 
                 # Finalize timing
                 _tick('_end')
