@@ -23,26 +23,6 @@ _wrap = Alignment(wrap_text=True, vertical='top')
 _center = Alignment(horizontal='center', vertical='center', wrap_text=True)
 _bdr = Border(left=Side(style='thin'), right=Side(style='thin'),
               top=Side(style='thin'), bottom=Side(style='thin'))
-
-# ── Category row colors (very soft tints — easy on the eyes) ──
-_CAT_ROW_FILLS = {
-    'Happy Path':   PatternFill(start_color='F1F8E9', end_color='F1F8E9', fill_type='solid'),  # very light green
-    'Positive':     PatternFill(start_color='F1F8E9', end_color='F1F8E9', fill_type='solid'),
-    'Negative':     PatternFill(start_color='FBE9E7', end_color='FBE9E7', fill_type='solid'),  # very light coral
-    'Edge Case':    PatternFill(start_color='FFF9C4', end_color='FFF9C4', fill_type='solid'),  # very light yellow
-    'E2E':          PatternFill(start_color='E8EAF6', end_color='E8EAF6', fill_type='solid'),  # very light indigo
-    'End-to-End':   PatternFill(start_color='E8EAF6', end_color='E8EAF6', fill_type='solid'),
-    'Rollback':     PatternFill(start_color='F3E5F5', end_color='F3E5F5', fill_type='solid'),  # very light purple
-}
-_CAT_SNO_FONTS = {
-    'Happy Path':   Font(name='Calibri', bold=True, size=11, color='388E3C'),   # medium green
-    'Positive':     Font(name='Calibri', bold=True, size=11, color='388E3C'),
-    'Negative':     Font(name='Calibri', bold=True, size=11, color='D32F2F'),   # medium red
-    'Edge Case':    Font(name='Calibri', bold=True, size=11, color='F9A825'),   # amber
-    'E2E':          Font(name='Calibri', bold=True, size=11, color='1976D2'),   # medium blue
-    'End-to-End':   Font(name='Calibri', bold=True, size=11, color='1976D2'),
-    'Rollback':     Font(name='Calibri', bold=True, size=11, color='7B1FA2'),   # medium purple
-}
 _lb = PatternFill(start_color=LIGHT_BLUE, end_color=LIGHT_BLUE, fill_type='solid')
 _wf = PatternFill(start_color=WHITE, end_color=WHITE, fill_type='solid')
 
@@ -55,14 +35,21 @@ def generate_excel(suite: TestSuite, log=print) -> Path:
     log('[EXCEL] Building Summary sheet...')
     _build_summary_sheet(wb, suite)
 
-    # ── Sheet 2: All Test Cases in ONE sheet ──
-    log('[EXCEL] Building Test Cases sheet (%d TCs)...' % len(suite.test_cases))
-    _build_testcases_sheet(wb, suite, sheet_name='Test Cases')
+    # ── Sheet 2+: Test Cases (multi-sheet if groups detected) ──
+    if hasattr(suite, 'groups') and suite.groups and len(suite.groups) > 1:
+        log('[EXCEL] Building %d grouped Test Cases sheets...' % len(suite.groups))
+        for group_name, group_tcs in suite.groups.items():
+            sname = '%s_%s' % (suite.feature_id[:10], group_name[:20])
+            sname = sname[:31].replace('/', '-').replace('\\', '-').replace('?', '').replace('*', '')
+            _build_testcases_sheet(wb, suite, sheet_name=sname, tc_subset=group_tcs)
+            log('[EXCEL]   Sheet: %s (%d TCs)' % (sname, len(group_tcs)))
+    else:
+        log('[EXCEL] Building Test Cases sheet...')
+        _build_testcases_sheet(wb, suite)
 
-    # ── Sheet 3: Traceability (AC → TC mapping) ──
-    if suite.ac_traceability:
-        log('[EXCEL] Building Traceability sheet...')
-        _build_traceability_sheet(wb, suite)
+    # ── Sheet 3: Traceability ──
+    log('[EXCEL] Building Traceability sheet...')
+    _build_traceability_sheet(wb, suite)
 
     # ── Sheet 4: Combinations (if matrix expansion was used) ──
     if hasattr(suite, 'combinations') and suite.combinations and len(suite.combinations) > 1:
@@ -74,12 +61,12 @@ def generate_excel(suite: TestSuite, log=print) -> Path:
         del wb['Sheet']
 
     # Save
-    out = output_path(suite.feature_id, pi=suite.pi, title=suite.feature_title)
+    out = output_path(suite.feature_id)
     wb.save(str(out))
     log(f'[EXCEL] ✅ Saved: {out.name}')
 
     # Auto-checkpoint
-    cp = checkpoint_path(suite.feature_id, pi=suite.pi, title=suite.feature_title)
+    cp = checkpoint_path(suite.feature_id)
     shutil.copy2(str(out), str(cp))
     log(f'[EXCEL] ✅ Checkpoint: {cp.name}')
 
@@ -102,74 +89,14 @@ def _build_summary_sheet(wb, suite: TestSuite):
     r = 1
     ws.merge_cells(f'A{r}:F{r}')
     ws.cell(row=r, column=1, value=f'TEST PLAN SUMMARY - {suite.feature_id}')
-    ws.cell(row=r, column=1).font = Font(name='Calibri', bold=True, size=16, color='1A237E')
+    ws.cell(row=r, column=1).font = Font(name='Calibri', bold=True, size=16, color=NAVY)
     ws.cell(row=r, column=1).alignment = Alignment(horizontal='center', vertical='center')
-    ws.cell(row=r, column=1).fill = PatternFill(start_color='E8EAF6', end_color='E8EAF6', fill_type='solid')
     ws.row_dimensions[r].height = 35
     r += 2
 
-    # Helper for section headers
-    _sec_font = Font(name='Calibri', bold=True, size=12, color='1A237E')
-    _sec_fill = PatternFill(start_color='E8EAF6', end_color='E8EAF6', fill_type='solid')
-    def _section(row, title):
-        ws.merge_cells(f'A{row}:F{row}')
-        c = ws.cell(row=row, column=1, value=title)
-        c.font = _sec_font; c.fill = _sec_fill
-        for ci in range(1, 7):
-            ws.cell(row=row, column=ci).fill = _sec_fill
-
     # Feature Details
-    _section(r, 'SUITE GUIDE')
-    r += 1
-    _guide_items = [
-        ('Summary (this sheet)', 'Overview of the feature, acceptance criteria, coverage breakdown, priority distribution, and data sources.'),
-        ('Test Cases', 'All test scenarios with step-by-step actions and expected results. Execute in order — P1 (critical) first.'),
-        ('Traceability', 'Maps each Acceptance Criteria to the test cases that cover it. Green = covered, Red = gap.'),
-        ('Combinations', 'Device/SIM/Network matrix showing which hardware combos each test case should be run on.'),
-    ]
-    _cat_guide = [
-        ('Happy Path', 'Core positive scenarios — the feature works as designed with valid inputs and expected conditions.'),
-        ('Negative', 'Failure and error scenarios — invalid inputs, system failures, timeouts, rollbacks. Verifies graceful handling.'),
-        ('Edge Case', 'Unusual but valid scenarios — boundary values, concurrent operations, rare device combos.'),
-        ('E2E', 'Full workflow from UI through API to all downstream systems. Validates the complete chain.'),
-        ('Regression', 'Ensures existing functionality is not broken by the new feature. Run after every deployment.'),
-    ]
-    _pri_guide = [
-        ('P1 (Critical)', 'Must-run. Core happy paths, rollback, data integrity, E2E flows. Block release if failing.'),
-        ('P2 (Important)', 'Should-run. Negative cases, input validation, error handling. High risk if skipped.'),
-        ('P3 (Nice-to-have)', 'Good-to-run. UI checks, notifications, low-risk edge cases. Run if time permits.'),
-    ]
-    ws.cell(row=r, column=1, value='Sheets:').font = _bf
-    r += 1
-    for sn, desc in _guide_items:
-        ws.cell(row=r, column=1, value=sn).font = _bf; ws.cell(row=r, column=1).border = _bdr
-        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=6)
-        ws.cell(row=r, column=2, value=desc).font = _nf; ws.cell(row=r, column=2).alignment = _wrap; ws.cell(row=r, column=2).border = _bdr
-        r += 1
-    r += 1
-    ws.cell(row=r, column=1, value='Categories:').font = _bf
-    r += 1
-    for cn, desc in _cat_guide:
-        _cc = CAT_COLORS.get(cn, 'FFFFFF')
-        ws.cell(row=r, column=1, value=cn).font = _bf; ws.cell(row=r, column=1).border = _bdr
-        ws.cell(row=r, column=1).fill = PatternFill(start_color=_cc, end_color=_cc, fill_type='solid')
-        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=6)
-        ws.cell(row=r, column=2, value=desc).font = _nf; ws.cell(row=r, column=2).alignment = _wrap; ws.cell(row=r, column=2).border = _bdr
-        r += 1
-    r += 1
-    ws.cell(row=r, column=1, value='Priorities:').font = _bf
-    r += 1
-    _pcg = {'P1 (Critical)': 'FFC7CE', 'P2 (Important)': 'FFEB9C', 'P3 (Nice-to-have)': 'C6EFCE'}
-    for pn, desc in _pri_guide:
-        _pc = _pcg.get(pn, 'FFFFFF')
-        ws.cell(row=r, column=1, value=pn).font = _bf; ws.cell(row=r, column=1).border = _bdr
-        ws.cell(row=r, column=1).fill = PatternFill(start_color=_pc, end_color=_pc, fill_type='solid')
-        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=6)
-        ws.cell(row=r, column=2, value=desc).font = _nf; ws.cell(row=r, column=2).alignment = _wrap; ws.cell(row=r, column=2).border = _bdr
-        r += 1
-    r += 2
-
-    _section(r, 'FEATURE DETAILS')
+    ws.merge_cells(f'A{r}:F{r}')
+    ws.cell(row=r, column=1, value='FEATURE DETAILS').font = _bf
     r += 1
 
     info = [
@@ -329,33 +256,6 @@ def _build_summary_sheet(wb, suite: TestSuite):
 
     r += 1
 
-    # Priority Distribution (V4)
-    pris = {}
-    for tc in suite.test_cases:
-        pri = getattr(tc, '_priority', 'P3')
-        pris.setdefault(pri, []).append(f'TC{tc.sno.zfill(2)}')
-    if pris:
-        ws.merge_cells(f'A{r}:F{r}')
-        ws.cell(row=r, column=1, value='PRIORITY DISTRIBUTION').font = _bf
-        r += 1
-        _pri_colors = {'P1': 'FFC7CE', 'P2': 'FFEB9C', 'P3': 'C6EFCE'}
-        for ci, h in enumerate(['Priority', 'Count', 'Test Cases'], 1):
-            c = ws.cell(row=r, column=ci, value=h)
-            c.font = _hf; c.fill = _hfill; c.alignment = _center; c.border = _bdr
-        r += 1
-        for pri in ['P1', 'P2', 'P3']:
-            if pri in pris:
-                ws.cell(row=r, column=1, value=pri).font = _nf
-                ws.cell(row=r, column=1).alignment = _center; ws.cell(row=r, column=1).border = _bdr
-                _pc = _pri_colors.get(pri, 'FFFFFF')
-                ws.cell(row=r, column=1).fill = PatternFill(start_color=_pc, end_color=_pc, fill_type='solid')
-                ws.cell(row=r, column=2, value=str(len(pris[pri]))).font = _nf
-                ws.cell(row=r, column=2).alignment = _center; ws.cell(row=r, column=2).border = _bdr
-                ws.cell(row=r, column=3, value=', '.join(pris[pri][:20])).font = _nf
-                ws.cell(row=r, column=3).alignment = _center; ws.cell(row=r, column=3).border = _bdr
-                r += 1
-        r += 1
-
     # Warnings
     if suite.warnings:
         ws.merge_cells(f'A{r}:F{r}')
@@ -401,23 +301,16 @@ def _build_testcases_sheet(wb, suite: TestSuite, sheet_name=None, tc_subset=None
     desc = _re.sub(r'^\[.*?\]\s*:?\s*', '', desc)
     ws.append([desc] + [''] * (len(EXCEL_HEADERS) - 1))
     ws.merge_cells('A1:%s1' % chr(64 + len(EXCEL_HEADERS)))
-    ws['A1'].font = Font(name='Calibri', bold=True, size=12, color=NAVY)
+    ws['A1'].font = Font(name='Calibri', bold=True, size=11, color=NAVY)
     ws['A1'].alignment = _wrap
-    ws['A1'].fill = PatternFill(start_color='E8EAF6', end_color='E8EAF6', fill_type='solid')  # soft indigo tint
-    ws.row_dimensions[1].height = 30
 
-    # Row 2: Headers — bold white on soft navy
+    # Row 2: Headers
     ws.append(EXCEL_HEADERS)
-    _header_fill = PatternFill(start_color='1A237E', end_color='1A237E', fill_type='solid')  # deep indigo
-    _header_font = Font(name='Calibri', bold=True, size=11, color='FFFFFF')
     for ci in range(1, len(EXCEL_HEADERS) + 1):
         c = ws.cell(row=2, column=ci)
-        c.font = _header_font
-        c.fill = _header_fill
-        c.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-        c.border = _bdr
+        c.font = _hf; c.fill = _hfill; c.alignment = _wrap; c.border = _bdr
 
-    # Freeze panes — keep Row 1 (description) + Row 2 (headers) visible
+    # Point 16: Freeze panes — keep headers visible when scrolling
     ws.freeze_panes = 'A3'
 
     # Write test cases (renumbered per-sheet starting from 1)
@@ -461,21 +354,14 @@ def _build_testcases_sheet(wb, suite: TestSuite, sheet_name=None, tc_subset=None
             else:
                 cell.alignment = Alignment(horizontal='left', vertical='top', wrap_text=True)
 
-    # Category-based row coloring + bold S.No with category color
+    # Alternate row shading
     for i in range(len(tc_start_rows) - 1):
         sr = tc_start_rows[i]
         er = tc_start_rows[i + 1] - 1
-        # Get category of this TC
-        cat = tcs[i].category if i < len(tcs) else 'Happy Path'
-        row_fill = _CAT_ROW_FILLS.get(cat, _lb if i % 2 == 0 else _wf)
-        sno_font = _CAT_SNO_FONTS.get(cat, _bf)
+        fill = _lb if i % 2 == 0 else _wf
         for r in range(sr, er + 1):
             for c in range(1, len(EXCEL_HEADERS) + 1):
-                ws.cell(row=r, column=c).fill = row_fill
-        # Bold S.No with category color
-        ws.cell(row=sr, column=1).font = sno_font
-        # Bold summary
-        ws.cell(row=sr, column=2).font = Font(name='Calibri', bold=True, size=11)
+                ws.cell(row=r, column=c).fill = fill
 
 
 def _build_traceability_sheet(wb, suite: TestSuite):

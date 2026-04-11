@@ -26,11 +26,6 @@ from modules.test_engine import build_test_suite
 from modules.excel_generator import generate_excel
 from modules.theme_v2 import CSS
 from modules.transaction_log import log_generation, get_history
-from modules.database import (init_db, save_pi_pages, load_pi_pages, save_features,
-                               load_features, load_all_features, get_features_count,
-                               save_jira, load_jira, is_jira_stale, save_chalk, load_chalk,
-                               load_chalk_as_object, get_chalk_cache_count,
-                               log_generation_db, get_history_db, get_db_stats, is_data_stale)
 
 if sys.platform.startswith('win'):
     try:
@@ -88,6 +83,7 @@ defaults = {
     'cp_path': None,
     'suite_info': None,
     'exit_report': None,
+    '_fetching_features': False,
 }
 for k, v in defaults.items():
     if k not in ss:
@@ -96,9 +92,6 @@ for k, v in defaults.items():
 # ================================================================
 # BANNER
 # ================================================================
-_db_stats = get_db_stats()
-_chalk_cached = get_chalk_cache_count()
-_db_badge = 'DB: %d features | %d cached' % (_db_stats['feature_count'], _chalk_cached) if _db_stats['feature_count'] > 0 else 'DB: empty'
 st.markdown("""<div class='banner'>
   <div>
     <div class='title'>TSG &mdash; Test Suite Generator</div>
@@ -108,9 +101,8 @@ st.markdown("""<div class='banner'>
     <div class='badge'>V2.0</div>
     <div class='badge'>Any Feature ID</div>
     <div class='badge'>Auto Matrix</div>
-    <div class='badge'>%s</div>
   </div>
-</div>""" % _db_badge, unsafe_allow_html=True)
+</div>""", unsafe_allow_html=True)
 
 # ================================================================
 # LAYOUT
@@ -139,12 +131,8 @@ with left:
                 else:
                     ss['selected_pi'] = label
                     ss['selected_pi_url'] = url
+                    # Use cache if available
                     ss['pi_features'] = ss.get('all_pi_features', {}).get(label, [])
-                # Clear previous execution state
-                ss['logs'] = []
-                ss['result_path'] = None
-                ss['exit_report'] = None
-                ss['suite_info'] = None
                 st.rerun()
 
     rc1, rc2 = st.columns([3, 1])
@@ -162,61 +150,42 @@ with left:
     st.markdown("<div class='sec-title'><span class='icon'>&#128269;</span> Step 2: Feature ID</div>", unsafe_allow_html=True)
     st.markdown("<div class='glass'>", unsafe_allow_html=True)
 
-    # Load features: DB first (instant), Chalk scrape as fallback
-    if not ss.get('all_pi_features'):
-        # Try DB first
-        db_features = load_all_features()
-        if db_features and get_features_count() > 0:
-            ss['all_pi_features'] = db_features
-            if ss['selected_pi']:
-                ss['pi_features'] = db_features.get(ss['selected_pi'], [])
-            # Show DB stats
-            stats = get_db_stats()
-            chalk_count = get_chalk_cache_count()
-            st.caption('Loaded %d features (%d with full Chalk data) from DB cache (%dKB)' % (
-                stats['feature_count'], chalk_count, stats['db_size_kb']))
-        else:
-            # DB empty — scrape Chalk features + full data and save to DB
-            with st.spinner('First run: fetching ALL PI features + Chalk data (one-time, cached to DB)...'):
-                try:
-                    _pw = sync_playwright().start()
-                    _br = _pw.chromium.launch(headless=True, channel=get_browser_channel())
-                    _cx = _br.new_context(viewport={'width': 1920, 'height': 1080})
-                    _pg = _cx.new_page()
-                    _all = {}
-                    save_pi_pages(ss['pi_list'])
-                    for _pi_label, _pi_url in ss['pi_list']:
-                        # Step 1: Get feature list for this PI
-                        _feats = discover_features_on_pi(_pg, _pi_url, log=lambda m: None)
-                        _all[_pi_label] = _feats
-                        save_features(_pi_label, _feats)
-                        # Step 2: Fetch full Chalk data for each feature on this PI
-                        for _fid, _ftitle in _feats:
-                            try:
-                                _chalk = fetch_feature_from_pi(_pg, _pi_url, _fid, log=lambda m: None)
-                                if _chalk and _chalk.scenarios:
-                                    save_chalk(_fid, _pi_label, _chalk)
-                            except:
-                                pass  # skip failures, don't block the whole fetch
-                    ss['all_pi_features'] = _all
-                    _cx.close(); _br.close(); _pw.stop()
-                    if ss['selected_pi']:
-                        ss['pi_features'] = _all.get(ss['selected_pi'], [])
-                    st.rerun()
-                except Exception as _e:
-                    st.error('Feature fetch failed: %s. Use Manual mode.' % _e)
-                    for _obj in ('_cx', '_br', '_pw'):
-                        try: locals()[_obj].close() if _obj != '_pw' else locals()[_obj].stop()
-                        except: pass
+    # Auto-fetch all PI features on first load (one-time, cached in session)
+    if not ss.get('all_pi_features') and not ss.get('_fetching_features'):
+        ss['_fetching_features'] = True
+        with st.spinner('First load: fetching features from ALL PIs (one-time, will be cached)...'):
+            try:
+                _pw = sync_playwright().start()
+                _br = _pw.chromium.launch(headless=True, channel=get_browser_channel())
+                _cx = _br.new_context(viewport={'width': 1920, 'height': 1080})
+                _pg = _cx.new_page()
+                _all = {}
+                for _pi_label, _pi_url in ss['pi_list']:
+                    st.toast('Scanning %s...' % _pi_label)
+                    _feats = discover_features_on_pi(_pg, _pi_url, log=lambda m: None)
+                    _all[_pi_label] = _feats
+                ss['all_pi_features'] = _all
+                if ss['selected_pi']:
+                    ss['pi_features'] = _all.get(ss['selected_pi'], [])
+                _cx.close(); _br.close(); _pw.stop()
+                ss['_fetching_features'] = False
+                st.rerun()
+            except Exception as _e:
+                st.error('Failed to fetch features: %s' % _e)
+                ss['_fetching_features'] = False
+                try: _cx.close()
+                except: pass
+                try: _br.close()
+                except: pass
+                try: _pw.stop()
+                except: pass
 
-    # When PI is selected, pull features from cache instantly
+    # When PI is selected, pull features from cache
     if ss['selected_pi'] and not ss['pi_features']:
         cached = ss.get('all_pi_features', {}).get(ss['selected_pi'], [])
         if cached:
             ss['pi_features'] = cached
             st.rerun()
-        elif ss.get('all_pi_features'):
-            st.caption('No features found for %s on Chalk page.' % ss['selected_pi'])
 
     fc1, fc2 = st.columns([5, 1])
     with fc2:
@@ -250,42 +219,19 @@ with left:
                         horizontal=True, key='suite_strategy',
                         help='Smart=representative combos | Full=every combination | Custom=your rules')
 
-    # Default values
-    channel = ['ITMBO', 'NBOP']
-    devices = ['Mobile']
-    networks = ['4G', '5G']
-    sim_types = ['eSIM', 'pSIM']
-    os_platforms = ['iOS', 'Android']
-
-    if strategy == 'Smart Suite (Recommended)':
-        # Just show a compact summary — no need to pick manually
-        st.caption('Smart Suite auto-picks 4 representative combos: ITMBO | Mobile | eSIM+pSIM | iOS+Android | 4G+5G')
-    elif strategy == 'Full Matrix':
-        st.caption('Full Matrix generates ALL combinations. Customize below:')
-        mc1, mc2, mc3 = st.columns(3)
-        with mc1:
-            channel = st.multiselect('Channel', CHANNELS, default=['ITMBO'])
-            devices = st.multiselect('Device Types', DEVICE_TYPES, default=['Mobile'])
-        with mc2:
-            networks = st.multiselect('Network Types', NETWORK_TYPES, default=['4G', '5G'])
-            sim_types = st.multiselect('SIM Types', SIM_TYPES, default=['eSIM', 'pSIM'])
-        with mc3:
-            os_platforms = st.multiselect('OS / Platform', OS_PLATFORMS, default=['iOS', 'Android'])
+    mc1, mc2, mc3 = st.columns(3)
+    with mc1:
+        channel = st.multiselect('Channel', CHANNELS, default=['ITMBO'])
+        devices = st.multiselect('Device Types', DEVICE_TYPES, default=['Mobile'])
+    with mc2:
+        networks = st.multiselect('Network Types', NETWORK_TYPES, default=['4G', '5G'])
+        sim_types = st.multiselect('SIM Types', SIM_TYPES, default=['eSIM', 'pSIM'])
+    with mc3:
+        os_platforms = st.multiselect('OS / Platform', OS_PLATFORMS, default=['iOS', 'Android'])
 
     # Custom Instructions (only shown for Custom mode)
     custom_instructions = ''
     if strategy == 'Custom Instructions':
-        # Show matrix controls for custom filtering
-        mc1, mc2, mc3 = st.columns(3)
-        with mc1:
-            channel = st.multiselect('Channel', CHANNELS, default=['ITMBO'], key='cust_ch')
-            devices = st.multiselect('Device Types', DEVICE_TYPES, default=['Mobile'], key='cust_dev')
-        with mc2:
-            networks = st.multiselect('Network Types', NETWORK_TYPES, default=['4G', '5G'], key='cust_net')
-            sim_types = st.multiselect('SIM Types', SIM_TYPES, default=['eSIM', 'pSIM'], key='cust_sim')
-        with mc3:
-            os_platforms = st.multiselect('OS / Platform', OS_PLATFORMS, default=['iOS', 'Android'], key='cust_os')
-
         st.markdown("**Custom Instructions** — tell the engine what you want:")
         suggestions = [
             'Focus on eSIM only, skip pSIM',
@@ -453,8 +399,8 @@ if reload_btn:
     st.cache_data.clear()
     for k in defaults:
         ss[k] = defaults[k]
-    ss['all_pi_features'] = {}  # clear session cache (DB persists — will reload from DB on next render)
-    st.toast('Session cleared! Features will reload from DB.')
+    ss['all_pi_features'] = {}  # clear feature cache
+    st.toast('Modules reloaded! Feature cache cleared.')
     st.rerun()
 
 if cp_btn:
@@ -484,7 +430,7 @@ if history_btn:
         st.sidebar.info('No history yet.')
 
 if refresh_pi_btn:
-    with st.spinner('Refreshing ALL PIs, features, and Chalk data + updating DB...'):
+    with st.spinner('Refreshing ALL PIs and features from Chalk...'):
         try:
             pw = sync_playwright().start()
             browser = pw.chromium.launch(headless=True, channel=get_browser_channel())
@@ -493,24 +439,12 @@ if refresh_pi_btn:
             # Refresh PI list
             pi_links = discover_pi_links(page, log=lambda m: None)
             ss['pi_list'] = [(p.label, p.url) for p in pi_links]
-            save_pi_pages(ss['pi_list'])
-            # Re-fetch ALL features + full Chalk data
+            # Re-fetch ALL features
             _all = {}
-            _chalk_count = 0
             for _pi_label, _pi_url in ss['pi_list']:
                 st.toast('Scanning %s...' % _pi_label)
                 _feats = discover_features_on_pi(page, _pi_url, log=lambda m: None)
                 _all[_pi_label] = _feats
-                save_features(_pi_label, _feats)
-                # Fetch full Chalk data for each feature
-                for _fid, _ftitle in _feats:
-                    try:
-                        _chalk = fetch_feature_from_pi(page, _pi_url, _fid, log=lambda m: None)
-                        if _chalk and _chalk.scenarios:
-                            save_chalk(_fid, _pi_label, _chalk)
-                            _chalk_count += 1
-                    except:
-                        pass
             ss['all_pi_features'] = _all
             # Keep current PI selection, just refresh its features from new cache
             if ss['selected_pi'] and ss['selected_pi'] in _all:
@@ -520,8 +454,8 @@ if refresh_pi_btn:
                 ss['selected_pi_url'] = ''
                 ss['pi_features'] = []
             ctx.close(); browser.close(); pw.stop()
-            st.toast('Refreshed %d PIs | %d features | %d with full Chalk data — saved to DB' % (
-                len(_all), sum(len(v) for v in _all.values()), _chalk_count))
+            st.toast('Refreshed %d PIs with %d total features' % (
+                len(_all), sum(len(v) for v in _all.values())))
             st.rerun()
         except Exception as e:
             st.error('Failed: %s' % e)
@@ -557,21 +491,9 @@ if run_btn:
 
         t0 = time.time()
         exit_items = []
-        timings = []  # (step_name, duration_secs)
-
-        def _tick(name):
-            """Record timing for a step."""
-            now = time.time()
-            if timings:
-                prev_name, prev_start = timings[-1]
-                dur = now - prev_start
-                timings[-1] = (prev_name, dur)
-                print('[TIME] %s: %.1fs' % (prev_name, dur), flush=True)
-            timings.append((name, now))
 
         with redirect_stdout(logger):
             try:
-                _tick('Browser Launch')
                 logger.set('[1/8] Launching browser...')
                 print('[INIT] Launching browser...', flush=True)
                 pw = sync_playwright().start()
@@ -580,14 +502,12 @@ if run_btn:
                 page = context.new_page()
                 exit_items.append('Browser launched')
 
-                _tick('Jira Fetch')
                 logger.set('[2/8] Fetching Jira: %s...' % feature_id)
                 jira = fetch_jira_issue(page, feature_id, log=logger)
                 exit_items.append('Jira fetched: %s' % jira.summary[:50])
 
                 parsed_docs = []
                 if inc_attachments and jira.attachments:
-                    _tick('Attachments')
                     logger.set('[3/8] Downloading %d attachment(s)...' % len(jira.attachments))
                     att_paths = download_attachments(page, jira, log=logger)
                     for ap in att_paths:
@@ -597,65 +517,14 @@ if run_btn:
                 else:
                     exit_items.append('Attachments: skipped')
 
-                _tick('Chalk Fetch')
                 logger.set('[4/8] Fetching Chalk: %s...' % ss['selected_pi'])
-                chalk = None
-                _chalk_source = ''
-
-                # ── SELF-HEAL CHAIN ──
-                # Step A: DB cache — selected PI
-                chalk = load_chalk_as_object(feature_id, ss['selected_pi'])
-                if chalk and chalk.scenarios:
-                    _chalk_source = 'DB cache (%s)' % ss['selected_pi']
-                    print('[CHALK] Step A: DB hit (%s): %d scenarios' % (ss['selected_pi'], len(chalk.scenarios)), flush=True)
+                chalk = fetch_feature_from_pi(page, ss['selected_pi_url'], feature_id, log=logger)
+                if chalk.scenarios:
+                    exit_items.append('Chalk: %d scenarios from %s' % (len(chalk.scenarios), ss['selected_pi']))
                 else:
-                    # Step B: DB cache — any PI
-                    from modules.database import _conn as _db_conn
-                    _c = _db_conn()
-                    _row = _c.execute('SELECT pi_label FROM chalk_cache WHERE feature_id=? AND scenarios_json != "[]" LIMIT 1',
-                                      (feature_id,)).fetchone()
-                    _c.close()
-                    if _row:
-                        chalk = load_chalk_as_object(feature_id, _row['pi_label'])
-                    if chalk and chalk.scenarios:
-                        _chalk_source = 'DB cache (%s)' % _row['pi_label']
-                        print('[CHALK] Step B: DB hit (%s): %d scenarios' % (_row['pi_label'], len(chalk.scenarios)), flush=True)
-                    else:
-                        # Step C: Live fetch — selected PI
-                        print('[CHALK] Step B: DB miss. Live fetching %s...' % ss['selected_pi'], flush=True)
-                        chalk = fetch_feature_from_pi(page, ss['selected_pi_url'], feature_id, log=logger)
-                        if chalk and chalk.scenarios:
-                            save_chalk(feature_id, ss['selected_pi'], chalk)
-                            _chalk_source = '%s (live, cached)' % ss['selected_pi']
-                        else:
-                            # Step D: Live scan — ALL PIs
-                            print('[CHALK] Step C: Not on %s. Scanning all PIs...' % ss['selected_pi'], flush=True)
-                            for _sl, _su in ss['pi_list']:
-                                if _sl == ss['selected_pi']:
-                                    continue
-                                try:
-                                    _sc = fetch_feature_from_pi(page, _su, feature_id, log=lambda m: None)
-                                    if _sc and _sc.scenarios:
-                                        chalk = _sc
-                                        save_chalk(feature_id, _sl, chalk)
-                                        _chalk_source = '%s (scanned, cached)' % _sl
-                                        print('[CHALK] Step D: Found on %s: %d scenarios' % (_sl, len(chalk.scenarios)), flush=True)
-                                        break
-                                except:
-                                    pass
-                            if not chalk or not chalk.scenarios:
-                                print('[CHALK] Step D: Not found on any PI', flush=True)
-                                _chalk_source = 'not found'
-                                from modules.chalk_parser import ChalkData
-                                chalk = ChalkData(feature_id=feature_id)
-
-                if chalk and chalk.scenarios:
-                    exit_items.append('Chalk: %d scenarios from %s' % (len(chalk.scenarios), _chalk_source))
-                else:
-                    exit_items.append('Chalk: Feature %s — %s' % (feature_id, _chalk_source))
+                    exit_items.append('Chalk: Feature %s not found in %s' % (feature_id, ss['selected_pi']))
 
                 if uploaded_files:
-                    _tick('Upload Parse')
                     for uf in uploaded_files:
                         logger.set('[4b/8] Parsing upload: %s...' % uf.name)
                         save_path = INPUTS / uf.name
@@ -663,11 +532,9 @@ if run_btn:
                         parsed_docs.append(parse_file(save_path, log=logger))
                     exit_items.append('Uploads: %d parsed' % len(uploaded_files))
 
-                _tick('Browser Close')
                 context.close(); browser.close(); pw.stop()
                 exit_items.append('Browser closed')
 
-                _tick('Test Engine')
                 logger.set('[5/8] Building test suite...')
                 options = {
                     'channel': channel, 'devices': devices, 'networks': networks,
@@ -682,36 +549,19 @@ if run_btn:
                 total_steps = sum(len(tc.steps) for tc in suite.test_cases)
                 exit_items.append('Suite built: %d TCs | %d steps' % (len(suite.test_cases), total_steps))
 
-                _tick('Excel Generation')
                 logger.set('[6/8] Generating Excel...')
                 out_path = generate_excel(suite, log=logger)
                 exit_items.append('Excel: %s' % out_path.name)
 
-                _tick('Finalize')
                 cps = sorted(CHECKPOINTS.glob('CHECKPOINT_%s*' % feature_id), reverse=True)
                 cp_path = str(cps[0]) if cps else None
                 if cp_path:
                     exit_items.append('Checkpoint: %s' % Path(cp_path).name)
 
-                # Finalize last timing entry
-                _tick('_end')
-                timings.pop()  # remove the _end placeholder
-
                 elapsed = time.time() - t0
                 m, s = divmod(int(elapsed), 60)
                 logger.set('[8/8] DONE in %dm %ds' % (m, s))
-
-                # Print time matrix
-                print('\n' + '=' * 50, flush=True)
-                print('  TIME MATRIX', flush=True)
-                print('  %-20s %10s %8s' % ('Step', 'Duration', '%'), flush=True)
-                print('  ' + '-' * 42, flush=True)
-                for step_name, dur in timings:
-                    pct = (dur / elapsed * 100) if elapsed > 0 else 0
-                    print('  %-20s %8.1fs %7.1f%%' % (step_name, dur, pct), flush=True)
-                print('  ' + '-' * 42, flush=True)
-                print('  %-20s %8.1fs %7s' % ('TOTAL', elapsed, '100%'), flush=True)
-                print('=' * 50, flush=True)
+                print('\n[DONE] Total time: %dm %ds' % (m, s), flush=True)
 
                 sheet_count = len(suite.groups) + 2 if len(suite.groups) > 1 else 3
                 if hasattr(suite, 'combinations') and suite.combinations and len(suite.combinations) > 1:
@@ -720,20 +570,15 @@ if run_btn:
                 ss['result_path'] = str(out_path)
                 ss['cp_path'] = cp_path
                 ss['suite_info'] = {'tc_count': len(suite.test_cases), 'step_count': total_steps, 'sheet_count': sheet_count}
-
-                # Build timing summary for exit report
-                timing_items = ['⏱ %s: %.1fs' % (name, dur) for name, dur in timings]
                 ss['exit_report'] = {
                     'title': 'Generation Complete - %s' % feature_id,
-                    'items': exit_items + [''] + timing_items,
+                    'items': exit_items,
                     'footer': 'Completed at %s | Duration: %dm %ds | PI: %s' % (
                         datetime.now().strftime('%Y-%m-%d %H:%M:%S'), m, s, ss['selected_pi']),
                 }
 
-                # Log transaction (both JSON and DB)
+                # Log transaction
                 log_generation(feature_id, ss['selected_pi'],
-                    len(suite.test_cases), total_steps, strategy, str(out_path))
-                log_generation_db(feature_id, ss['selected_pi'],
                     len(suite.test_cases), total_steps, strategy, str(out_path))
 
                 st.rerun()
@@ -752,7 +597,6 @@ if run_btn:
                         datetime.now().strftime('%Y-%m-%d %H:%M:%S'), m, s),
                 }
                 log_generation(feature_id, ss.get('selected_pi',''), 0, 0, strategy, '', status='FAILED')
-                log_generation_db(feature_id, ss.get('selected_pi',''), 0, 0, strategy, '', status='FAILED')
                 # Point 3: safe cleanup — variables may not exist if crash was early
                 for _obj_name in ('context', 'browser', 'pw'):
                     _obj = locals().get(_obj_name)

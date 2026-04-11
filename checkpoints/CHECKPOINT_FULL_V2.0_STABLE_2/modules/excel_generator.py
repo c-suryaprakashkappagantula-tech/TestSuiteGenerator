@@ -55,14 +55,21 @@ def generate_excel(suite: TestSuite, log=print) -> Path:
     log('[EXCEL] Building Summary sheet...')
     _build_summary_sheet(wb, suite)
 
-    # ── Sheet 2: All Test Cases in ONE sheet ──
-    log('[EXCEL] Building Test Cases sheet (%d TCs)...' % len(suite.test_cases))
-    _build_testcases_sheet(wb, suite, sheet_name='Test Cases')
+    # ── Sheet 2+: Test Cases (multi-sheet if groups detected) ──
+    if hasattr(suite, 'groups') and suite.groups and len(suite.groups) > 1:
+        log('[EXCEL] Building %d grouped Test Cases sheets...' % len(suite.groups))
+        for group_name, group_tcs in suite.groups.items():
+            sname = '%s_%s' % (suite.feature_id[:10], group_name[:20])
+            sname = sname[:31].replace('/', '-').replace('\\', '-').replace('?', '').replace('*', '')
+            _build_testcases_sheet(wb, suite, sheet_name=sname, tc_subset=group_tcs)
+            log('[EXCEL]   Sheet: %s (%d TCs)' % (sname, len(group_tcs)))
+    else:
+        log('[EXCEL] Building Test Cases sheet...')
+        _build_testcases_sheet(wb, suite)
 
-    # ── Sheet 3: Traceability (AC → TC mapping) ──
-    if suite.ac_traceability:
-        log('[EXCEL] Building Traceability sheet...')
-        _build_traceability_sheet(wb, suite)
+    # ── Sheet 3: Traceability ──
+    log('[EXCEL] Building Traceability sheet...')
+    _build_traceability_sheet(wb, suite)
 
     # ── Sheet 4: Combinations (if matrix expansion was used) ──
     if hasattr(suite, 'combinations') and suite.combinations and len(suite.combinations) > 1:
@@ -119,56 +126,6 @@ def _build_summary_sheet(wb, suite: TestSuite):
             ws.cell(row=row, column=ci).fill = _sec_fill
 
     # Feature Details
-    _section(r, 'SUITE GUIDE')
-    r += 1
-    _guide_items = [
-        ('Summary (this sheet)', 'Overview of the feature, acceptance criteria, coverage breakdown, priority distribution, and data sources.'),
-        ('Test Cases', 'All test scenarios with step-by-step actions and expected results. Execute in order — P1 (critical) first.'),
-        ('Traceability', 'Maps each Acceptance Criteria to the test cases that cover it. Green = covered, Red = gap.'),
-        ('Combinations', 'Device/SIM/Network matrix showing which hardware combos each test case should be run on.'),
-    ]
-    _cat_guide = [
-        ('Happy Path', 'Core positive scenarios — the feature works as designed with valid inputs and expected conditions.'),
-        ('Negative', 'Failure and error scenarios — invalid inputs, system failures, timeouts, rollbacks. Verifies graceful handling.'),
-        ('Edge Case', 'Unusual but valid scenarios — boundary values, concurrent operations, rare device combos.'),
-        ('E2E', 'Full workflow from UI through API to all downstream systems. Validates the complete chain.'),
-        ('Regression', 'Ensures existing functionality is not broken by the new feature. Run after every deployment.'),
-    ]
-    _pri_guide = [
-        ('P1 (Critical)', 'Must-run. Core happy paths, rollback, data integrity, E2E flows. Block release if failing.'),
-        ('P2 (Important)', 'Should-run. Negative cases, input validation, error handling. High risk if skipped.'),
-        ('P3 (Nice-to-have)', 'Good-to-run. UI checks, notifications, low-risk edge cases. Run if time permits.'),
-    ]
-    ws.cell(row=r, column=1, value='Sheets:').font = _bf
-    r += 1
-    for sn, desc in _guide_items:
-        ws.cell(row=r, column=1, value=sn).font = _bf; ws.cell(row=r, column=1).border = _bdr
-        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=6)
-        ws.cell(row=r, column=2, value=desc).font = _nf; ws.cell(row=r, column=2).alignment = _wrap; ws.cell(row=r, column=2).border = _bdr
-        r += 1
-    r += 1
-    ws.cell(row=r, column=1, value='Categories:').font = _bf
-    r += 1
-    for cn, desc in _cat_guide:
-        _cc = CAT_COLORS.get(cn, 'FFFFFF')
-        ws.cell(row=r, column=1, value=cn).font = _bf; ws.cell(row=r, column=1).border = _bdr
-        ws.cell(row=r, column=1).fill = PatternFill(start_color=_cc, end_color=_cc, fill_type='solid')
-        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=6)
-        ws.cell(row=r, column=2, value=desc).font = _nf; ws.cell(row=r, column=2).alignment = _wrap; ws.cell(row=r, column=2).border = _bdr
-        r += 1
-    r += 1
-    ws.cell(row=r, column=1, value='Priorities:').font = _bf
-    r += 1
-    _pcg = {'P1 (Critical)': 'FFC7CE', 'P2 (Important)': 'FFEB9C', 'P3 (Nice-to-have)': 'C6EFCE'}
-    for pn, desc in _pri_guide:
-        _pc = _pcg.get(pn, 'FFFFFF')
-        ws.cell(row=r, column=1, value=pn).font = _bf; ws.cell(row=r, column=1).border = _bdr
-        ws.cell(row=r, column=1).fill = PatternFill(start_color=_pc, end_color=_pc, fill_type='solid')
-        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=6)
-        ws.cell(row=r, column=2, value=desc).font = _nf; ws.cell(row=r, column=2).alignment = _wrap; ws.cell(row=r, column=2).border = _bdr
-        r += 1
-    r += 2
-
     _section(r, 'FEATURE DETAILS')
     r += 1
 
@@ -328,33 +285,6 @@ def _build_summary_sheet(wb, suite: TestSuite):
         r += 1
 
     r += 1
-
-    # Priority Distribution (V4)
-    pris = {}
-    for tc in suite.test_cases:
-        pri = getattr(tc, '_priority', 'P3')
-        pris.setdefault(pri, []).append(f'TC{tc.sno.zfill(2)}')
-    if pris:
-        ws.merge_cells(f'A{r}:F{r}')
-        ws.cell(row=r, column=1, value='PRIORITY DISTRIBUTION').font = _bf
-        r += 1
-        _pri_colors = {'P1': 'FFC7CE', 'P2': 'FFEB9C', 'P3': 'C6EFCE'}
-        for ci, h in enumerate(['Priority', 'Count', 'Test Cases'], 1):
-            c = ws.cell(row=r, column=ci, value=h)
-            c.font = _hf; c.fill = _hfill; c.alignment = _center; c.border = _bdr
-        r += 1
-        for pri in ['P1', 'P2', 'P3']:
-            if pri in pris:
-                ws.cell(row=r, column=1, value=pri).font = _nf
-                ws.cell(row=r, column=1).alignment = _center; ws.cell(row=r, column=1).border = _bdr
-                _pc = _pri_colors.get(pri, 'FFFFFF')
-                ws.cell(row=r, column=1).fill = PatternFill(start_color=_pc, end_color=_pc, fill_type='solid')
-                ws.cell(row=r, column=2, value=str(len(pris[pri]))).font = _nf
-                ws.cell(row=r, column=2).alignment = _center; ws.cell(row=r, column=2).border = _bdr
-                ws.cell(row=r, column=3, value=', '.join(pris[pri][:20])).font = _nf
-                ws.cell(row=r, column=3).alignment = _center; ws.cell(row=r, column=3).border = _bdr
-                r += 1
-        r += 1
 
     # Warnings
     if suite.warnings:

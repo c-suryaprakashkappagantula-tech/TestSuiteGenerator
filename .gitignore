@@ -10,3 +10,11 @@ logs/*
 *.log
 storage_state.json
 .env
+
+# DB cache (each user builds their own)
+tsg_cache.db
+tsg_cache.db-wal
+tsg_cache.db-shm
+
+# Keep checkpoint V2.0
+!checkpoints/CHECKPOINT_FULL_V2.0/

@@ -1,8 +1,9 @@
 """
-TSG_Dashboard_V2.0.py -- Test Suite Generator Dashboard V2.0
-Premium glassmorphism UI with neon accents and animations.
+TSG_Dashboard_V4.0.py -- Test Suite Generator Dashboard V4.0
+V4.0 adds: LLM-powered gap analysis, step improvement, and NLU custom instructions.
+Built on V3.0 (Feature-aware TC naming, Jira subtask analysis).
 
-Usage:  streamlit run TSG_Dashboard_V2.0.py
+Usage:  streamlit run TSG_Dashboard_V4.0.py
 """
 import sys, os, time, traceback, shutil, io
 from pathlib import Path
@@ -26,11 +27,17 @@ from modules.test_engine import build_test_suite
 from modules.excel_generator import generate_excel
 from modules.theme_v2 import CSS
 from modules.transaction_log import log_generation, get_history
+from modules.llm_engine import (LLMClient, create_llm_from_env,
+                                 PROVIDER_OPENAI, PROVIDER_AZURE, PROVIDER_BEDROCK,
+                                 PROVIDER_OLLAMA, PROVIDER_NONE, DEFAULT_MODELS)
+from modules.llm_reviewer import review_suite_gaps, improve_steps, parse_custom_instructions_llm
 from modules.database import (init_db, save_pi_pages, load_pi_pages, save_features,
                                load_features, load_all_features, get_features_count,
                                save_jira, load_jira, is_jira_stale, save_chalk, load_chalk,
                                load_chalk_as_object, get_chalk_cache_count,
-                               log_generation_db, get_history_db, get_db_stats, is_data_stale)
+                               log_generation_db, get_history_db, get_db_stats, is_data_stale,
+                               save_test_suite, load_latest_suite, build_ai_review_prompt,
+                               get_all_suite_history)
 
 if sys.platform.startswith('win'):
     try:
@@ -52,8 +59,19 @@ if sys.platform.startswith('win'):
 # ================================================================
 # PAGE CONFIG
 # ================================================================
-st.set_page_config(page_title='TSG - Test Suite Generator', page_icon='https://em-content.zobj.net/source/twitter/408/test-tube_1f9ea.png', layout='wide')
+st.set_page_config(page_title='TSG V4 - AI-Powered Test Suite Generator', page_icon='https://em-content.zobj.net/source/twitter/408/test-tube_1f9ea.png', layout='wide')
 st.markdown(CSS, unsafe_allow_html=True)
+
+# ================================================================
+# LLM CONFIG DEFAULTS (populated in Step 4 expander)
+# ================================================================
+_provider_map = {
+    'None (Rule-Based)': PROVIDER_NONE,
+    'OpenAI': PROVIDER_OPENAI,
+    'Azure OpenAI': PROVIDER_AZURE,
+    'AWS Bedrock': PROVIDER_BEDROCK,
+    'Ollama (Local)': PROVIDER_OLLAMA,
+}
 
 # ================================================================
 # DEFAULT PI LIST
@@ -99,18 +117,21 @@ for k, v in defaults.items():
 _db_stats = get_db_stats()
 _chalk_cached = get_chalk_cache_count()
 _db_badge = 'DB: %d features | %d cached' % (_db_stats['feature_count'], _chalk_cached) if _db_stats['feature_count'] > 0 else 'DB: empty'
+_ai_provider_label = ss.get('llm_provider_select', 'None (Rule-Based)')
+_ai_badge = 'AI: %s' % _ai_provider_label if _ai_provider_label != 'None (Rule-Based)' else 'AI: Off'
 st.markdown("""<div class='banner'>
   <div>
     <div class='title'>TSG &mdash; Test Suite Generator</div>
-    <div class='sub'>Chalk + Jira + Attachments &rarr; Production-Ready Test Suites</div>
+    <div class='sub'>Chalk + Jira + Attachments + AI &rarr; Production-Ready Test Suites</div>
   </div>
   <div style='display:flex; gap:8px; align-items:center; flex-wrap:wrap;'>
-    <div class='badge'>V2.0</div>
-    <div class='badge'>Any Feature ID</div>
+    <div class='badge'>V4.0</div>
+    <div class='badge'>LLM-Powered</div>
     <div class='badge'>Auto Matrix</div>
     <div class='badge'>%s</div>
+    <div class='badge'>%s</div>
   </div>
-</div>""" % _db_badge, unsafe_allow_html=True)
+</div>""" % (_db_badge, _ai_badge), unsafe_allow_html=True)
 
 # ================================================================
 # LAYOUT
@@ -245,12 +266,14 @@ with left:
     st.markdown("<div class='sec-title'><span class='icon'>&#9881;</span> Step 3: Test Matrix & Strategy</div>", unsafe_allow_html=True)
     st.markdown("<div class='glass'>", unsafe_allow_html=True)
 
-    # Suite Strategy selector
-    strategy = st.radio('Suite Strategy', ['Smart Suite (Recommended)', 'Full Matrix', 'Custom Instructions'],
+    # Suite Strategy selector (Smart Suite / Full Matrix as radio, Custom Instructions as checkbox)
+    strategy = st.radio('Suite Strategy', ['Smart Suite (Recommended)', 'Full Matrix'],
                         horizontal=True, key='suite_strategy',
-                        help='Smart=representative combos | Full=every combination | Custom=your rules')
+                        help='Smart=representative combos | Full=every combination')
 
-    # Default values
+    use_custom = st.checkbox('Custom Instructions', key='custom_instructions_toggle')
+
+    # Default values — Smart Suite includes both channels
     channel = ['ITMBO', 'NBOP']
     devices = ['Mobile']
     networks = ['4G', '5G']
@@ -258,8 +281,7 @@ with left:
     os_platforms = ['iOS', 'Android']
 
     if strategy == 'Smart Suite (Recommended)':
-        # Just show a compact summary — no need to pick manually
-        st.caption('Smart Suite auto-picks 4 representative combos: ITMBO | Mobile | eSIM+pSIM | iOS+Android | 4G+5G')
+        st.caption('Smart Suite: ITMBO + NBOP | Mobile | eSIM+pSIM | iOS+Android | 4G+5G')
     elif strategy == 'Full Matrix':
         st.caption('Full Matrix generates ALL combinations. Customize below:')
         mc1, mc2, mc3 = st.columns(3)
@@ -272,21 +294,9 @@ with left:
         with mc3:
             os_platforms = st.multiselect('OS / Platform', OS_PLATFORMS, default=['iOS', 'Android'])
 
-    # Custom Instructions (only shown for Custom mode)
+    # Custom Instructions (only shown when checkbox is checked)
     custom_instructions = ''
-    if strategy == 'Custom Instructions':
-        # Show matrix controls for custom filtering
-        mc1, mc2, mc3 = st.columns(3)
-        with mc1:
-            channel = st.multiselect('Channel', CHANNELS, default=['ITMBO'], key='cust_ch')
-            devices = st.multiselect('Device Types', DEVICE_TYPES, default=['Mobile'], key='cust_dev')
-        with mc2:
-            networks = st.multiselect('Network Types', NETWORK_TYPES, default=['4G', '5G'], key='cust_net')
-            sim_types = st.multiselect('SIM Types', SIM_TYPES, default=['eSIM', 'pSIM'], key='cust_sim')
-        with mc3:
-            os_platforms = st.multiselect('OS / Platform', OS_PLATFORMS, default=['iOS', 'Android'], key='cust_os')
-
-        st.markdown("**Custom Instructions** — tell the engine what you want:")
+    if use_custom:
         suggestions = [
             'Focus on eSIM only, skip pSIM',
             'Only NBOP channel',
@@ -303,17 +313,15 @@ with left:
             'Include Syniverse and MBO integration checks',
             'Add data integrity checks after each operation',
         ]
-        st.caption('Suggestions (click to copy):')
-        # Show suggestions in 2 columns of chips
-        sg1, sg2 = st.columns(2)
-        with sg1:
-            for s in suggestions[:7]:
-                st.code(s, language=None)
-        with sg2:
-            for s in suggestions[7:]:
-                st.code(s, language=None)
-        custom_instructions = st.text_area('Your instructions:', value='', height=100,
+        selected_suggestion = st.selectbox(
+            'Pick a preset instruction:',
+            options=['-- Select --'] + suggestions,
+            key='custom_suggestion_dropdown')
+        custom_instructions = st.text_area('Or type your own instructions:', value='', height=100,
             placeholder='Type your instructions here...\ne.g. Focus on eSIM Mobile 5G, add rollback scenarios, skip 4G')
+        # If user picked a preset but didn't type anything, use the preset
+        if not custom_instructions.strip() and selected_suggestion != '-- Select --':
+            custom_instructions = selected_suggestion
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -329,6 +337,98 @@ with left:
         inc_e2e = st.checkbox('E2E scenarios', value=True)
         inc_edge = st.checkbox('Edge Cases', value=True)
         headed = st.checkbox('Show Browser (debug only)', value=False, help='Keep unchecked for headless mode')
+
+    # ── AI Engine (compact inline config) ──
+    with st.expander('🤖 AI Engine', expanded=False):
+        _ai_c1, _ai_c2 = st.columns([1, 2])
+        with _ai_c1:
+            llm_provider = st.selectbox('Provider', list(_provider_map.keys()), key='llm_provider_select')
+        _selected_provider = _provider_map[llm_provider]
+
+        # Provider-specific config defaults
+        _llm_api_key = ''
+        _llm_model = DEFAULT_MODELS.get(_selected_provider, '')
+        _llm_base_url = ''
+        _azure_endpoint = ''
+        _azure_deployment = ''
+        _bedrock_region = 'us-east-1'
+        _llm_temp = 0.3
+
+        if _selected_provider == PROVIDER_OPENAI:
+            with _ai_c2:
+                _llm_api_key = st.text_input('API Key', type='password', key='oai_key',
+                                              value=os.environ.get('OPENAI_API_KEY', ''))
+            _oc1, _oc2 = st.columns(2)
+            with _oc1:
+                _llm_model = st.text_input('Model', value=os.environ.get('OPENAI_MODEL', 'gpt-4o'), key='oai_model')
+            with _oc2:
+                _llm_base_url = st.text_input('Base URL (optional)', value='', key='oai_url')
+
+        elif _selected_provider == PROVIDER_AZURE:
+            with _ai_c2:
+                _llm_api_key = st.text_input('API Key', type='password', key='az_key',
+                                              value=os.environ.get('AZURE_OPENAI_API_KEY', ''))
+            _ac1, _ac2 = st.columns(2)
+            with _ac1:
+                _azure_endpoint = st.text_input('Endpoint', key='az_endpoint',
+                                                 value=os.environ.get('AZURE_OPENAI_ENDPOINT', ''))
+            with _ac2:
+                _azure_deployment = st.text_input('Deployment', key='az_deploy',
+                                                   value=os.environ.get('AZURE_OPENAI_DEPLOYMENT', 'gpt-4o'))
+
+        elif _selected_provider == PROVIDER_BEDROCK:
+            with _ai_c2:
+                _bedrock_region = st.text_input('AWS Region', value=os.environ.get('AWS_DEFAULT_REGION', 'us-east-1'), key='br_region')
+            _bc1, _bc2 = st.columns(2)
+            with _bc1:
+                _llm_model = st.text_input('Model ID', value=DEFAULT_MODELS[PROVIDER_BEDROCK], key='br_model')
+            with _bc2:
+                st.caption('Uses ~/.aws/credentials or env vars')
+
+        elif _selected_provider == PROVIDER_OLLAMA:
+            with _ai_c2:
+                _llm_base_url = st.text_input('Ollama URL', value='http://localhost:11434/v1', key='ol_url')
+            _lc1, _lc2 = st.columns(2)
+            with _lc1:
+                _llm_model = st.text_input('Model', value='llama3.1', key='ol_model')
+
+        if _selected_provider != PROVIDER_NONE:
+            _tc1, _tc2 = st.columns([2, 1])
+            with _tc1:
+                _llm_temp = st.slider('Temperature', 0.0, 1.0, 0.3, 0.1, key='llm_temp')
+            with _tc2:
+                if st.button('Test Connection', key='test_llm', use_container_width=True):
+                    with st.spinner('Testing...'):
+                        _test_llm = LLMClient(
+                            provider=_selected_provider, model=_llm_model, api_key=_llm_api_key,
+                            base_url=_llm_base_url, azure_endpoint=_azure_endpoint,
+                            azure_deployment=_azure_deployment, region=_bedrock_region,
+                            log=lambda m: None)
+                        if _test_llm.available:
+                            _resp = _test_llm.chat('You are a test assistant.', 'Reply with exactly: OK')
+                            if _resp:
+                                st.success('Connected!')
+                            else:
+                                st.error('Empty response — check model name')
+                        else:
+                            st.error('Init failed — check credentials')
+
+    # AI feature toggles (only when LLM is configured)
+    if _selected_provider != PROVIDER_NONE:
+        ai_c1, ai_c2, ai_c3 = st.columns(3)
+        with ai_c1:
+            ai_gap_analysis = st.checkbox('AI Gap Analysis', value=True, key='ai_gap',
+                                           help='LLM reviews suite and suggests missing scenarios')
+        with ai_c2:
+            ai_step_improve = st.checkbox('AI Step Improvement', value=True, key='ai_steps',
+                                           help='LLM improves generic steps to be feature-specific')
+        with ai_c3:
+            ai_custom_parse = st.checkbox('AI Custom Instructions', value=True, key='ai_custom',
+                                           help='LLM parses custom instructions with NLU instead of regex')
+    else:
+        ai_gap_analysis = False
+        ai_step_improve = False
+        ai_custom_parse = False
     st.markdown("</div>", unsafe_allow_html=True)
 
     # ── Step 5: Upload ──
@@ -397,6 +497,38 @@ with right:
                 data=Path(ss['result_path']).read_bytes(),
                 file_name=Path(ss['result_path']).name,
                 use_container_width=True, key='dl_main')
+
+    # ── AI Review Prompt (auto-generated) ──
+    if ss.get('last_feature_id'):
+        _ai_prompt = build_ai_review_prompt(ss['last_feature_id'])
+        if _ai_prompt and 'No test suite found' not in _ai_prompt:
+            st.markdown("<div class='sec-title'><span class='icon'>&#129302;</span> AI Review Prompt</div>", unsafe_allow_html=True)
+            st.caption('Auto-generated from DB — copy and paste into Amazon Q, ChatGPT, or any LLM')
+            with st.expander('📋 AI Review Prompt — ready to paste (%d chars)' % len(_ai_prompt), expanded=True):
+                st.code(_ai_prompt, language='markdown')
+            _pr1, _pr2 = st.columns(2)
+            with _pr1:
+                st.download_button('Download as .md',
+                    data=_ai_prompt.encode('utf-8'),
+                    file_name='AI_Review_%s.md' % ss['last_feature_id'],
+                    mime='text/markdown',
+                    use_container_width=True, key='dl_ai_prompt')
+            with _pr2:
+                st.download_button('Download as .txt',
+                    data=_ai_prompt.encode('utf-8'),
+                    file_name='AI_Review_%s.txt' % ss['last_feature_id'],
+                    mime='text/plain',
+                    use_container_width=True, key='dl_ai_txt')
+
+            # ── Paste LLM Response back ──
+            st.markdown("<div class='sec-title'><span class='icon'>&#128172;</span> LLM Response</div>", unsafe_allow_html=True)
+            st.caption('Paste the LLM response here to see suggested additions')
+            llm_response = st.text_area('Paste LLM response:', value='', height=150,
+                placeholder='Paste the AI response here after running the prompt in your LLM...',
+                key='llm_response_input')
+            if llm_response.strip():
+                st.markdown("**Suggested additions from AI:**")
+                st.markdown(llm_response)
 
     # ── Exit Report ──
     if ss.get('exit_report'):
@@ -668,7 +800,7 @@ if run_btn:
                 exit_items.append('Browser closed')
 
                 _tick('Test Engine')
-                logger.set('[5/8] Building test suite...')
+                logger.set('[5/10] Building test suite (rule-based)...')
                 options = {
                     'channel': channel, 'devices': devices, 'networks': networks,
                     'sim_types': sim_types, 'os_platforms': os_platforms,
@@ -678,12 +810,104 @@ if run_btn:
                     'strategy': strategy,
                     'custom_instructions': custom_instructions,
                 }
+
+                # ── LLM: Parse custom instructions with NLU ──
+                llm = None
+                if _selected_provider != PROVIDER_NONE:
+                    logger.set('[5a/10] Initializing AI engine...')
+                    llm = LLMClient(
+                        provider=_selected_provider, model=_llm_model, api_key=_llm_api_key,
+                        base_url=_llm_base_url, azure_endpoint=_azure_endpoint,
+                        azure_deployment=_azure_deployment, region=_bedrock_region,
+                        temperature=_llm_temp, log=logger)
+                    if llm.available:
+                        exit_items.append('AI Engine: %s (%s)' % (llm_provider, _llm_model))
+                    else:
+                        exit_items.append('AI Engine: init failed — running rule-based')
+                        llm = None
+
+                if llm and ai_custom_parse and custom_instructions.strip():
+                    _tick('LLM Custom Parse')
+                    logger.set('[5b/10] AI parsing custom instructions...')
+                    llm_directives = parse_custom_instructions_llm(llm, custom_instructions, log=logger)
+                    if llm_directives:
+                        # Apply LLM-parsed filters to options
+                        if llm_directives.get('filter_channels'):
+                            options['channel'] = llm_directives['filter_channels']
+                        if llm_directives.get('filter_devices'):
+                            options['devices'] = llm_directives['filter_devices']
+                        if llm_directives.get('filter_sim'):
+                            options['sim_types'] = llm_directives['filter_sim']
+                        if llm_directives.get('filter_networks'):
+                            options['networks'] = llm_directives['filter_networks']
+                        if llm_directives.get('filter_os'):
+                            options['os_platforms'] = llm_directives['filter_os']
+                        # Pass extra scenarios and flags through
+                        options['llm_directives'] = llm_directives
+                        exit_items.append('AI Custom Parse: %s' % llm_directives.get('interpretation', 'done')[:60])
+
                 suite = build_test_suite(jira, chalk, parsed_docs, options, log=logger)
                 total_steps = sum(len(tc.steps) for tc in suite.test_cases)
                 exit_items.append('Suite built: %d TCs | %d steps' % (len(suite.test_cases), total_steps))
 
+                # ── LLM: Gap Analysis ──
+                if llm and ai_gap_analysis:
+                    _tick('LLM Gap Analysis')
+                    logger.set('[6/10] AI gap analysis — finding missing scenarios...')
+                    from modules.test_engine import TestCase, TestStep
+                    gaps = review_suite_gaps(llm, suite, jira, chalk, log=logger)
+                    _gap_added = 0
+                    if gaps:
+                        _next_idx = len(suite.test_cases) + 1
+                        for g in gaps:
+                            steps = []
+                            for si, s in enumerate(g.get('steps', []), 1):
+                                steps.append(TestStep(si, s.get('action', ''), s.get('expected', '')))
+                            if not steps:
+                                steps = [TestStep(1, g.get('title', 'Execute scenario'), 'Completed'),
+                                         TestStep(2, 'Verify results', 'Results match expected')]
+                            tc = TestCase(
+                                sno=str(_next_idx),
+                                summary='TC%03d_%s_AI_%s' % (_next_idx, suite.feature_id, g.get('title', '')[:80]),
+                                description='%s\nAI Reasoning: %s' % (g.get('description', ''), g.get('reasoning', '')),
+                                preconditions='1.\tActive TMO subscriber line\n2.\tSystem in ready state',
+                                story_linkage=suite.feature_id, label=suite.feature_id,
+                                category=g.get('category', 'Happy Path'),
+                                steps=steps)
+                            suite.test_cases.append(tc)
+                            _next_idx += 1
+                            _gap_added += 1
+                        exit_items.append('AI Gaps: +%d TCs (from %d suggestions)' % (_gap_added, len(gaps)))
+                    else:
+                        exit_items.append('AI Gaps: no new gaps found')
+
+                # ── LLM: Step Improvement ──
+                if llm and ai_step_improve:
+                    _tick('LLM Step Improve')
+                    logger.set('[7/10] AI improving test steps...')
+                    from modules.test_engine import TestStep as _TS
+                    _improved_count = 0
+                    # Only improve TCs with generic/short steps (up to 15 TCs to limit API calls)
+                    _candidates = [tc for tc in suite.test_cases
+                                   if any(len(s.summary) < 40 for s in tc.steps)][:15]
+                    for tc in _candidates:
+                        improved = improve_steps(llm, tc, suite, log=logger)
+                        if improved and len(improved) >= len(tc.steps):
+                            for i, imp in enumerate(improved):
+                                if i < len(tc.steps):
+                                    tc.steps[i].summary = imp.get('action', tc.steps[i].summary)
+                                    tc.steps[i].expected = imp.get('expected', tc.steps[i].expected)
+                                else:
+                                    tc.steps.append(_TS(i + 1, imp.get('action', ''), imp.get('expected', '')))
+                            _improved_count += 1
+                    if _improved_count:
+                        exit_items.append('AI Steps: %d TCs improved' % _improved_count)
+
+                # Recalculate totals after AI additions
+                total_steps = sum(len(tc.steps) for tc in suite.test_cases)
+
                 _tick('Excel Generation')
-                logger.set('[6/8] Generating Excel...')
+                logger.set('[8/10] Generating Excel...')
                 out_path = generate_excel(suite, log=logger)
                 exit_items.append('Excel: %s' % out_path.name)
 
@@ -699,7 +923,7 @@ if run_btn:
 
                 elapsed = time.time() - t0
                 m, s = divmod(int(elapsed), 60)
-                logger.set('[8/8] DONE in %dm %ds' % (m, s))
+                logger.set('[10/10] DONE in %dm %ds' % (m, s))
 
                 # Print time matrix
                 print('\n' + '=' * 50, flush=True)
@@ -720,6 +944,15 @@ if run_btn:
                 ss['result_path'] = str(out_path)
                 ss['cp_path'] = cp_path
                 ss['suite_info'] = {'tc_count': len(suite.test_cases), 'step_count': total_steps, 'sheet_count': sheet_count}
+
+                # Save full suite to DB for traceability and AI review
+                try:
+                    _suite_id = save_test_suite(suite, file_path=str(out_path))
+                    ss['last_suite_id'] = _suite_id
+                    ss['last_feature_id'] = feature_id
+                    exit_items.append('DB: Suite saved (ID: %d)' % _suite_id)
+                except Exception as _db_err:
+                    exit_items.append('DB: Save failed — %s' % str(_db_err)[:50])
 
                 # Build timing summary for exit report
                 timing_items = ['⏱ %s: %.1fs' % (name, dur) for name, dur in timings]

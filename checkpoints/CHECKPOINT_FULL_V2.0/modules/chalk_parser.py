@@ -319,11 +319,7 @@ def fetch_feature_from_pi(page, pi_url: str, feature_id: str, log=print) -> Chal
             data.feature_title = ln.strip()
             continue
         if feature_start >= 0 and i > feature_start + 2:
-            # Only treat as boundary if MWTGPROV-XXXX is at the START of the line
-            # (a new feature header), not embedded mid-sentence as a reference
-            ln_stripped = ln.strip()
-            m = re.match(r'^(MWTGPROV-\d{3,5})\b', ln_stripped, re.IGNORECASE)
-            if m and fid not in ln.upper():
+            if re.search(r'MWTGPROV-\d{3,5}', ln) and fid not in ln.upper():
                 feature_end = i
                 break
 
@@ -332,60 +328,9 @@ def fetch_feature_from_pi(page, pi_url: str, feature_id: str, log=print) -> Chal
         return data
 
     feature_lines = lines[feature_start:feature_end]
-
-    # ── SELF-HEAL: Grouped features ──
-    # If section is very short (< 8 lines) and has no scenario content,
-    # the feature is likely grouped with siblings. Expand forward past
-    # sibling MWTGPROV-XXXX IDs until we hit real content.
-    if len(feature_lines) < 8:
-        has_content = any(kw in ' '.join(feature_lines).lower() for kw in
-            ['scenario', 'positive', 'negative', 'edge', 'verify', 'validate',
-             'step ', 'pre-req', 'cdr input', 'summary:', 'scope:'])
-        if not has_content:
-            log(f'[CHALK]   Short section ({len(feature_lines)} lines), no content — expanding past grouped siblings...')
-            # Keep scanning forward: skip sibling feature IDs until we find content
-            expanded_end = len(lines)
-            found_content = False
-            for i in range(feature_end, len(lines)):
-                ln = lines[i]
-                ln_low = ln.lower().strip()
-                # If we hit a line with real content (not just another feature ID), start including
-                if not re.match(r'^MWTGPROV-\d{3,5}$', ln.strip(), re.IGNORECASE) and \
-                   not re.match(r'^\[.*\].*:.*New MVNO', ln.strip()):
-                    found_content = True
-                # If we already found content and hit a NEW feature boundary (different feature block)
-                if found_content and re.search(r'MWTGPROV-\d{3,5}', ln) and \
-                   fid not in ln.upper() and \
-                   not any(sib in ln.upper() for sib in [l.upper() for l in
-                       re.findall(r'MWTGPROV-\d{3,5}', ' '.join(lines[feature_start:feature_end]))]):
-                    # Check if this is a truly different feature (not a sibling)
-                    # by seeing if there's substantial content between our start and here
-                    if i - feature_start > 10:
-                        expanded_end = i
-                        break
-            feature_lines = lines[feature_start:expanded_end]
-            feature_end = expanded_end
-            log(f'[CHALK]   Expanded to lines {feature_start}-{feature_end} ({len(feature_lines)} lines)')
-
     log(f'[CHALK] Found feature section: lines {feature_start}-{feature_end} ({len(feature_lines)} lines)')
 
     _parse_feature_section(feature_lines, data, feature_id, log)
-
-    # Universal fallback: if parser returned 0 scenarios, try workflow table extraction
-    if not data.scenarios:
-        log(f'[CHALK]   No scenarios from primary parser — trying workflow table extraction...')
-        _parse_workflow_tables(feature_lines, data, feature_id.upper(), log)
-        # Also capture bullet descriptions as scope
-        for ln in feature_lines:
-            ln_s = ln.strip().strip('•·-–—*').strip()
-            ln_low = ln_s.lower()
-            if feature_id.upper() in ln_s.upper() or len(ln_s) < 10:
-                continue
-            if any(kw in ln_low for kw in
-                ['this api', 'this feature', 'transaction type', 'supported channel',
-                 'supported device', 'request type', 'ordering channel', 'product:',
-                 'out of scope', 'channel:', 'devices supported']):
-                data.scope += ln_s + '\n'
 
     log(f'[CHALK] [OK] Extracted: {len(data.scenarios)} scenarios, {len(data.open_items)} open items')
     return data
@@ -509,208 +454,48 @@ def _parse_numbered_format(lines, data, fid, numbered_row_pat, log=print):
 
 
 def _parse_freeform(lines, data, fid, log=print):
-    """Fallback parser for section-based Chalk formats.
-    Rules:
-    - Lines before first section header → scope/description (NEVER scenarios)
-    - Section headers: 'Positive Scenarios:', 'Negative Scenarios:', 'Edge Scenarios:'
-    - Lines AFTER a section header → scenarios (short, actionable lines only)
-    - Long narrative paragraphs (>120 chars) → description, not scenario title
-    - 'Confirm:' lines → sub-validation of previous scenario, not new scenario
-    """
-    SECTION_HEADERS = {
-        'positive scenarios': 'Happy Path',
-        'positive:': 'Happy Path',
-        'happy path': 'Happy Path',
-        'negative scenarios': 'Negative',
-        'negative:': 'Negative',
-        'edge scenarios': 'Edge Case',
-        'edge cases': 'Edge Case',
-        'edge:': 'Edge Case',
-    }
-    # Lines that are clearly NOT scenarios
-    SKIP_WORDS = ['summary:', 'scope:', 'description:', 'feature id', 'feature:',
-                  'note:', 'notes:', 'channels -', 'devices:', 'external systems',
-                  'has not implemented', 'will not', 'confirm:']
-
+    """Fallback: extract Verify lines and other structured content as scenarios."""
+    scenario_starters = ['verify ', 'validate ', 'check ', 'ensure ', 'test ']
     idx = 1
-    current_category = None  # None = we're in scope, not in a scenario section yet
     current_scenario = None
-
-    for ln in lines:
-        ln_stripped = ln.strip().strip('•·-–—*').strip()
-        ln_low = ln_stripped.lower()
-
-        if not ln_stripped or len(ln_stripped) < 5:
-            continue
-
-        # Skip the feature ID line itself
-        if fid in ln_stripped.upper() and len(ln_stripped) < 80:
-            continue
-
-        # Skip feature title lines: [NENM, NSLNM, INTG]: New MVNO - ...
-        if re.match(r'^\[?[A-Z]{2,6}(?:\s*,\s*[A-Z]{2,6})*\]?\s*:', ln_stripped):
-            data.scope += ln_stripped + '\n'
-            continue
-
-        # Skip "New MVNO - ..." standalone title lines
-        if ln_low.startswith('new mvno'):
-            data.scope += ln_stripped + '\n'
-            continue
-
-        # Skip known non-scenario lines
-        if any(ln_low.startswith(p) for p in SKIP_WORDS):
-            continue
-
-        # Detect section headers → switch category
-        is_section = False
-        for header, cat in SECTION_HEADERS.items():
-            if header in ln_low and len(ln_stripped) < 50:
-                current_category = cat
-                is_section = True
-                break
-        if is_section:
-            continue
-
-        # 'Confirm:' is a sub-validation marker, not a scenario
-        if ln_low.startswith('confirm'):
-            continue
-
-        # If we haven't hit a section header yet, everything is scope
-        if current_category is None:
-            data.scope += ln_stripped + '\n'
-            continue
-
-        # We're inside a scenario section — but filter out junk content
-        # A scenario title should be < 120 chars. Longer = description/scope text.
-        if len(ln_stripped) > 120:
-            data.scope += ln_stripped + '\n'
-            continue
-
-        # Filter out developer notes, Jira refs, execution labels, planning comments
-        JUNK_PATTERNS = [
-            r'^test only',                          # "TEST ONLY Feature..."
-            r'^fix (will|details|is)',              # "Fix will be available..."
-            r'^MWTG(PROV|TEST)-\d+$',              # bare Jira ticket reference
-            r'^(INTG|UAT|SIT|PROD)\s*[-—]',        # execution environment labels
-            r'PROGRESSION|REGRESSION',              # test cycle labels
-            r'once the fix is ready',               # planning notes
-            r'will be available on',                # date-based notes
-            r'^N/A$|^NA$|^TBD$|^TODO$',            # placeholder text
-            r'^\d+\.\d+\s*$',                      # bare version numbers like "50.2"
-        ]
-        is_junk = any(re.search(p, ln_stripped, re.IGNORECASE) for p in JUNK_PATTERNS)
-        if is_junk:
-            data.scope += ln_stripped + '\n'
-            continue
-
-        # This is a scenario line
-        if current_scenario:
-            data.scenarios.append(current_scenario)
-
-        current_scenario = ChalkScenario(
-            scenario_id='TS_%s_%d' % (fid, idx),
-            title=ln_stripped,
-            validation=ln_stripped,
-            category=current_category,
-        )
-        idx += 1
-
-    if current_scenario:
-        data.scenarios.append(current_scenario)
-
-    # Deduplicate scenarios by title (fuzzy — handles typos and partial matches)
-    unique = []
-    for sc in data.scenarios:
-        words = set(re.findall(r'\b\w{3,}\b', sc.title.lower()))
-        is_dup = False
-        for existing in unique:
-            existing_words = set(re.findall(r'\b\w{3,}\b', existing.title.lower()))
-            if not words or not existing_words:
-                continue
-            overlap = len(words & existing_words) / min(len(words), len(existing_words))
-            if overlap >= 0.7:
-                is_dup = True
-                break
-        if not is_dup:
-            unique.append(sc)
-    data.scenarios = unique
-
-    # ── FALLBACK: If no scenarios found from section headers, extract from workflow tables ──
-    if not data.scenarios:
-        _parse_workflow_tables(lines, data, fid, log)
-        # Also extract bullet-point descriptions as scope context
-        for ln in lines:
-            ln_stripped = ln.strip().strip('•·-–—*').strip()
-            ln_low = ln_stripped.lower()
-            if fid.upper() in ln_stripped.upper():
-                continue
-            if len(ln_stripped) > 15 and any(kw in ln_low for kw in
-                ['this api', 'this feature', 'transaction type', 'supported channel',
-                 'supported device', 'request type', 'ordering channel', 'product:']):
-                data.scope += ln_stripped + '\n'
-
-    log('[CHALK]   Parsed %d scenarios (freeform)' % len(data.scenarios))
-
-
-def _parse_workflow_tables(lines, data, fid, log=print):
-    """Extract scenarios from NSL Workflow tables (S.No | Transaction | Type | Source | Target).
-    Also handles API mapping tables."""
-    # Look for table-like patterns: lines with tabs or consistent column structure
-    TABLE_HEADERS = ['s. no', 's.no', 'sno', 'api name', 'transaction', 'http method']
-    in_table = False
-    table_rows = []
-    idx = len(data.scenarios) + 1
 
     for ln in lines:
         ln_stripped = ln.strip()
         ln_low = ln_stripped.lower()
 
-        # Detect table header
-        if not in_table and any(h in ln_low for h in TABLE_HEADERS):
-            in_table = True
+        # Scope/Summary extraction
+        if ln_low.startswith('summary:') or ln_low.startswith('scope:'):
+            data.scope += ln_stripped + '\n'
             continue
 
-        # Table rows: start with a number or have tab-separated content
-        if in_table:
-            # End of table: empty line or non-table content
-            if not ln_stripped or ln_low.startswith(('note', 'out of scope', 'positive', 'negative')):
-                in_table = False
-                continue
+        # New scenario: line starts with a scenario keyword and is long enough
+        if any(ln_low.startswith(kw) for kw in scenario_starters) and len(ln_stripped) > 15:
+            # Save previous
+            if current_scenario:
+                data.scenarios.append(current_scenario)
+            current_scenario = ChalkScenario(
+                scenario_id='TS_%s_%d' % (fid, idx),
+                title=ln_stripped,
+                validation=ln_stripped,
+            )
+            idx += 1
+            continue
 
-            # Parse table row
-            parts = [p.strip() for p in ln_stripped.split('\t') if p.strip()]
-            if not parts:
-                parts = [p.strip() for p in re.split(r'\s{2,}', ln_stripped) if p.strip()]
+        # Continuation: if current scenario exists and line is a sub-validation
+        if current_scenario and ln_stripped and not any(ln_low.startswith(kw) for kw in scenario_starters):
+            # Lines that look like sub-validations (short, start with Verify, or indented)
+            if ln_low.startswith('verify ') and len(ln_stripped) < 100:
+                # Sub-validation — append to current scenario's validation
+                current_scenario.validation += '; ' + ln_stripped
+            elif len(ln_stripped) > 10 and not ln_low.startswith(('summary', 'scope', 'description', 'feature')):
+                # Could be description text — add to scope if no scenario yet
+                if not data.scenarios and idx == 1:
+                    data.scope += ln_stripped + '\n'
 
-            if len(parts) >= 2:
-                # Try to identify: S.No, Transaction/API Name, Type, Source, Target
-                sno = parts[0] if parts[0].isdigit() else ''
-                api_name = parts[1] if len(parts) > 1 and sno else parts[0]
-                direction = parts[2] if len(parts) > 2 and sno else (parts[1] if len(parts) > 1 and not sno else '')
-                source = parts[3] if len(parts) > 3 and sno else (parts[2] if len(parts) > 2 else '')
-                target = parts[4] if len(parts) > 4 and sno else (parts[3] if len(parts) > 3 else '')
+    if current_scenario:
+        data.scenarios.append(current_scenario)
 
-                if api_name and len(api_name) > 3 and not api_name.lower().startswith(('s.', 'sno', 'api name')):
-                    # Build a scenario title from the table row
-                    title_parts = ['Verify %s' % api_name]
-                    if direction:
-                        title_parts.append('(%s)' % direction)
-                    if source and target:
-                        title_parts.append('from %s to %s' % (source, target))
-                    elif source:
-                        title_parts.append('via %s' % source)
-
-                    title = ' '.join(title_parts)
-                    data.scenarios.append(ChalkScenario(
-                        scenario_id='TS_%s_%d' % (fid, idx),
-                        title=title,
-                        validation='%s call completes successfully' % api_name,
-                        category='Happy Path',
-                    ))
-                    idx += 1
-
-    if data.scenarios:
-        log('[CHALK]   Extracted %d scenarios from workflow tables' % (idx - 1))
+    log('[CHALK]   Parsed %d scenarios (freeform/verify-list)' % len(data.scenarios))
 
 def _parse_ts_format(lines, data, fid, ts_pattern, log=print):
     """Parse Format A: TS_MWTGPROV-XXXX_N scenario blocks.

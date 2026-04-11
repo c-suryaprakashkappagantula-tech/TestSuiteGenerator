@@ -139,12 +139,8 @@ with left:
                 else:
                     ss['selected_pi'] = label
                     ss['selected_pi_url'] = url
+                    # Use cache if available
                     ss['pi_features'] = ss.get('all_pi_features', {}).get(label, [])
-                # Clear previous execution state
-                ss['logs'] = []
-                ss['result_path'] = None
-                ss['exit_report'] = None
-                ss['suite_info'] = None
                 st.rerun()
 
     rc1, rc2 = st.columns([3, 1])
@@ -250,42 +246,19 @@ with left:
                         horizontal=True, key='suite_strategy',
                         help='Smart=representative combos | Full=every combination | Custom=your rules')
 
-    # Default values
-    channel = ['ITMBO', 'NBOP']
-    devices = ['Mobile']
-    networks = ['4G', '5G']
-    sim_types = ['eSIM', 'pSIM']
-    os_platforms = ['iOS', 'Android']
-
-    if strategy == 'Smart Suite (Recommended)':
-        # Just show a compact summary — no need to pick manually
-        st.caption('Smart Suite auto-picks 4 representative combos: ITMBO | Mobile | eSIM+pSIM | iOS+Android | 4G+5G')
-    elif strategy == 'Full Matrix':
-        st.caption('Full Matrix generates ALL combinations. Customize below:')
-        mc1, mc2, mc3 = st.columns(3)
-        with mc1:
-            channel = st.multiselect('Channel', CHANNELS, default=['ITMBO'])
-            devices = st.multiselect('Device Types', DEVICE_TYPES, default=['Mobile'])
-        with mc2:
-            networks = st.multiselect('Network Types', NETWORK_TYPES, default=['4G', '5G'])
-            sim_types = st.multiselect('SIM Types', SIM_TYPES, default=['eSIM', 'pSIM'])
-        with mc3:
-            os_platforms = st.multiselect('OS / Platform', OS_PLATFORMS, default=['iOS', 'Android'])
+    mc1, mc2, mc3 = st.columns(3)
+    with mc1:
+        channel = st.multiselect('Channel', CHANNELS, default=['ITMBO'])
+        devices = st.multiselect('Device Types', DEVICE_TYPES, default=['Mobile'])
+    with mc2:
+        networks = st.multiselect('Network Types', NETWORK_TYPES, default=['4G', '5G'])
+        sim_types = st.multiselect('SIM Types', SIM_TYPES, default=['eSIM', 'pSIM'])
+    with mc3:
+        os_platforms = st.multiselect('OS / Platform', OS_PLATFORMS, default=['iOS', 'Android'])
 
     # Custom Instructions (only shown for Custom mode)
     custom_instructions = ''
     if strategy == 'Custom Instructions':
-        # Show matrix controls for custom filtering
-        mc1, mc2, mc3 = st.columns(3)
-        with mc1:
-            channel = st.multiselect('Channel', CHANNELS, default=['ITMBO'], key='cust_ch')
-            devices = st.multiselect('Device Types', DEVICE_TYPES, default=['Mobile'], key='cust_dev')
-        with mc2:
-            networks = st.multiselect('Network Types', NETWORK_TYPES, default=['4G', '5G'], key='cust_net')
-            sim_types = st.multiselect('SIM Types', SIM_TYPES, default=['eSIM', 'pSIM'], key='cust_sim')
-        with mc3:
-            os_platforms = st.multiselect('OS / Platform', OS_PLATFORMS, default=['iOS', 'Android'], key='cust_os')
-
         st.markdown("**Custom Instructions** — tell the engine what you want:")
         suggestions = [
             'Focus on eSIM only, skip pSIM',

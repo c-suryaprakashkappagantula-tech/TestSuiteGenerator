@@ -142,48 +142,6 @@ def fetch_jira_issue(page, issue_key: str, log=print) -> JiraIssue:
     log(f'[JIRA] ✅ {issue.key} | {issue.summary[:60]}')
     log(f'[JIRA]    Status={issue.status} | Priority={issue.priority} | PI={issue.pi}')
     log(f'[JIRA]    Attachments={len(issue.attachments)} | Links={len(issue.linked_issues)} | AC={bool(issue.acceptance_criteria)}')
-    log(f'[JIRA]    Subtasks={len(issue.subtasks)} | Links={len(issue.linked_issues)}')
-
-    # Deep-fetch subtask descriptions (they contain the real test detail)
-    if issue.subtasks:
-        log(f'[JIRA] 🔍 Deep-fetching {len(issue.subtasks)} subtask descriptions...')
-        for si, st in enumerate(issue.subtasks, 1):
-            try:
-                log(f'[JIRA]   [{si}/{len(issue.subtasks)}] Fetching {st["key"]}...')
-                st_result = page.evaluate('''async (url) => {
-                    const r = await fetch(url, {
-                        credentials: 'include',
-                        headers: {'Accept': 'application/json'}
-                    });
-                    return {status: r.status, body: r.ok ? await r.json() : null};
-                }''', f'{JIRA_REST_V2}/issue/{st["key"]}')
-                if st_result['status'] != 200:
-                    log(f'[JIRA]     ❌ HTTP {st_result["status"]} for {st["key"]}')
-                    continue
-                if st_result['body']:
-                    sf = st_result['body'].get('fields', {})
-                    st['description'] = sf.get('description', '') or ''
-                    st['labels'] = sf.get('labels', [])
-                    st['issue_type'] = (sf.get('issuetype') or {}).get('name', '')
-                    # Also grab AC from subtask
-                    for fkey, val in sorted(sf.items()):
-                        if fkey.startswith('customfield_') and isinstance(val, str) and len(val) > 30:
-                            if any(kw in val.lower() for kw in ['shall', 'must', 'verify', 'when', 'then']):
-                                st['acceptance_criteria'] = val
-                                break
-                    desc_len = len(st.get('description', ''))
-                    ac_len = len(st.get('acceptance_criteria', ''))
-                    log(f'[JIRA]     ✅ {st["key"]}: {st["summary"][:50]}')
-                    log(f'[JIRA]        Type={st.get("issue_type","")} | Status={st.get("status","")} | Desc={desc_len} chars | AC={ac_len} chars')
-                    if desc_len > 0:
-                        # Show first 100 chars of description
-                        log(f'[JIRA]        Desc preview: {st["description"][:100]}')
-                else:
-                    log(f'[JIRA]     ⚠️ {st["key"]}: empty response')
-            except Exception as e:
-                log(f'[JIRA]     ❌ {st["key"]}: {str(e)[:60]}')
-                log(f'[JIRA]    {st["key"]}: failed to fetch ({e})')
-
     return issue
 
 

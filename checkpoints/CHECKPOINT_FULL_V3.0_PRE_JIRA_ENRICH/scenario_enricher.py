@@ -27,123 +27,17 @@ def _make_tc(idx, fid, title, val, category, preconditions, ctx):
 
 
 def _neg(idx, fid, title, val, ctx):
-    """Build a negative TC with real QA-quality steps."""
-    from .test_engine import TestCase, TestStep
-    # Determine what kind of negative this is for better steps
-    title_low = title.lower()
-    if 'hotline' in title_low:
-        steps = [
-            TestStep(1, 'Identify an MDN in Hotlined status from test data pool', 'Hotlined MDN identified'),
-            TestStep(2, 'Trigger the API with the Hotlined MDN and valid remaining parameters', 'API request sent'),
-            TestStep(3, 'Verify NSL rejects with HTTP 400 and appropriate error code', 'Error response received with clear message'),
-            TestStep(4, 'Verify line status unchanged — still Hotlined in DB', 'No data modification occurred'),
-        ]
-    elif 'suspend' in title_low:
-        steps = [
-            TestStep(1, 'Identify an MDN in Suspended status from test data pool', 'Suspended MDN identified'),
-            TestStep(2, 'Trigger the API with the Suspended MDN and valid remaining parameters', 'API request sent'),
-            TestStep(3, 'Verify NSL rejects with HTTP 400 and appropriate error code', 'Error response received with clear message'),
-            TestStep(4, 'Verify line status unchanged — still Suspended in DB', 'No data modification occurred'),
-        ]
-    elif 'deactivat' in title_low:
-        steps = [
-            TestStep(1, 'Identify a Deactivated/Disconnected MDN from test data pool', 'Deactivated MDN identified'),
-            TestStep(2, 'Trigger the API with the Deactivated MDN and valid remaining parameters', 'API request sent'),
-            TestStep(3, 'Verify NSL rejects with HTTP 400 and appropriate error code', 'Error response received with clear message'),
-            TestStep(4, 'Verify no records created in Transaction History for rejected request', 'No audit trail for rejected operation'),
-        ]
-    elif 'invalid line' in title_low or 'lineid' in title_low:
-        steps = [
-            TestStep(1, 'Prepare request with non-existent LineId (e.g., 999999999)', 'Invalid LineId prepared'),
-            TestStep(2, 'Trigger the API with invalid LineId and valid remaining parameters', 'API request sent'),
-            TestStep(3, 'Verify NSL rejects with ERR20 — Line Id not found', 'ERR20 returned with descriptive message'),
-            TestStep(4, 'Verify no partial records created in DB', 'DB state clean — no orphaned records'),
-        ]
-    elif 'invalid account' in title_low or 'accountid' in title_low:
-        steps = [
-            TestStep(1, 'Prepare request with non-existent AccountId', 'Invalid AccountId prepared'),
-            TestStep(2, 'Trigger the API with invalid AccountId and valid remaining parameters', 'API request sent'),
-            TestStep(3, 'Verify NSL rejects with appropriate error code', 'Error response received'),
-            TestStep(4, 'Verify no data corruption in DB', 'DB state unchanged'),
-        ]
-    elif 'mismatch' in title_low:
-        steps = [
-            TestStep(1, 'Prepare request where LineId belongs to Account A but AccountId is Account B', 'Mismatched IDs prepared'),
-            TestStep(2, 'Trigger the API with mismatched LineId and AccountId', 'API request sent'),
-            TestStep(3, 'Verify NSL rejects with ERR161 — LineId and AccountId mismatch', 'ERR161 returned'),
-            TestStep(4, 'Verify neither account is modified', 'Both accounts unchanged in DB'),
-        ]
-    elif 'rollback' in title_low:
-        steps = [
-            TestStep(1, 'Trigger the operation and simulate failure during rollback phase', 'Rollback failure simulated'),
-            TestStep(2, 'Verify system detects inconsistent state', 'Inconsistency detected and logged'),
-            TestStep(3, 'Verify transaction marked for manual review', 'Manual review flag set'),
-            TestStep(4, 'Verify alert/notification sent to operations team', 'Operations team notified'),
-        ]
-    else:
-        chain = get_step_chain(title, val, ctx)
-        steps = [TestStep(i+1, s, e) for i, (s, e) in enumerate(chain)]
-
-    return TestCase(sno=str(idx),
-        summary='TC%03d_%s_%s' % (idx, fid, title),
-        description=val, preconditions='1.\tSystem in ready state\n2.\tPrepare error condition as per scenario',
-        steps=steps, story_linkage=fid, label=fid, category='Negative')
+    return _make_tc(idx, fid, title, val, 'Negative',
+        '1.\tSystem in ready state\n2.\tPrepare error condition as per scenario', ctx)
 
 def _pos(idx, fid, title, val, ctx):
-    """Build a positive TC with real QA-quality steps."""
-    from .test_engine import TestCase, TestStep
-    title_low = title.lower()
-    if 'century' in title_low or 'service grouping' in title_low:
-        steps = [
-            TestStep(1, 'Complete the primary operation successfully', 'Operation completed with SUCC00'),
-            TestStep(2, 'Navigate to Century Report / Service Grouping', 'Report accessible'),
-            TestStep(3, 'Search using Root Transaction ID or MDN', 'Records found'),
-            TestStep(4, 'Verify all fields match expected post-operation state', 'All data correct'),
-        ]
-    elif 'transaction history' in title_low:
-        steps = [
-            TestStep(1, 'Complete the primary operation successfully', 'Operation completed'),
-            TestStep(2, 'Query Transaction History for the MDN', 'Transaction History accessible'),
-            TestStep(3, 'Verify entry exists with correct timestamp, type, MDN, status', 'Entry found with correct details'),
-            TestStep(4, 'Verify no duplicate or orphaned entries', 'Clean transaction log'),
-        ]
-    elif 'nbop' in title_low or 'portal' in title_low:
-        steps = [
-            TestStep(1, 'Complete the primary operation successfully', 'Operation completed'),
-            TestStep(2, 'Login to NBOP Portal and navigate to subscriber details', 'Portal accessible'),
-            TestStep(3, 'Verify subscriber details reflect post-operation state', 'Portal shows correct data'),
-            TestStep(4, 'Verify no stale/cached data displayed', 'Data is fresh and accurate'),
-        ]
-    elif 'e2e' in title_low or 'end-to-end' in title_low:
-        steps = [
-            TestStep(1, 'Set up subscriber with active line in TMO', 'Subscriber ready'),
-            TestStep(2, 'Trigger the complete operation flow from API to TMO response', 'Full flow executed'),
-            TestStep(3, 'Verify all downstream systems updated (MBO, Syniverse, KAFKA)', 'Downstream systems consistent'),
-            TestStep(4, 'Verify Century Report, NBOP MIG tables, Transaction History', 'Full audit trail verified'),
-            TestStep(5, 'Verify TMO Genesis portal reflects the change', 'Carrier portal updated'),
-        ]
-    elif 'cancel' in title_low or 'reversal' in title_low:
-        steps = [
-            TestStep(1, 'Complete the primary operation successfully', 'Operation completed'),
-            TestStep(2, 'Trigger cancel/reversal with valid parameters', 'Cancel request sent'),
-            TestStep(3, 'Verify system accepts cancellation and restores original state', 'Original state restored'),
-            TestStep(4, 'Verify Century Report logs the cancellation', 'Cancellation audit trail complete'),
-        ]
-    else:
-        chain = get_step_chain(title, val, ctx)
-        steps = [TestStep(i+1, s, e) for i, (s, e) in enumerate(chain)]
-
-    return TestCase(sno=str(idx),
-        summary='TC%03d_%s_%s' % (idx, fid, title),
-        description=val, preconditions='1.\tActive TMO subscriber line\n2.\tSystem in ready state',
-        steps=steps, story_linkage=fid, label=fid, category='Happy Path')
+    return _make_tc(idx, fid, title, val, 'Happy Path',
+        '1.\tActive TMO subscriber line\n2.\tSystem in ready state', ctx)
 
 
 def enrich_scenarios(test_cases, feature_id, feature_context, log=print, feature_name=''):
     """Analyze existing TCs, identify gaps across 9 universal layers, fill smartly."""
     fname = feature_name or feature_id  # short feature name for TC titles
-    # Sanitize: strip % to prevent string formatting crashes
-    fname = fname.replace('%', '')
 
     existing_text = ' '.join([
         tc.summary.lower() + ' ' + tc.description.lower() + ' ' +

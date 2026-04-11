@@ -1,8 +1,8 @@
 """
-TSG_Dashboard_V2.0.py -- Test Suite Generator Dashboard V2.0
-Premium glassmorphism UI with neon accents and animations.
+TSG_Dashboard_V3.0.py -- Test Suite Generator Dashboard V3.0
+V3.0 adds: Feature-aware TC naming, Jira subtask analysis.
 
-Usage:  streamlit run TSG_Dashboard_V2.0.py
+Usage:  streamlit run TSG_Dashboard_V3.0.py
 """
 import sys, os, time, traceback, shutil, io
 from pathlib import Path
@@ -105,7 +105,7 @@ st.markdown("""<div class='banner'>
     <div class='sub'>Chalk + Jira + Attachments &rarr; Production-Ready Test Suites</div>
   </div>
   <div style='display:flex; gap:8px; align-items:center; flex-wrap:wrap;'>
-    <div class='badge'>V2.0</div>
+    <div class='badge'>V3.0</div>
     <div class='badge'>Any Feature ID</div>
     <div class='badge'>Auto Matrix</div>
     <div class='badge'>%s</div>
@@ -245,12 +245,14 @@ with left:
     st.markdown("<div class='sec-title'><span class='icon'>&#9881;</span> Step 3: Test Matrix & Strategy</div>", unsafe_allow_html=True)
     st.markdown("<div class='glass'>", unsafe_allow_html=True)
 
-    # Suite Strategy selector
-    strategy = st.radio('Suite Strategy', ['Smart Suite (Recommended)', 'Full Matrix', 'Custom Instructions'],
+    # Suite Strategy selector (Smart Suite / Full Matrix as radio, Custom Instructions as checkbox)
+    strategy = st.radio('Suite Strategy', ['Smart Suite (Recommended)', 'Full Matrix'],
                         horizontal=True, key='suite_strategy',
-                        help='Smart=representative combos | Full=every combination | Custom=your rules')
+                        help='Smart=representative combos | Full=every combination')
 
-    # Default values
+    use_custom = st.checkbox('Custom Instructions', key='custom_instructions_toggle')
+
+    # Default values — Smart Suite includes both channels
     channel = ['ITMBO', 'NBOP']
     devices = ['Mobile']
     networks = ['4G', '5G']
@@ -258,8 +260,7 @@ with left:
     os_platforms = ['iOS', 'Android']
 
     if strategy == 'Smart Suite (Recommended)':
-        # Just show a compact summary — no need to pick manually
-        st.caption('Smart Suite auto-picks 4 representative combos: ITMBO | Mobile | eSIM+pSIM | iOS+Android | 4G+5G')
+        st.caption('Smart Suite: ITMBO + NBOP | Mobile | eSIM+pSIM | iOS+Android | 4G+5G')
     elif strategy == 'Full Matrix':
         st.caption('Full Matrix generates ALL combinations. Customize below:')
         mc1, mc2, mc3 = st.columns(3)
@@ -272,21 +273,9 @@ with left:
         with mc3:
             os_platforms = st.multiselect('OS / Platform', OS_PLATFORMS, default=['iOS', 'Android'])
 
-    # Custom Instructions (only shown for Custom mode)
+    # Custom Instructions (only shown when checkbox is checked)
     custom_instructions = ''
-    if strategy == 'Custom Instructions':
-        # Show matrix controls for custom filtering
-        mc1, mc2, mc3 = st.columns(3)
-        with mc1:
-            channel = st.multiselect('Channel', CHANNELS, default=['ITMBO'], key='cust_ch')
-            devices = st.multiselect('Device Types', DEVICE_TYPES, default=['Mobile'], key='cust_dev')
-        with mc2:
-            networks = st.multiselect('Network Types', NETWORK_TYPES, default=['4G', '5G'], key='cust_net')
-            sim_types = st.multiselect('SIM Types', SIM_TYPES, default=['eSIM', 'pSIM'], key='cust_sim')
-        with mc3:
-            os_platforms = st.multiselect('OS / Platform', OS_PLATFORMS, default=['iOS', 'Android'], key='cust_os')
-
-        st.markdown("**Custom Instructions** — tell the engine what you want:")
+    if use_custom:
         suggestions = [
             'Focus on eSIM only, skip pSIM',
             'Only NBOP channel',
@@ -303,17 +292,15 @@ with left:
             'Include Syniverse and MBO integration checks',
             'Add data integrity checks after each operation',
         ]
-        st.caption('Suggestions (click to copy):')
-        # Show suggestions in 2 columns of chips
-        sg1, sg2 = st.columns(2)
-        with sg1:
-            for s in suggestions[:7]:
-                st.code(s, language=None)
-        with sg2:
-            for s in suggestions[7:]:
-                st.code(s, language=None)
-        custom_instructions = st.text_area('Your instructions:', value='', height=100,
+        selected_suggestion = st.selectbox(
+            'Pick a preset instruction:',
+            options=['-- Select --'] + suggestions,
+            key='custom_suggestion_dropdown')
+        custom_instructions = st.text_area('Or type your own instructions:', value='', height=100,
             placeholder='Type your instructions here...\ne.g. Focus on eSIM Mobile 5G, add rollback scenarios, skip 4G')
+        # If user picked a preset but didn't type anything, use the preset
+        if not custom_instructions.strip() and selected_suggestion != '-- Select --':
+            custom_instructions = selected_suggestion
 
     st.markdown("</div>", unsafe_allow_html=True)
 

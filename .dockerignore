@@ -1,0 +1,12 @@
+.git
+__pycache__
+*.pyc
+.venv
+outputs/*.xlsx
+checkpoints/*.xlsx
+attachments/*
+tsg_cache.db
+*.zip
+*.pptx
+dry_run_*.py
+_debug_*.py

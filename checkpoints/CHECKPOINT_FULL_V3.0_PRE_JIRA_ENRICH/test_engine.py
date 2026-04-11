@@ -96,8 +96,6 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print):
 
     # Extract a short, clean feature name for use in TC titles
     feature_short = _extract_feature_name(jira.summary, jira.key)
-    # Sanitize: strip % to prevent string formatting crashes
-    feature_short = feature_short.replace('%', '')
     log('[ENGINE] Feature name: "%s"' % feature_short)
 
     log('[ENGINE] Step 1: Extracting acceptance criteria...')
@@ -147,52 +145,18 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print):
     if analyst_suggestions:
         _next_idx = len(suite.test_cases) + 1
         for sg in analyst_suggestions[:8]:  # cap at 8 analyst TCs
-            # Build steps based on category — a real QA writes different steps for different types
-            _cat = sg['category']
-            _title_low = sg['title'].lower()
-            if _cat == 'Negative':
-                _steps = [
-                    TestStep(1, 'Prepare the error/negative condition as per scenario', 'Error condition ready'),
-                    TestStep(2, sg['title'][:120], 'System handles the condition as expected'),
-                    TestStep(3, 'Verify appropriate error code and message returned', 'Clear error response received'),
-                    TestStep(4, 'Verify no data corruption — DB state unchanged', 'System state clean after rejection'),
-                ]
-            elif 'century' in _title_low or 'mig table' in _title_low or 'genesis' in _title_low or 'transaction history' in _title_low:
-                _steps = [
-                    TestStep(1, 'Complete the primary %s operation successfully' % feature_short, 'Operation completed with SUCC00'),
-                    TestStep(2, sg['title'][:120], 'Verification target accessible'),
-                    TestStep(3, 'Verify all fields match expected post-operation state', 'All data correct and consistent'),
-                    TestStep(4, 'Verify no stale, duplicate, or orphaned records', 'Data integrity confirmed'),
-                ]
-            elif 'regression' in _title_low:
-                _steps = [
-                    TestStep(1, 'Complete %s operation successfully' % feature_short, 'Operation completed'),
-                    TestStep(2, 'Run Line Inquiry for the same MDN', 'Line Inquiry returns correct data'),
-                    TestStep(3, 'Run Service Grouping for the same MDN', 'Service Grouping returns correct data'),
-                    TestStep(4, 'Verify Transaction History is intact', 'No regression detected'),
-                ]
-            elif _cat == 'Edge Case':
-                _steps = [
-                    TestStep(1, 'Set up the edge case condition as per scenario', 'Edge case condition prepared'),
-                    TestStep(2, sg['title'][:120], 'System handles edge case correctly'),
-                    TestStep(3, 'Verify no unexpected side effects or data corruption', 'System state consistent'),
-                    TestStep(4, 'Verify Century Report and Transaction History', 'Audit trail complete'),
-                ]
-            else:
-                _steps = [
-                    TestStep(1, 'Set up preconditions for %s' % feature_short, 'Preconditions met'),
-                    TestStep(2, sg['title'][:120], '%s completes as expected' % feature_short),
-                    TestStep(3, 'Verify NSL response and all downstream systems', 'All systems consistent'),
-                    TestStep(4, 'Verify Century Report and Transaction History', 'Audit trail complete'),
-                ]
-
             tc = TestCase(
                 sno=str(_next_idx),
                 summary='TC%03d_%s_%s' % (_next_idx, jira.key, sg['title'][:90]),
                 description='%s\nReasoning: %s' % (sg['description'], sg.get('reasoning', '')),
                 preconditions='1.\tActive TMO subscriber line\n2.\tSystem in ready state',
                 story_linkage=jira.key, label=jira.key, category=sg['category'],
-                steps=_steps)
+                steps=[
+                    TestStep(1, 'Set up preconditions for %s' % feature_short, 'Preconditions met'),
+                    TestStep(2, sg['title'][:120], '%s completes as expected' % feature_short),
+                    TestStep(3, 'Verify all downstream systems and DB state', 'All systems consistent'),
+                    TestStep(4, 'Verify Century Report and Transaction History', 'Audit trail complete'),
+                ])
             suite.test_cases.append(tc)
             _next_idx += 1
         log('[ENGINE]   Added %d analyst-derived TCs' % len(analyst_suggestions[:8]))
@@ -347,11 +311,6 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print):
     log('[ENGINE] Step 8c: Quality gate — validating all TC names and descriptions...')
     suite.test_cases = _quality_gate(suite.test_cases, feature_short, jira.key, log)
 
-    # Step 8d: HUMANIZE — make the suite feel human-written
-    log('[ENGINE] Step 8d: Humanization pass...')
-    from .humanizer import humanize_suite
-    suite.test_cases = humanize_suite(suite.test_cases, log)
-
     # Step 9: Renumber after expansion
     log('[ENGINE] Step 9: Final renumbering...')
     for i, tc in enumerate(suite.test_cases, 1):
@@ -397,8 +356,6 @@ def _extract_feature_name(summary, feature_id=''):
     # Cap at 40 chars
     if len(t) > 40:
         t = t[:37].rsplit(' ', 1)[0] + '...'
-    # Sanitize: escape % to prevent string formatting crashes downstream
-    t = t.replace('%', '')
     return t if t else feature_id
 
 
@@ -536,29 +493,9 @@ def _chalk_scenario_to_tc(sc, idx, feature_id):
     desc_title = clean_title.rstrip('.')
     if desc_title.lower().startswith('validate '):
         desc_title = desc_title[9:]
-
-    # Clean validation: strip "Test Configurations" / "Combo" lines and "Expected Result:" prefix
-    _clean_validation = ''
-    if sc.validation:
-        _val_lines = sc.validation.split('\n')
-        _filtered = []
-        for _vl in _val_lines:
-            _vl_stripped = _vl.strip()
-            # Skip Test Configurations header and Combo lines
-            if _vl_stripped.lower().startswith('test configuration'):
-                continue
-            if re.match(r'^Combo\s*\d+\s*:', _vl_stripped):
-                continue
-            # Strip "Expected Result:" prefix if present
-            if _vl_stripped.lower().startswith('expected result:'):
-                _vl_stripped = _vl_stripped[len('expected result:'):].strip()
-            if _vl_stripped:
-                _filtered.append(_vl_stripped)
-        _clean_validation = ' '.join(_filtered).strip()
-
     # Construct a proper test description
-    if _clean_validation and _clean_validation != sc.title and len(_clean_validation) > 20:
-        description = 'To validate that %s.\nExpected Result: %s' % (desc_title, _clean_validation[:200])
+    if sc.validation and sc.validation != sc.title and len(sc.validation) > 20:
+        description = 'To validate that %s.\nExpected Result: %s' % (desc_title, sc.validation[:200])
     else:
         # Build a meaningful description based on the scenario context
         ctx = _scenario_context(sc)
@@ -1071,152 +1008,45 @@ def _format_validation_bullets(validation):
 # ================================================================
 
 def _build_from_jira_only(jira, feature_name=''):
-    """Build TCs from Jira description when no Chalk data available.
-    V3.1: Deep-mines Jira description for:
-      - Transaction types (CP, CE, PU, PD, PC, etc.)
-      - Error codes (ERR20, ERR161, ERR13, etc.)
-      - API operations (Update, Cancel, Inquiry, etc.)
-      - Channel-specific scenarios (ITMBO, NBOP)
-      - Workflow steps and lifecycle flows
-    """
+    """Build TCs from Jira description when no Chalk data available."""
     fname = feature_name or jira.key
-    # Sanitize: strip % to prevent string formatting crashes
-    fname = fname.replace('%', '')
     tcs = []
     idx = 1
 
-    # Combine all text sources for mining
-    all_text = ''
     if jira.description:
-        all_text += re.sub(r'\{[^}]+\}', '', jira.description)
-    if jira.acceptance_criteria:
-        all_text += '\n' + re.sub(r'\{[^}]+\}', '', jira.acceptance_criteria)
-    for st in jira.subtasks:
-        all_text += '\n' + st.get('summary', '')
-        all_text += '\n' + st.get('description', '')
-    for c in jira.comments[:5]:
-        all_text += '\n' + c.get('body', '')
-    all_text = re.sub(r'\[([^]]+)\]', r'\1', all_text)
-    all_text = re.sub(r'\*([^*]+)\*', r'\1', all_text)
+        desc = re.sub(r'\{[^}]+\}', '', jira.description)
+        desc = re.sub(r'\[([^]]+)\]', r'\1', desc)
+        desc = re.sub(r'\*([^*]+)\*', r'\1', desc)
 
-    # ── Mine 1: Transaction types (CP, CE, PU, PD, PC, etc.) ──
-    trans_types = _extract_transaction_types(all_text, fname)
-
-    # ── Mine 2: Error codes (ERR20, ERR161, SUCC00, etc.) ──
-    error_codes = _extract_error_codes(all_text)
-
-    # ── Mine 3: API operations (Update, Cancel, Inquiry, etc.) ──
-    api_ops = _extract_api_operations(all_text, fname)
-
-    # ── Mine 4: Channels mentioned ──
-    channels = []
-    if 'itmbo' in all_text.lower():
-        channels.append('ITMBO')
-    if 'nbop' in all_text.lower():
-        channels.append('NBOP')
-    if not channels:
-        channels = ['ITMBO', 'NBOP']  # default both
-
-    # ── Generate TCs from transaction types (highest priority) ──
-    if trans_types:
-        for tt_code, tt_name in trans_types:
-            for ch in channels:
-                tc = TestCase(
-                    sno=str(idx),
-                    summary='TC%03d_%s_Verify NSL accepts %s request with channel %s.' % (idx, jira.key, tt_name, ch),
-                    description='Verify %s (%s) is successful with valid input data via channel %s. '
-                                'NSL should accept the request and return SUCC00 response code.' % (fname, tt_name, ch),
-                    preconditions='1.\tLine should be activated with TMO Network\n'
-                                  '2.\tTrigger %s with channel %s with correct OSP account Number, MDN & PIN\n'
-                                  '3.\tValid test data available in SIT environment' % (tt_code, ch),
-                    story_linkage=jira.key, label=jira.key, category='Happy Path',
-                    steps=_build_api_workflow_steps(fname, tt_name, ch, jira.key))
-                tcs.append(tc)
-                idx += 1
-
-    # ── Generate TCs from API operations (Update, Cancel, etc.) ──
-    if api_ops:
-        for op_name, op_desc in api_ops:
-            tc = TestCase(
-                sno=str(idx),
-                summary='TC%03d_%s_Verify %s %s completes successfully.' % (idx, jira.key, op_name, fname),
-                description='Trigger the %s NSL API with valid parameters. %s' % (op_name, op_desc),
-                preconditions='1.\tActive TMO subscriber line\n'
-                              '2.\tPrior %s operation completed successfully\n'
-                              '3.\tValid API credentials and test data' % fname,
-                story_linkage=jira.key, label=jira.key, category='Happy Path',
-                steps=[
-                    TestStep(1, 'Ensure prior %s operation is in correct state' % fname, 'Prior operation state verified'),
-                    TestStep(2, 'Trigger %s API with valid parameters (ESIM, EID, lineId, MDN)' % op_name,
-                             'API accepts request and returns HTTP 200/202'),
-                    TestStep(3, 'Verify NSL processes the %s request successfully' % op_name,
-                             'NSL returns SUCC00 response code'),
-                    TestStep(4, 'Verify Century Report shows %s transaction logged' % op_name,
-                             'Transaction visible in Century Report with correct status'),
-                    TestStep(5, 'Verify NBOP MIG tables updated after %s' % op_name,
-                             'MIG_DEVICE, MIG_SIM, MIG_LINE reflect correct state'),
-                ])
-            tcs.append(tc)
-            idx += 1
-
-    # ── Generate negative TCs from error codes ──
-    if error_codes:
-        for err_code, err_desc in error_codes:
-            tc = TestCase(
-                sno=str(idx),
-                summary='TC%03d_%s_Negative: Verify %s fails with %s %s.' % (idx, jira.key, fname, err_code, err_desc),
-                description='Trigger %s API with invalid data to produce %s error. %s' % (fname, err_code, err_desc),
-                preconditions='1.\tSystem in ready state\n2.\tPrepare invalid data to trigger %s' % err_code,
-                story_linkage=jira.key, label=jira.key, category='Negative',
-                steps=[
-                    TestStep(1, 'Prepare request with invalid data to trigger %s' % err_code,
-                             'Invalid request prepared'),
-                    TestStep(2, 'Send API request to NSL',
-                             'NSL rejects request with %s' % err_code),
-                    TestStep(3, 'Verify error response contains %s with descriptive message' % err_code,
-                             'Error code %s returned with clear error description' % err_code),
-                    TestStep(4, 'Verify no data corruption — line state unchanged',
-                             'Line status and DB state unchanged after rejection'),
-                ])
-            tcs.append(tc)
-            idx += 1
-
-    # ── Fallback: Extract testable statements from description ──
-    if jira.description:
-        desc_clean = re.sub(r'\{[^}]+\}', '', jira.description)
-        desc_clean = re.sub(r'\[([^]]+)\]', r'\1', desc_clean)
-        desc_clean = re.sub(r'\*([^*]+)\*', r'\1', desc_clean)
-        existing_text = ' '.join(tc.summary.lower() for tc in tcs)
-
-        for line in desc_clean.split('\n'):
+        # Split by numbered items, bullet points, or 'shall' statements
+        items = []
+        for line in desc.split('\n'):
             line = line.strip(' *-#•')
             if not line or len(line) < 15:
                 continue
             line_low = line.lower()
-            # Skip lines already covered by transaction type / error code TCs
-            if any(kw in existing_text for kw in re.findall(r'\b\w{5,}\b', line_low)[:3]):
-                continue
+            # Lines that describe testable behavior
             if any(kw in line_low for kw in ['shall ', 'must ', 'should ', 'verify ', 'ensure ',
                                                'when ', 'the system ', 'api ', 'trigger ',
                                                'validate ', 'check ']):
-                clean = _clean_tc_title(line, jira.key)
-                if len(clean) > 15:
-                    tc = TestCase(
-                        sno=str(idx),
-                        summary='TC%03d_%s_%s' % (idx, jira.key, clean),
-                        description='To validate that %s' % clean.rstrip('.'),
-                        preconditions='1.\tRefer to Jira %s for setup requirements\n2.\tActive TMO subscriber line' % jira.key,
-                        story_linkage=jira.key, label=jira.key, category='Happy Path',
-                        steps=[
-                            TestStep(1, 'Set up preconditions per Jira description', 'Preconditions met'),
-                            TestStep(2, 'Execute: %s' % clean.rstrip('.')[:120], 'Operation completes successfully'),
-                            TestStep(3, 'Verify NSL response and downstream systems', 'All systems updated correctly'),
-                            TestStep(4, 'Verify Century Report and Transaction History', 'Audit trail complete'),
-                        ])
-                    tcs.append(tc)
-                    idx += 1
-                    if idx > 12:
-                        break  # cap fallback TCs
+                items.append(line)
+            elif re.match(r'^\d+[\.\)]\s+', line):
+                items.append(re.sub(r'^\d+[\.\)]\s+', '', line))
+
+        for item in items[:10]:  # cap at 10 TCs from description
+            tc = TestCase(
+                sno=str(idx),
+                summary='TC%02d_%s - %s' % (idx, jira.key, item[:80]),
+                description=item,
+                preconditions='1.\tRefer to Jira %s for setup requirements\n2.\tEnsure system is in ready state' % jira.key,
+                story_linkage=jira.key, label=jira.key, category='Happy Path',
+                steps=[
+                    TestStep(1, 'Set up preconditions as per Jira description', 'Preconditions met'),
+                    TestStep(2, 'Execute: %s' % item[:150], 'Operation executes successfully'),
+                    TestStep(3, 'Verify output matches expected behavior', 'Expected behavior confirmed'),
+                ])
+            tcs.append(tc)
+            idx += 1
 
     # Always ensure at least 1 TC
     if not tcs:
@@ -1229,201 +1059,10 @@ def _build_from_jira_only(jira, feature_name=''):
             steps=[
                 TestStep(1, 'Set up preconditions for %s' % fname, 'Preconditions met'),
                 TestStep(2, 'Trigger %s with valid parameters' % fname, '%s executes successfully' % fname),
-                TestStep(3, 'Verify NSL response code is SUCC00', 'Success response received'),
-                TestStep(4, 'Verify Century Report and NBOP MIG tables', 'Audit trail and DB state correct'),
+                TestStep(3, 'Verify %s output matches expected behavior' % fname, 'Expected behavior confirmed'),
             ])
         tcs.append(tc)
     return tcs
-
-
-# ================================================================
-# JIRA DESCRIPTION MINERS (generic — work for any feature)
-# ================================================================
-
-def _extract_transaction_types(text, feature_name):
-    """Extract transaction types from Jira text.
-    Detects: CP (Change Port-in), CE (Change eSIM), PU (Port Update),
-    PD (Port Date), PC (Port Cancel), IN (Inbound), etc.
-    Returns: [(code, human_name), ...]
-    """
-    text_low = text.lower()
-    KNOWN_TYPES = {
-        'CP': 'Change Port-in (CP)',
-        'CE': 'Change eSIM Port-in (CE)',
-        'PU': 'Update Port-in (PU)',
-        'PD': 'Port Date Update (PD)',
-        'PC': 'Cancel Port-in (PC)',
-        'IN': 'Inbound (IN)',
-        'OE': 'Original Equipment (OE)',
-        'OS': 'Original SIM (OS)',
-        'DE': 'Device Exchange (DE)',
-        'DS': 'Device SIM (DS)',
-        'EM': 'eSIM-to-eSIM (EM)',
-        'SM': 'pSIM-to-pSIM (SM)',
-        'AM': 'pSIM-to-eSIM (AM)',
-    }
-    found = []
-    seen = set()
-
-    # Pattern 1: Explicit transType references — "transType: CP", "transaction type CP"
-    for m in re.finditer(r'(?:trans(?:action)?[\s_]*type|transtype)\s*[:=]\s*([A-Z]{2})', text, re.IGNORECASE):
-        code = m.group(1).upper()
-        if code in KNOWN_TYPES and code not in seen:
-            found.append((code, KNOWN_TYPES[code]))
-            seen.add(code)
-
-    # Pattern 2: Parenthetical codes — "Port-in (CP)", "Change MDN (CE)", or "CP (Change Port-in)"
-    for m in re.finditer(r'\(([A-Z]{2})\)', text):
-        code = m.group(1).upper()
-        if code in KNOWN_TYPES and code not in seen:
-            found.append((code, KNOWN_TYPES[code]))
-            seen.add(code)
-
-    # Pattern 2b: Code before parens — "CP (Change Port-in)", "CE (Change eSIM)"
-    for m in re.finditer(r'\b([A-Z]{2})\s*\(', text):
-        code = m.group(1).upper()
-        if code in KNOWN_TYPES and code not in seen:
-            found.append((code, KNOWN_TYPES[code]))
-            seen.add(code)
-
-    # Pattern 2c: Dash-separated — "CP - Change Port-in", "CE - Change eSIM"
-    for m in re.finditer(r'\b([A-Z]{2})\s*[-–—]\s*\w', text):
-        code = m.group(1).upper()
-        if code in KNOWN_TYPES and code not in seen:
-            found.append((code, KNOWN_TYPES[code]))
-            seen.add(code)
-
-    # Pattern 3: Context-based detection — "CP request", "CE request", "CP API"
-    for code, name in KNOWN_TYPES.items():
-        if code in seen:
-            continue
-        # Must appear as standalone code near relevant keywords
-        pat = r'\b' + re.escape(code) + r'\b\s*(?:request|api|flow|scenario|transaction)'
-        if re.search(pat, text, re.IGNORECASE):
-            found.append((code, name))
-            seen.add(code)
-
-    return found
-
-
-def _extract_error_codes(text):
-    """Extract error codes from Jira text.
-    Detects: ERR20, ERR161, ERR13, ERR14, SUCC00, HTTP 400, etc.
-    Returns: [(code, description), ...]
-    """
-    found = []
-    seen = set()
-
-    # Pattern 1: ERR codes — "ERR20", "ERR161", "error code ERR13"
-    for m in re.finditer(r'(ERR\d+)', text, re.IGNORECASE):
-        code = m.group(1).upper()
-        if code not in seen:
-            # Try to extract description from surrounding text
-            start = max(0, m.start() - 10)
-            end = min(len(text), m.end() + 100)
-            context = text[start:end]
-            desc = ''
-            # Look for description after the code
-            dm = re.search(code + r'\s*[-:—]\s*(.{10,80}?)(?:\.|$|\n)', context, re.IGNORECASE)
-            if dm:
-                desc = dm.group(1).strip()
-            else:
-                # Common error code descriptions
-                ERR_DESCS = {
-                    'ERR20': 'Line Id not found',
-                    'ERR161': 'Line Id and MDN mismatch',
-                    'ERR13': 'MDN length less than 10 digits',
-                    'ERR14': 'MDN length more than 10 digits',
-                    'ERR15': 'Invalid MDN format',
-                    'ERR100': 'Account not found',
-                    'ERR101': 'Invalid Account ID',
-                }
-                desc = ERR_DESCS.get(code, 'validation error')
-            found.append((code, desc))
-            seen.add(code)
-
-    # Pattern 2: HTTP error codes in context — "HTTP 400", "returns 401"
-    for m in re.finditer(r'(?:HTTP|returns?|status)\s*(\d{3})', text, re.IGNORECASE):
-        http_code = m.group(1)
-        if http_code.startswith(('4', '5')) and http_code not in seen:
-            found.append(('HTTP %s' % http_code, 'HTTP error response'))
-            seen.add(http_code)
-
-    return found
-
-
-def _extract_api_operations(text, feature_name):
-    """Extract API operations from Jira text.
-    Detects: Update Port-in, Cancel Port-in, Line Inquiry, etc.
-    Returns: [(operation_name, description), ...]
-    """
-    found = []
-    seen = set()
-    text_low = text.lower()
-
-    # Pattern: "Update Port-in", "Cancel Port-in", "Trigger the X API"
-    API_OPS = [
-        (r'update\s+port[\s-]?in', 'Update Port-in', 'Update port-in details (PU/PD) with corrected data'),
-        (r'cancel\s+port[\s-]?in', 'Cancel Port-in', 'Cancel an in-progress port-in request (PC)'),
-        (r'line\s*(?:inquiry|enquiry)', 'Line Inquiry', 'Query line details via Line Inquiry API'),
-        (r'validate\s+device', 'Validate Device', 'Validate device IMEI via API'),
-        (r'validate\s+sim', 'Validate SIM', 'Validate SIM ICCID via API'),
-        (r'service\s+grouping', 'Service Grouping', 'Verify service grouping configuration'),
-        (r'change\s+(?:the\s+)?(?:sim|iccid)', 'Change SIM', 'Change SIM/ICCID for subscriber'),
-        (r'change\s+(?:the\s+)?(?:imei|device)', 'Change Device', 'Change device IMEI for subscriber'),
-        (r'change\s+(?:the\s+)?(?:feature|optional)', 'Change Feature', 'Add/remove optional features'),
-        (r'change\s+(?:the\s+)?(?:rate\s*plan|bcd)', 'Change Rateplan', 'Change billing/rateplan details'),
-    ]
-
-    for pattern, op_name, op_desc in API_OPS:
-        if re.search(pattern, text_low) and op_name not in seen:
-            found.append((op_name, op_desc))
-            seen.add(op_name)
-
-    return found
-
-
-def _build_api_workflow_steps(feature_name, trans_type, channel, feature_id):
-    """Build domain-specific workflow steps for an API transaction type.
-    Written like a real test analyst would write them — specific, actionable, verifiable."""
-    # Determine SIM type from transaction type
-    is_esim = any(kw in trans_type.lower() for kw in ['esim', 'ce', 'em', 'am'])
-    sim_label = 'eSIM (EID required)' if is_esim else 'pSIM'
-    # Extract short code like CP, CE, PU, PC
-    code_match = re.search(r'\(([A-Z]{2})\)', trans_type)
-    short_code = code_match.group(1) if code_match else trans_type[:2]
-
-    steps = [
-        TestStep(1, 'Activate subscriber line in TMO with %s-compatible device (%s)' % (sim_label, channel),
-                 'Subscriber line is Active in TMO with correct device and SIM type'),
-        TestStep(2, 'Trigger %s API via channel %s with:\n'
-                     '- Valid OSP Account Number, MDN, PIN\n'
-                     '- Correct lineId, %s\n'
-                     '- requestType=%s' % (feature_name, channel,
-                        'EID, ICCID' if is_esim else 'ICCID, IMEI', short_code),
-                 'NSL accepts the IN request and returns Root Transaction ID'),
-        TestStep(3, 'Verify NSL response:\n'
-                     '- responseCode = SUCC00\n'
-                     '- requestType = %s\n'
-                     '- rootTransactionId is populated' % short_code,
-                 'NSL successfully processes the request with SUCC00'),
-        TestStep(4, 'Verify TMO sends asynchronous response with all relevant information',
-                 'TMO acknowledges the request with responseCode 00'),
-        TestStep(5, 'Fetch transaction log using Root Transaction ID in Century Report',
-                 'Century Report shows all inbound/outbound API calls with correct status codes'),
-        TestStep(6, 'Verify NBOP MIG tables:\n'
-                     '- MIG_DEVICE: correct IMEI\n'
-                     '- MIG_SIM: correct ICCID%s\n'
-                     '- MIG_LINE: correct MDN, line status\n'
-                     '- MIG_FEATURE: features intact' % (', EID' if is_esim else ''),
-                 'All MIG tables reflect correct post-%s state' % short_code),
-        TestStep(7, 'Verify Transaction History records the %s operation with:\n'
-                     '- Correct timestamp\n'
-                     '- Transaction type = %s\n'
-                     '- MDN, lineId, channel = %s' % (trans_type, short_code, channel),
-                 'Transaction History entry created with all correct details'),
-    ]
-    return steps
 
 
 # ================================================================
@@ -1737,10 +1376,15 @@ def _expand_by_matrix(suite, options, log=print, max_combos=4):
     if not expandable:
         return None
 
-    # Instead of duplicating TCs per combo, keep unique TCs and reference Combinations sheet
-    log('[ENGINE]   %d expandable TCs — referencing Combinations sheet (no description clutter)' % len(expandable))
+    # Instead of duplicating TCs per combo, keep unique TCs and add combo info to description
+    log('[ENGINE]   %d expandable TCs — adding device matrix info to descriptions (no duplication)' % len(expandable))
 
     for tc in expandable:
+        combo_lines = []
+        for i, combo in enumerate(combos, 1):
+            combo_lines.append('Combo %d: %s | %s | %s | %s | %s' % (
+                i, combo['channel'], combo['device'], combo['os'], combo['sim'], combo['network']))
+        tc.description = '%s\nTest Configurations:\n%s' % (tc.description, '\n'.join(combo_lines))
         tc.preconditions += '\n%d.\tExecute for all device combinations listed in Combinations sheet' % (
             tc.preconditions.count('\n') + 2)
 

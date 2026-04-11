@@ -251,7 +251,7 @@ with left:
                         help='Smart=representative combos | Full=every combination | Custom=your rules')
 
     # Default values
-    channel = ['ITMBO', 'NBOP']
+    channel = ['ITMBO']
     devices = ['Mobile']
     networks = ['4G', '5G']
     sim_types = ['eSIM', 'pSIM']

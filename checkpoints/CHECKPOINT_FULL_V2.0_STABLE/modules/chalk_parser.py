@@ -547,16 +547,6 @@ def _parse_freeform(lines, data, fid, log=print):
         if fid in ln_stripped.upper() and len(ln_stripped) < 80:
             continue
 
-        # Skip feature title lines: [NENM, NSLNM, INTG]: New MVNO - ...
-        if re.match(r'^\[?[A-Z]{2,6}(?:\s*,\s*[A-Z]{2,6})*\]?\s*:', ln_stripped):
-            data.scope += ln_stripped + '\n'
-            continue
-
-        # Skip "New MVNO - ..." standalone title lines
-        if ln_low.startswith('new mvno'):
-            data.scope += ln_stripped + '\n'
-            continue
-
         # Skip known non-scenario lines
         if any(ln_low.startswith(p) for p in SKIP_WORDS):
             continue
@@ -580,26 +570,10 @@ def _parse_freeform(lines, data, fid, log=print):
             data.scope += ln_stripped + '\n'
             continue
 
-        # We're inside a scenario section — but filter out junk content
+        # We're inside a scenario section — but filter out long narrative paragraphs
         # A scenario title should be < 120 chars. Longer = description/scope text.
         if len(ln_stripped) > 120:
-            data.scope += ln_stripped + '\n'
-            continue
-
-        # Filter out developer notes, Jira refs, execution labels, planning comments
-        JUNK_PATTERNS = [
-            r'^test only',                          # "TEST ONLY Feature..."
-            r'^fix (will|details|is)',              # "Fix will be available..."
-            r'^MWTG(PROV|TEST)-\d+$',              # bare Jira ticket reference
-            r'^(INTG|UAT|SIT|PROD)\s*[-—]',        # execution environment labels
-            r'PROGRESSION|REGRESSION',              # test cycle labels
-            r'once the fix is ready',               # planning notes
-            r'will be available on',                # date-based notes
-            r'^N/A$|^NA$|^TBD$|^TODO$',            # placeholder text
-            r'^\d+\.\d+\s*$',                      # bare version numbers like "50.2"
-        ]
-        is_junk = any(re.search(p, ln_stripped, re.IGNORECASE) for p in JUNK_PATTERNS)
-        if is_junk:
+            # Long line — treat as description, append to scope
             data.scope += ln_stripped + '\n'
             continue
 

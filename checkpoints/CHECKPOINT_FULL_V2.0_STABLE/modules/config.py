@@ -74,46 +74,5 @@ CAT_COLORS = {'Happy Path': 'C6EFCE', 'Positive': 'C6EFCE', 'Edge Case': 'FFEB9C
 
 def ts(): return datetime.now().strftime('%Y%m%d_%H%M%S')
 def ts_short(): return datetime.now().strftime('%H:%M:%S')
-
-def _pi_to_iteration(pi_label):
-    """Convert PI-52 → 52.2, PI-51 → 51.2, PI-50 → 50.1, etc."""
-    import re
-    m = re.search(r'(\d+)', pi_label or '')
-    if not m:
-        return ''
-    num = int(m.group(1))
-    # PI-46 to PI-49 = x.1, PI-50+ = x.2
-    suffix = '.2' if num >= 50 else '.1'
-    return '%d%s' % (num, suffix)
-
-def _clean_filename(text, max_len=40):
-    """Clean text for use in filename."""
-    import re
-    t = re.sub(r'\[.*?\]', '', text)  # strip [NSLNM, NENM, INTG] etc
-    t = re.sub(r'New MVNO\s*-?\s*', '', t)  # strip common prefix
-    t = re.sub(r'[^\w\s-]', '', t)  # strip special chars
-    t = re.sub(r'\s+', '_', t.strip())  # spaces to underscores
-    return t[:max_len].rstrip('_')
-
-def output_path(fid, pi='', title=''):
-    iteration = _pi_to_iteration(pi)
-    clean_title = _clean_filename(title) if title else ''
-    parts = [fid]
-    if iteration:
-        parts.append(iteration)
-    if clean_title:
-        parts.append(clean_title)
-    parts.append(ts())
-    return OUTPUTS / ('_'.join(parts) + '.xlsx')
-
-def checkpoint_path(fid, ver='v1', pi='', title=''):
-    iteration = _pi_to_iteration(pi)
-    clean_title = _clean_filename(title) if title else ''
-    parts = ['CHECKPOINT', fid]
-    if iteration:
-        parts.append(iteration)
-    if clean_title:
-        parts.append(clean_title)
-    parts.append(ver)
-    parts.append(ts())
-    return CHECKPOINTS / ('_'.join(parts) + '.xlsx')
+def output_path(fid): return OUTPUTS / f'TESTPLAN_{fid}_{ts()}.xlsx'
+def checkpoint_path(fid, ver='v1'): return CHECKPOINTS / f'CHECKPOINT_{fid}_{ver}_{ts()}.xlsx'
