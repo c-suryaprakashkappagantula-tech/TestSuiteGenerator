@@ -804,10 +804,14 @@ if ss.get('_sync_running'):
 if run_btn:
     # Build the list of features to process
     _features_to_run = []
-    if feature_ids and len(feature_ids) > 1:
-        _features_to_run = [f.strip().upper() for f in feature_ids]
-    elif feature_id.strip():
+    if feature_ids and len(feature_ids) >= 1:
+        _features_to_run = [f.strip().upper() for f in feature_ids if f.strip()]
+    elif feature_id and feature_id.strip():
         _features_to_run = [feature_id.strip().upper()]
+
+    # Fallback: if batch mode with _batch_default but multiselect didn't populate
+    if not _features_to_run and ss.get('_batch_default'):
+        _features_to_run = [s.split(' - ')[0].strip().upper() for s in ss['_batch_default'] if s.strip()]
 
     if not _features_to_run:
         st.error('Please enter a Feature ID.')
