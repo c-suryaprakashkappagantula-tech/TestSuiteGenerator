@@ -184,6 +184,44 @@ def fetch_jira_issue(page, issue_key: str, log=print) -> JiraIssue:
                 log(f'[JIRA]     ❌ {st["key"]}: {str(e)[:60]}')
                 log(f'[JIRA]    {st["key"]}: failed to fetch ({e})')
 
+    # Fetch epic children — "Issues in epic" are not subtasks in REST API
+    if issue.issue_type and issue.issue_type.lower() == 'epic':
+        log(f'[JIRA] 🔍 Fetching epic children for {issue.key}...')
+        try:
+            epic_search = page.evaluate('''async (url) => {
+                const jql = encodeURIComponent('"Epic Link" = ''' + f'"{issue.key}"' + ''' ORDER BY key ASC');
+                const r = await fetch(url + '/search?jql=' + jql + '&maxResults=20&fields=summary,description,status,issuetype,labels,customfield_12402', {
+                    credentials: 'include',
+                    headers: {'Accept': 'application/json'}
+                });
+                return {status: r.status, body: r.ok ? await r.json() : null};
+            }''', JIRA_REST_V2)
+            if epic_search['status'] == 200 and epic_search['body']:
+                epic_issues = epic_search['body'].get('issues', [])
+                log(f'[JIRA] Found {len(epic_issues)} issues in epic')
+                for ei in epic_issues:
+                    ef = ei.get('fields', {})
+                    child = {
+                        'key': ei.get('key', ''),
+                        'summary': ef.get('summary', ''),
+                        'description': ef.get('description', '') or '',
+                        'status': (ef.get('status') or {}).get('name', ''),
+                        'issue_type': (ef.get('issuetype') or {}).get('name', ''),
+                        'labels': ef.get('labels', []),
+                    }
+                    # Check for AC in custom fields
+                    for fkey in ['customfield_12402', 'customfield_10401']:
+                        val = ef.get(fkey)
+                        if val and isinstance(val, str) and len(val) > 30:
+                            child['acceptance_criteria'] = val
+                            break
+                    issue.subtasks.append(child)
+                    log(f'[JIRA]   Epic child: {child["key"]} | {child["summary"][:50]} | desc={len(child["description"])} chars')
+            else:
+                log(f'[JIRA] Epic search returned HTTP {epic_search["status"]}')
+        except Exception as e:
+            log(f'[JIRA] Epic children fetch failed: {str(e)[:80]}')
+
     return issue
 
 

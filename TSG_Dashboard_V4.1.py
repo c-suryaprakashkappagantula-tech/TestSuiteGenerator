@@ -586,7 +586,8 @@ class LiveLog:
 
     # Only these prefixes show in the CLI window
     _SHOW_PREFIXES = ['[PIPELINE]', '[HUMANIZE]', '[ERROR]', '[WARN]', 'Block ', 'DONE', 'FAILED',
-                       'Batch:', '[ENGINE] [OK]', '[ENGINE] Step 8d', '[EXCEL]']
+                       'Batch:', '[ENGINE] [OK]', '[ENGINE] Step 8d', '[EXCEL]',
+                       '[JIRA] Found', '[JIRA]   Epic child', '[JIRA] 🔍 Fetching epic']
     # These are always hidden (too noisy)
     _HIDE_PREFIXES = ['[JIRA]   ', '[CHALK] Step', '[ENGINE] Step 5', '[ENGINE] Step 1',
                        '[ENGINE] Step 2', '[ENGINE] Step 3', '[ENGINE] Step 4',

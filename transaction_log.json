@@ -1,5 +1,27 @@
 [
   {
+    "timestamp": "2026-04-13 19:13:10",
+    "feature_id": "MWTGPROV-4254",
+    "pi": "PI-53",
+    "tc_count": 26,
+    "step_count": 122,
+    "strategy": "Smart Suite (Recommended)",
+    "file_path": "C:\\Users\\P3314665\\Documents\\mcp-jira-server\\TestSuiteGenerator\\outputs\\MWTGPROV-4254_53.2_ILD_and_International_Roaming_country_tr_20260413_191310.xlsx",
+    "file_name": "MWTGPROV-4254_53.2_ILD_and_International_Roaming_country_tr_20260413_191310.xlsx",
+    "status": "SUCCESS"
+  },
+  {
+    "timestamp": "2026-04-13 17:22:03",
+    "feature_id": "MWTGPROV-4254",
+    "pi": "PI-53",
+    "tc_count": 26,
+    "step_count": 122,
+    "strategy": "Smart Suite (Recommended)",
+    "file_path": "C:\\Users\\P3314665\\Documents\\mcp-jira-server\\TestSuiteGenerator\\outputs\\MWTGPROV-4254_53.2_ILD_and_International_Roaming_country_tr_20260413_172203.xlsx",
+    "file_name": "MWTGPROV-4254_53.2_ILD_and_International_Roaming_country_tr_20260413_172203.xlsx",
+    "status": "SUCCESS"
+  },
+  {
     "timestamp": "2026-04-13 15:55:42",
     "feature_id": "MWTGPROV-4254",
     "pi": "PI-53",
