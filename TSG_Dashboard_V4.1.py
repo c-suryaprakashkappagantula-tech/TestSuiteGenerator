@@ -548,11 +548,23 @@ with right:
             </div>""" % (info.get('tc_count', 0), info.get('step_count', 0), info.get('sheet_count', 3)),
             unsafe_allow_html=True)
 
-            st.download_button('📥 Download: %s (%d TCs)' % (
-                    ss.get('last_feature_id', 'Suite'), ss.get('suite_info', {}).get('tc_count', 0)),
-                data=Path(ss['result_path']).read_bytes(),
-                file_name=Path(ss['result_path']).name,
-                use_container_width=True, key='dl_main')
+            _dl_c1, _dl_c2 = st.columns([2, 1])
+            with _dl_c1:
+                st.download_button('📥 Download: %s (%d TCs)' % (
+                        ss.get('last_feature_id', 'Suite'), ss.get('suite_info', {}).get('tc_count', 0)),
+                    data=Path(ss['result_path']).read_bytes(),
+                    file_name=Path(ss['result_path']).name,
+                    use_container_width=True, key='dl_main')
+            with _dl_c2:
+                # Feature Summary doc download
+                if ss.get('batch_results'):
+                    _last_br = ss['batch_results'][-1]
+                    _doc_p = Path(_last_br.get('doc_path', '')) if _last_br.get('doc_path') else None
+                    if _doc_p and _doc_p.exists():
+                        st.download_button('📄 Feature Summary',
+                            data=_doc_p.read_bytes(),
+                            file_name=_doc_p.name,
+                            use_container_width=True, key='dl_doc_main')
 
             # Batch mode: show download buttons for ALL generated suites
             if ss.get('batch_results') and len(ss['batch_results']) > 1:
