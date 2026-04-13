@@ -266,12 +266,14 @@ def _build_summary_sheet(wb, suite: TestSuite):
             total_steps += g_steps
             r += 1
 
-        # Totals row
+        # Totals row — use actual suite count, not group sum (groups may merge/miss)
+        _actual_tcs = len(suite.test_cases)
+        _actual_steps = sum(len(tc.steps) for tc in suite.test_cases)
         ws.cell(row=r, column=1, value='TOTAL').font = _bf
         ws.cell(row=r, column=1).alignment = _center; ws.cell(row=r, column=1).border = _bdr
-        ws.cell(row=r, column=2, value=str(total_tcs)).font = _bf
+        ws.cell(row=r, column=2, value=str(_actual_tcs)).font = _bf
         ws.cell(row=r, column=2).alignment = _center; ws.cell(row=r, column=2).border = _bdr
-        ws.cell(row=r, column=3, value=str(total_steps)).font = _bf
+        ws.cell(row=r, column=3, value=str(_actual_steps)).font = _bf
         ws.cell(row=r, column=3).alignment = _center; ws.cell(row=r, column=3).border = _bdr
         r += 1
     else:
