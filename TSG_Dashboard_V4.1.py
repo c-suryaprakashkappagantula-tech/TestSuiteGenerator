@@ -560,24 +560,65 @@ with right:
 # LIVE LOG HELPER
 # ================================================================
 class LiveLog:
+    """Smart CLI logger — shows only high-level progress to user.
+    Detailed logs are stored internally but not displayed unless it's an error."""
+
+    # Only these prefixes show in the CLI window
+    _SHOW_PREFIXES = ['[PIPELINE]', '[HUMANIZE]', '[ERROR]', '[WARN]', 'Block ', 'DONE', 'FAILED',
+                       'Batch:', '[ENGINE] [OK]', '[ENGINE] Step 8d', '[EXCEL]']
+    # These are always hidden (too noisy)
+    _HIDE_PREFIXES = ['[JIRA]   ', '[CHALK] Step', '[ENGINE] Step 5', '[ENGINE] Step 1',
+                       '[ENGINE] Step 2', '[ENGINE] Step 3', '[ENGINE] Step 4',
+                       '[ENGINE] Step 5a', '[ENGINE] Step 5b', '[ENGINE] Step 5c',
+                       '[ENGINE] Step 5d', '[ENGINE] Step 6', '[ENGINE] Step 7',
+                       '[ENGINE] Step 8:', '[ENGINE] Step 8b', '[ENGINE] Step 8c',
+                       '[ENGINE] Step 9', '[ENGINE] Step 10', '[ENGINE] Step 11',
+                       '[ENGINE]   ', '[AUDIT]   ', '[TIME]', '[INIT]',
+                       '[DOC]', '[CUSTOM]', 'DEBUG']
+
     def __init__(self, header_ph, log_ph, tools_ph):
         self.header = header_ph
         self.log_ph = log_ph
         self.tools = tools_ph
-        self.lines = list(ss.get('logs', []))
+        self.lines = list(ss.get('logs', []))  # visible lines
+        self._all_lines = []  # all lines (for debug)
         self._ver = 0
 
     def set(self, text):
         self.header.markdown("<div class='cli-header'>>> %s</div>" % escape(text), unsafe_allow_html=True)
 
+    def _should_show(self, text):
+        """Decide if a log line should be shown in the CLI window."""
+        t = text.strip()
+        if not t:
+            return False
+        # Always show errors
+        if 'ERROR' in t or 'FAIL' in t or 'error' in t.lower()[:20]:
+            return True
+        # Always show pipeline block messages
+        if any(t.startswith(p) or p in t for p in self._SHOW_PREFIXES):
+            return True
+        # Hide noisy internal logs
+        if any(t.startswith(p) for p in self._HIDE_PREFIXES):
+            return False
+        # Show OK/success summaries
+        if '✅' in t or '✓' in t:
+            return True
+        # Hide everything else by default
+        return False
+
     def write(self, s):
         parts = s.splitlines(True)
         if not parts: return
         for part in parts:
-            if part.strip():
-                self.lines.append('[%s] %s' % (ts_short(), part.rstrip()))
+            text = part.rstrip()
+            if not text:
+                continue
+            self._all_lines.append(text)
+            if self._should_show(text):
+                self.lines.append('[%s] %s' % (ts_short(), text))
         ss['logs'] = list(self.lines)
-        view = '\n'.join(reversed(self.lines[-1200:]))
+        view = '\n'.join(reversed(self.lines[-500:]))
         self.log_ph.markdown("<div class='cli-box'><pre>%s</pre></div>" % escape(view), unsafe_allow_html=True)
         self._ver += 1
 
