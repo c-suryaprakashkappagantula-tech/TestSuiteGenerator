@@ -339,14 +339,17 @@ def clean_tc_content(test_cases, log=print):
             lines = [l for l in tc.description.split('\n') if l.strip()]
             tc.description = '\n'.join(lines)
 
-        # Fix 6: Strip leaked Jira tags from summary (e.g., "NSL, NE, INTG]: New MVNO -")
+        # Fix 6: Strip leaked Jira tags from summary (e.g., "Verify NE, INTG]: New MVNO -")
         _sum_no_prefix = re.sub(r'^TC\d+_[\w-]+_', '', tc.summary)
-        if re.match(r'^(?:[A-Z]{2,10})(?:\s*,\s*(?:[A-Z]{2,10}))*\]?\s*:?\s*', _sum_no_prefix):
-            _cleaned = re.sub(r'^(?:[A-Z]{2,10})(?:\s*,\s*(?:[A-Z]{2,10}))*\]?\s*:?\s*', '', _sum_no_prefix)
-            _cleaned = re.sub(r'^New\s+MVNO\s*[-:]\s*', '', _cleaned, flags=re.IGNORECASE).strip(' -:[]')
-            _prefix_m = re.match(r'^(TC\d+_[\w-]+_)', tc.summary)
-            tc.summary = (_prefix_m.group(1) if _prefix_m else '') + _cleaned
-            fixes += 1
+        if re.search(r'[A-Z]{2,6}(?:,\s*[A-Z]{2,6})+', _sum_no_prefix):
+            _cleaned = re.sub(r'\[?(?:[A-Z]{2,10})(?:\s*,\s*(?:[A-Z]{2,10}))+\]?\s*:?\s*', '', _sum_no_prefix)
+            _cleaned = re.sub(r'New\s+MVNO\s*[-:—ù]\s*', '', _cleaned, flags=re.IGNORECASE)
+            _cleaned = re.sub(r'\d{4}-', '', _cleaned)
+            _cleaned = _cleaned.strip(' -:[]')
+            if _cleaned and len(_cleaned) > 10:
+                _prefix_m = re.match(r'^(TC\d+_[\w-]+_)', tc.summary)
+                tc.summary = (_prefix_m.group(1) if _prefix_m else '') + _cleaned
+                fixes += 1
 
         # Fix 6: Ensure preconditions are numbered properly
         if tc.preconditions:
@@ -370,12 +373,79 @@ def clean_tc_content(test_cases, log=print):
 
 
 # ================================================================
+# 7. FINAL VALIDATION — last line of defense against garbage TCs
+# ================================================================
+
+def final_validation(test_cases, log=print):
+    """Final quality gate — reject or fix TCs that are clearly broken.
+    This runs AFTER all other passes as the last line of defense."""
+    clean = []
+    rejected = 0
+    fixed = 0
+
+    for tc in test_cases:
+        # Extract the name part (after TC##_FEATURE_)
+        _name = re.sub(r'^TC\d+_[\w-]+_', '', tc.summary).strip()
+
+        # REJECT: summary too short (< 15 chars) — these are garbage fragments
+        if len(_name) < 15:
+            rejected += 1
+            continue
+
+        # REJECT: summary is just a single word + period
+        if re.match(r'^[\w]+\.$', _name) and len(_name) < 20:
+            rejected += 1
+            continue
+
+        # REJECT: summary starts with preposition and is short
+        if _name.lower().startswith(('for ', 'the ', 'a ', 'an ', 'in ', 'on ', 'to ', 'is ', 'it ')) and len(_name) < 30:
+            rejected += 1
+            continue
+
+        # FIX: strip "..." from feature name truncation in summaries
+        _name = re.sub(r'\.{2,}', '', _name).strip()
+        if _name and _name != re.sub(r'^TC\d+_[\w-]+_', '', tc.summary).strip():
+            _prefix_m = re.match(r'^(TC\d+_[\w-]+_)', tc.summary)
+            tc.summary = (_prefix_m.group(1) if _prefix_m else '') + _name
+            fixed += 1
+
+        # FIX: strip leaked Jira tags from summary (anywhere, not just start)
+        if re.search(r'[A-Z]{2,6}(?:,\s*[A-Z]{2,6})+\]', _name) or re.search(r'\[?[A-Z]{2,6},\s*[A-Z]{2,6}', _name):
+            # Strip tag pattern and "New MVNO -" that follows
+            _name = re.sub(r'\[?(?:[A-Z]{2,10})(?:\s*,\s*(?:[A-Z]{2,10}))+\]?\s*:?\s*', '', _name)
+            _name = re.sub(r'New\s+MVNO\s*[-:—ù]\s*', '', _name, flags=re.IGNORECASE)
+            _name = re.sub(r'\d{4}-', '', _name)  # strip "3641-" feature ID prefix
+            _name = _name.strip(' -:[]')
+            _prefix_m = re.match(r'^(TC\d+_[\w-]+_)', tc.summary)
+            tc.summary = (_prefix_m.group(1) if _prefix_m else '') + _name
+            fixed += 1
+
+        # FIX: broken humanizer rewrites ("Validate that for X is blocked...")
+        if 'is blocked with clear error' in _name and _name.lower().startswith(('validate that for', 'check that for')):
+            rejected += 1
+            continue
+
+        # REJECT: description is also garbage
+        if tc.description and len(tc.description.strip()) < 10:
+            rejected += 1
+            continue
+
+        clean.append(tc)
+
+    if rejected or fixed:
+        log('[HUMANIZE] Final validation: %d passed, %d fixed, %d rejected' % (
+            len(clean) - fixed, fixed, rejected))
+
+    return clean
+
+
+# ================================================================
 # MAIN ENTRY — run all humanization passes
 # ================================================================
 
 def humanize_suite(test_cases, log=print):
     """Run all humanization passes on the test suite.
-    Order: clean → dedup → priority → humanize descriptions → flag low-value → reorder."""
+    Order: clean → dedup → priority → humanize descriptions → validate → flag low-value → reorder."""
     log('[HUMANIZE] Starting humanization pass on %d TCs...' % len(test_cases))
 
     # 0. Clean pass — fix common issues before other passes
@@ -390,10 +460,13 @@ def humanize_suite(test_cases, log=print):
     # 3. Humanize descriptions
     test_cases = humanize_descriptions(test_cases, log)
 
-    # 4. Flag low-value TCs
+    # 4. FINAL VALIDATION — reject garbage TCs that slipped through everything
+    test_cases = final_validation(test_cases, log)
+
+    # 5. Flag low-value TCs
     test_cases = flag_low_value(test_cases, log)
 
-    # 5. Reorder by risk
+    # 6. Reorder by risk
     test_cases = reorder_by_risk(test_cases, log)
 
     log('[HUMANIZE] Done — %d TCs after humanization' % len(test_cases))
