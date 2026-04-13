@@ -1794,16 +1794,27 @@ def _pick_representative_combos(all_combos, channels, devices, sim_types, networ
                     picked.append(c); used_keys.add(c['key'])
                     break
 
-    # Phase 4: Secondary channel - just 1 combo
+    # Phase 4: Secondary channel — ensure at least 1 NBOP combo (not just "if room")
     for ch in channels[1:]:
-        if len(picked) >= max_count: break
-        for c in all_combos:
-            if c['channel'] == ch and c['key'] not in used_keys:
-                picked.append(c); used_keys.add(c['key'])
-                break
+        if not any(p['channel'] == ch for p in picked):
+            for c in all_combos:
+                if c['channel'] == ch and c['key'] not in used_keys:
+                    picked.append(c); used_keys.add(c['key'])
+                    break
 
-    # Cap at max_count
-    picked = picked[:max_count]
+    # Cap at max_count (but keep at least 1 per channel)
+    if len(picked) > max_count:
+        # Keep first combo per channel, then fill remaining slots
+        _by_ch = {}
+        for p in picked:
+            _by_ch.setdefault(p['channel'], []).append(p)
+        _kept = []
+        for ch_combos in _by_ch.values():
+            _kept.append(ch_combos[0])  # keep at least 1 per channel
+        _remaining = [p for p in picked if p not in _kept]
+        _slots = max_count - len(_kept)
+        _kept.extend(_remaining[:max(0, _slots)])
+        picked = _kept
 
     # Assign network: most get 5G, last one gets 4G (if both selected)
     has_4g = '4G' in [n for n in networks if '5G' not in n] if networks else False

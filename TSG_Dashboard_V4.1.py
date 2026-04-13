@@ -31,6 +31,7 @@ from modules.llm_engine import (LLMClient, create_llm_from_env,
                                  PROVIDER_OPENAI, PROVIDER_AZURE, PROVIDER_BEDROCK,
                                  PROVIDER_OLLAMA, PROVIDER_NONE, DEFAULT_MODELS)
 from modules.llm_reviewer import review_suite_gaps, improve_steps, parse_custom_instructions_llm
+from modules.pipeline import Pipeline, PipelineError, block_jira_fetch, block_chalk_db, block_chalk_live, block_parse_docs, block_build_suite, block_generate_output
 from modules.database import (init_db, save_pi_pages, load_pi_pages, save_features,
                                load_features, load_all_features, get_features_count,
                                save_jira, load_jira, is_jira_stale, save_chalk, load_chalk,
@@ -293,12 +294,20 @@ with left:
     # ── Step 3: Test Matrix ──
     st.markdown("<div class='sec-title'><span class='icon'>&#9881;</span> Step 3: Test Matrix & Strategy</div>", unsafe_allow_html=True)
 
-    # Suite Strategy selector (Smart Suite / Full Matrix as radio, Custom Instructions as checkbox)
-    strategy = st.radio('Suite Strategy', ['Smart Suite (Recommended)', 'Full Matrix'],
-                        horizontal=True, key='suite_strategy',
-                        help='Smart=representative combos | Full=every combination')
+    # Suite Strategy — checkboxes (user can select multiple)
+    st.markdown("Suite Strategy:")
+    _sc1, _sc2, _sc3 = st.columns(3)
+    with _sc1:
+        use_smart = st.checkbox('Smart Suite', value=True, key='strat_smart', help='Representative combos (ITMBO + NBOP)')
+    with _sc2:
+        use_full = st.checkbox('Full Matrix', value=False, key='strat_full', help='Every combination — customize below')
+    with _sc3:
+        use_custom = st.checkbox('Custom Instructions', key='custom_instructions_toggle')
 
-    use_custom = st.checkbox('Custom Instructions', key='custom_instructions_toggle')
+    # Determine active strategy for the engine
+    strategy = 'Smart Suite (Recommended)'
+    if use_full:
+        strategy = 'Full Matrix'
 
     # Default values — Smart Suite includes both channels
     channel = ['ITMBO', 'NBOP']
@@ -307,9 +316,9 @@ with left:
     sim_types = ['eSIM', 'pSIM']
     os_platforms = ['iOS', 'Android']
 
-    if strategy == 'Smart Suite (Recommended)':
+    if use_smart and not use_full:
         st.caption('Smart Suite: ITMBO + NBOP | Mobile | eSIM+pSIM | iOS+Android | 4G+5G')
-    elif strategy == 'Full Matrix':
+    if use_full:
         st.caption('Full Matrix generates ALL combinations. Customize below:')
         mc1, mc2, mc3 = st.columns(3)
         with mc1:
