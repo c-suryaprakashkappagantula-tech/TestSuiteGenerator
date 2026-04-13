@@ -63,6 +63,12 @@ def humanize_descriptions(test_cases, log=print):
             continue
 
         core = match.group(1).strip()
+
+        # Sanity check — if core is too short or starts with a preposition, skip rewrite
+        _core_first = core.split('.')[0].strip().rstrip('.')
+        if len(_core_first) < 15 or _core_first.lower().startswith(('for ', 'the ', 'a ', 'an ', 'in ', 'on ', 'to ', 'is ', 'it ')):
+            continue
+
         cat = (tc.category or '').lower()
 
         if 'negative' in cat:
