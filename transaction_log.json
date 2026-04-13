@@ -1,5 +1,16 @@
 [
   {
+    "timestamp": "2026-04-13 19:51:45",
+    "feature_id": "MWTGPROV-4254",
+    "pi": "PI-53",
+    "tc_count": 29,
+    "step_count": 134,
+    "strategy": "Smart Suite (Recommended)",
+    "file_path": "C:\\Users\\P3314665\\Documents\\mcp-jira-server\\TestSuiteGenerator\\outputs\\MWTGPROV-4254_53.2_ILD_and_International_Roaming_country_tr_20260413_195144.xlsx",
+    "file_name": "MWTGPROV-4254_53.2_ILD_and_International_Roaming_country_tr_20260413_195144.xlsx",
+    "status": "SUCCESS"
+  },
+  {
     "timestamp": "2026-04-13 19:13:10",
     "feature_id": "MWTGPROV-4254",
     "pi": "PI-53",

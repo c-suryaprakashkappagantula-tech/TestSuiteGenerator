@@ -144,11 +144,14 @@ def _core_qa_thinking(fname, ftype, ctx, existing):
     s = []
 
     # Q1: "Does it work at all?" — but phrased like a real TC
+    # CDR/Mediation features don't use ITMBO/NBOP channels
+    _is_cdr = any(kw in (ctx + ' ' + fname).lower() for kw in ['cdr', 'mediation', 'prr', 'ild', 'roaming', 'country code'])
+    _channel = 'Mediation pipeline' if _is_cdr else 'ITMBO channel'
     if 'happy path' not in existing or 'successful' not in existing:
         s.append({
-            'title': 'Verify %s completes successfully with valid inputs via ITMBO channel.' % fname,
-            'description': 'Trigger %s with all valid parameters via ITMBO. '
-                           'Verify NSL accepts request, TMO responds, and operation completes end-to-end.' % fname,
+            'title': 'Verify %s completes successfully with valid inputs via %s.' % (fname, _channel),
+            'description': 'Trigger %s with all valid parameters via %s. '
+                           'Verify NSL accepts request, TMO responds, and operation completes end-to-end.' % (fname, _channel),
             'category': 'Happy Path',
             'reasoning': 'Basic sanity — does the feature work on the primary channel?',
         })

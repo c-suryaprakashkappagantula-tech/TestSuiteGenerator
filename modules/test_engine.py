@@ -1932,6 +1932,32 @@ def _quality_gate(test_cases, feature_name, feature_id, log=print):
         tc.summary = re.sub(r'(Validate|Verify)\s+(Validate|Verify)\s+', r'\1 ', tc.summary, flags=re.IGNORECASE)
         tc.description = re.sub(r'(To validate|To verify)\s+(that\s+)?(Validate|Verify)\s+', r'\1 that ', tc.description, flags=re.IGNORECASE)
 
+        # ── Check 6: Truncate long summaries — move overflow to description ──
+        _MAX_SUMMARY_LEN = 100
+        _name_part = re.sub(r'^TC\d+[_\s-]+' + re.escape(feature_id) + r'[_\s-]*', '', tc.summary, flags=re.IGNORECASE).strip()
+        if len(_name_part) > _MAX_SUMMARY_LEN:
+            # Find a good break point (at → or , or space)
+            _break = _MAX_SUMMARY_LEN
+            for _sep in [' → ', ', ', ' - ', ' ']:
+                _pos = _name_part.rfind(_sep, 0, _MAX_SUMMARY_LEN)
+                if _pos > 40:
+                    _break = _pos
+                    break
+            _short = _name_part[:_break].rstrip(' →,-')
+            _overflow = _name_part[_break:].lstrip(' →,-')
+            tc.summary = 'TC%03d_%s_%s' % (int(tc.sno) if tc.sno.isdigit() else 0, feature_id, _short)
+            if _overflow and _overflow not in tc.description:
+                tc.description = tc.description.rstrip() + '\nAdditional scope: ' + _overflow
+
+        # ── Check 7: Strip special characters from summary ──
+        _sum_clean = re.sub(r'^(TC\d+_[\w-]+_)', '', tc.summary)
+        _prefix_match = re.match(r'^(TC\d+_[\w-]+_)', tc.summary)
+        _prefix = _prefix_match.group(1) if _prefix_match else ''
+        _sum_clean = _sum_clean.replace('→', '-').replace('←', '-')
+        _sum_clean = re.sub(r'[/&"\'<>|\\]', ' ', _sum_clean)
+        _sum_clean = re.sub(r'\s+', ' ', _sum_clean).strip()
+        tc.summary = _prefix + _sum_clean
+
         clean_tcs.append(tc)
 
     if rejected or fixed:
