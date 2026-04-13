@@ -177,6 +177,23 @@ with left:
             st.caption('Select a PI iteration above')
     with rc2:
         refresh_pi_btn = st.button('🔄 Sync All from Chalk', key='refresh_pi', type='secondary', use_container_width=True)
+        if refresh_pi_btn:
+            ss['_sync_confirm'] = True
+            st.rerun()
+
+    # Sync confirmation dialog
+    if ss.get('_sync_confirm'):
+        st.warning('⚠️ This will re-fetch ALL features from Chalk pages and update the DB. This may take 5-10 minutes depending on the number of PIs and features.')
+        _cf1, _cf2, _cf3 = st.columns([2, 1, 1])
+        with _cf2:
+            if st.button('Yes, Sync Now', key='sync_yes', type='primary', use_container_width=True):
+                ss['_sync_confirm'] = False
+                ss['_sync_running'] = True
+                st.rerun()
+        with _cf3:
+            if st.button('Cancel', key='sync_cancel', use_container_width=True):
+                ss['_sync_confirm'] = False
+                st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -239,12 +256,16 @@ with left:
         elif ss.get('all_pi_features'):
             st.caption('No features found for %s on Chalk page.' % ss['selected_pi'])
 
-    _chk1, _chk2, _chk3 = st.columns([4, 2, 2])
-    with _chk2:
-        manual_mode = st.checkbox('Manual', value=(ss['feature_mode'] == 'manual'), key='manual_toggle')
-        ss['feature_mode'] = 'manual' if manual_mode else 'dropdown'
-    with _chk3:
-        batch_mode = st.checkbox('Batch', value=False, key='batch_toggle')
+    if not ss.get('_sync_confirm'):
+        _chk1, _chk2, _chk3 = st.columns([4, 2, 2])
+        with _chk2:
+            manual_mode = st.checkbox('Manual', value=(ss['feature_mode'] == 'manual'), key='manual_toggle')
+            ss['feature_mode'] = 'manual' if manual_mode else 'dropdown'
+        with _chk3:
+            batch_mode = st.checkbox('Batch', value=False, key='batch_toggle')
+    else:
+        manual_mode = False
+        batch_mode = False
 
     feature_id = ''
     feature_ids = []  # for batch mode
@@ -672,7 +693,8 @@ if history_btn:
     else:
         st.sidebar.info('No history yet.')
 
-if refresh_pi_btn:
+if ss.get('_sync_running'):
+    ss['_sync_running'] = False
     ss['logs'] = []
     ss['result_path'] = None
     ss['exit_report'] = None
