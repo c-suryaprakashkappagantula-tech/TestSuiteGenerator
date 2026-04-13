@@ -716,82 +716,57 @@ if run_btn:
 
         t0 = time.time()
         exit_items = []
-        timings = []  # (step_name, duration_secs)
-
-        def _tick(name):
-            """Record timing for a step."""
-            now = time.time()
-            if timings:
-                prev_name, prev_start = timings[-1]
-                dur = now - prev_start
-                timings[-1] = (prev_name, dur)
-                print('[TIME] %s: %.1fs' % (prev_name, dur), flush=True)
-            timings.append((name, now))
 
         with redirect_stdout(logger):
             try:
-                _tick('Browser Launch')
-                logger.set('[1/8] Launching browser...')
-                print('[INIT] Launching browser...', flush=True)
+                # ── Block 0: Browser Launch ──
+                pipe = Pipeline(log=logger)
+                logger.set('Launching browser...')
                 pw = sync_playwright().start()
                 browser = pw.chromium.launch(headless=True, channel=get_browser_channel())
                 context = browser.new_context(accept_downloads=True, viewport={'width': 1920, 'height': 1080})
                 page = context.new_page()
                 exit_items.append('Browser launched')
 
-                # ── BATCH LOOP: process each feature ──
+                # ── BATCH LOOP ──
                 _batch_count = len(_features_to_run)
                 for _fi, _current_fid in enumerate(_features_to_run, 1):
                     feature_id = _current_fid
-                    _batch_prefix = '[%d/%d] ' % (_fi, _batch_count) if _batch_count > 1 else ''
+                    _bp = '[%d/%d] ' % (_fi, _batch_count) if _batch_count > 1 else ''
 
-                    _tick('Jira Fetch')
-                    logger.set('%s[2/8] Fetching Jira: %s...' % (_batch_prefix, feature_id))
-                    jira = fetch_jira_issue(page, feature_id, log=logger)
-                    exit_items.append('%sJira fetched: %s' % (_batch_prefix, jira.summary[:50]))
+                    # Block 1: Jira Fetch (with self-heal retry)
+                    logger.set('%sBlock 1: Fetching Jira %s...' % (_bp, feature_id))
+                    jira_result = pipe.run('Jira_%s' % feature_id,
+                        lambda fid=feature_id: block_jira_fetch(page, fid, log=logger))
+                    jira = jira_result['jira']
+                    att_paths = jira_result['att_paths'] if inc_attachments else []
+                    exit_items.append('%s%s: Jira fetched — %s' % (_bp, feature_id, jira.summary[:40]))
 
-                    parsed_docs = []
-                    if inc_attachments and jira.attachments:
-                        _tick('Attachments_%s' % feature_id)
-                        att_paths = download_attachments(page, jira, log=logger)
-                        for ap in att_paths:
-                            parsed_docs.append(parse_file(ap, log=logger, source='Jira Attachment'))
+                    # Block 2: Chalk DB Lookup (with self-heal retry)
+                    logger.set('%sBlock 2: Chalk DB lookup %s...' % (_bp, feature_id))
+                    chalk_db = pipe.run('ChalkDB_%s' % feature_id,
+                        lambda fid=feature_id: block_chalk_db(fid, ss['selected_pi'], log=logger))
+                    chalk = chalk_db['chalk']
 
-                    _tick('Chalk_%s' % feature_id)
-                    logger.set('%sFetching Chalk: %s...' % (_batch_prefix, feature_id))
-                    chalk = load_chalk_as_object(feature_id, ss['selected_pi'])
-                    if not (chalk and chalk.scenarios):
-                        from modules.database import _conn as _db_conn
-                        _c = _db_conn()
-                        _row = _c.execute('SELECT pi_label FROM chalk_cache WHERE feature_id=? AND scenarios_json != "[]" LIMIT 1',
-                                          (feature_id,)).fetchone()
-                        _c.close()
-                        if _row:
-                            chalk = load_chalk_as_object(feature_id, _row['pi_label'])
-                        if not (chalk and chalk.scenarios):
-                            chalk = fetch_feature_from_pi(page, ss['selected_pi_url'], feature_id, log=logger)
-                            if chalk and chalk.scenarios:
-                                save_chalk(feature_id, ss['selected_pi'], chalk)
-                            else:
-                                for _sl, _su in ss['pi_list']:
-                                    if _sl == ss['selected_pi']: continue
-                                    try:
-                                        _sc = fetch_feature_from_pi(page, _su, feature_id, log=lambda m: None)
-                                        if _sc and _sc.scenarios:
-                                            chalk = _sc; save_chalk(feature_id, _sl, chalk); break
-                                    except: pass
-                                if not chalk or not chalk.scenarios:
-                                    from modules.chalk_parser import ChalkData
-                                    chalk = ChalkData(feature_id=feature_id)
+                    # Block 3: Chalk Live Fetch (only if DB missed, with self-heal retry)
+                    if not chalk or not chalk.scenarios:
+                        logger.set('%sBlock 3: Chalk live fetch %s...' % (_bp, feature_id))
+                        chalk_live = pipe.run('ChalkLive_%s' % feature_id,
+                            lambda fid=feature_id: block_chalk_live(
+                                page, fid, ss['selected_pi_url'], ss['selected_pi'], ss['pi_list'], log=logger))
+                        chalk = chalk_live['chalk']
 
-                    if uploaded_files and _fi == 1:
-                        for uf in uploaded_files:
-                            save_path = INPUTS / uf.name
-                            save_path.write_bytes(uf.getvalue())
-                            parsed_docs.append(parse_file(save_path, log=logger))
+                    # Block 4: Document Parsing (with self-heal retry)
+                    _uploads = uploaded_files if _fi == 1 else None
+                    if att_paths or _uploads:
+                        logger.set('%sBlock 4: Parsing documents...' % _bp)
+                        parsed_docs = pipe.run('Docs_%s' % feature_id,
+                            lambda: block_parse_docs(att_paths, _uploads, INPUTS, log=logger))
+                    else:
+                        parsed_docs = []
 
-                    _tick('Engine_%s' % feature_id)
-                    logger.set('%sBuilding suite: %s...' % (_batch_prefix, feature_id))
+                    # Block 5: Test Engine (with self-heal retry)
+                    logger.set('%sBlock 5: Building test suite %s...' % (_bp, feature_id))
                     options = {
                         'channel': channel, 'devices': devices, 'networks': networks,
                         'sim_types': sim_types, 'os_platforms': os_platforms,
@@ -800,91 +775,98 @@ if run_btn:
                         'include_edge': inc_edge, 'include_attachments': inc_attachments,
                         'strategy': strategy, 'custom_instructions': custom_instructions,
                     }
+                    engine_result = pipe.run('Engine_%s' % feature_id,
+                        lambda: block_build_suite(jira, chalk, parsed_docs, options, log=logger))
+                    suite = engine_result['suite']
+                    total_steps = engine_result['total_steps']
 
-                    suite = build_test_suite(jira, chalk, parsed_docs, options, log=logger)
-                    total_steps = sum(len(tc.steps) for tc in suite.test_cases)
+                    # Block 6: Excel + DB Save (with self-heal retry)
+                    logger.set('%sBlock 6: Generating output %s...' % (_bp, feature_id))
+                    output = pipe.run('Output_%s' % feature_id,
+                        lambda: block_generate_output(suite, feature_id, ss['selected_pi'], strategy, log=logger))
 
-                    _tick('Excel_%s' % feature_id)
-                    logger.set('%sGenerating Excel: %s...' % (_batch_prefix, feature_id))
-                    out_path = generate_excel(suite, log=logger)
-
+                    out_path = output['out_path']
                     sheet_count = len(suite.groups) + 2 if len(suite.groups) > 1 else 3
                     if hasattr(suite, 'combinations') and suite.combinations and len(suite.combinations) > 1:
                         sheet_count += 1
-                    ss['result_path'] = str(out_path)
-                    ss['suite_info'] = {'tc_count': len(suite.test_cases), 'step_count': total_steps, 'sheet_count': sheet_count}
-                    ss['last_feature_id'] = feature_id
 
-                    try:
-                        _suite_id = save_test_suite(suite, file_path=str(out_path))
-                        ss['last_suite_id'] = _suite_id
-                    except: pass
+                    ss['result_path'] = str(out_path)
+                    ss['suite_info'] = {'tc_count': output['tc_count'], 'step_count': output['total_steps'], 'sheet_count': sheet_count}
+                    ss['last_feature_id'] = feature_id
+                    ss['last_suite_id'] = output['suite_id']
 
                     ss['batch_results'].append({
-                        'feature_id': feature_id, 'tc_count': len(suite.test_cases),
-                        'step_count': total_steps, 'file': out_path.name, 'file_path': str(out_path),
-                        'title': jira.summary[:60]})
-                    exit_items.append('%s%s: %d TCs | %s' % (_batch_prefix, feature_id, len(suite.test_cases), out_path.name))
-
-                    log_generation(feature_id, ss['selected_pi'], len(suite.test_cases), total_steps, strategy, str(out_path))
-                    log_generation_db(feature_id, ss['selected_pi'], len(suite.test_cases), total_steps, strategy, str(out_path))
+                        'feature_id': feature_id, 'tc_count': output['tc_count'],
+                        'step_count': output['total_steps'], 'file': out_path.name,
+                        'file_path': str(out_path), 'title': jira.summary[:60]})
+                    exit_items.append('%s%s: %d TCs | %s' % (_bp, feature_id, output['tc_count'], out_path.name))
 
                 # ── END BATCH LOOP — close browser ──
-                _tick('Browser Close')
                 context.close(); browser.close(); pw.stop()
 
-                # Finalize timing
-                _tick('_end')
-                timings.pop()
-
+                # ── Finalize ──
                 elapsed = time.time() - t0
                 m, s = divmod(int(elapsed), 60)
-                if len(_features_to_run) > 1:
-                    logger.set('[BATCH] DONE — %d features in %dm %ds' % (len(_features_to_run), m, s))
-                else:
-                    logger.set('[10/10] DONE in %dm %ds' % (m, s))
+                _feat_label = '%d features' % len(_features_to_run) if len(_features_to_run) > 1 else feature_id
+                logger.set('DONE: %s in %dm %ds' % (_feat_label, m, s))
 
-                # Print time matrix
-                print('\n' + '=' * 50, flush=True)
-                print('  TIME MATRIX', flush=True)
-                print('  %-20s %10s %8s' % ('Step', 'Duration', '%'), flush=True)
-                print('  ' + '-' * 42, flush=True)
-                for step_name, dur in timings:
-                    pct = (dur / elapsed * 100) if elapsed > 0 else 0
-                    print('  %-20s %8.1fs %7.1f%%' % (step_name, dur, pct), flush=True)
-                print('  ' + '-' * 42, flush=True)
-                print('  %-20s %8.1fs %7s' % ('TOTAL', elapsed, '100%'), flush=True)
-                print('=' * 50, flush=True)
-
-                sheet_count = len(suite.groups) + 2 if len(suite.groups) > 1 else 3
-                if hasattr(suite, 'combinations') and suite.combinations and len(suite.combinations) > 1:
-                    sheet_count += 1
-
-                ss['result_path'] = str(out_path)
-                ss['cp_path'] = None
-                ss['suite_info'] = {'tc_count': len(suite.test_cases), 'step_count': total_steps, 'sheet_count': sheet_count}
+                # Print pipeline timing
+                print('\n' + '=' * 55, flush=True)
+                print('  PIPELINE TIMING', flush=True)
+                print('  %-30s %10s' % ('Block', 'Duration'), flush=True)
+                print('  ' + '-' * 44, flush=True)
+                for bname, bdur in pipe.get_timing_summary():
+                    print('  %-30s %8.1fs' % (bname, bdur), flush=True)
+                print('  ' + '-' * 44, flush=True)
+                print('  %-30s %8.1fs' % ('TOTAL', elapsed), flush=True)
+                print('=' * 55, flush=True)
 
                 # Build exit report
+                timing_items = ['⏱ %s: %.1fs' % (n, d) for n, d in pipe.get_timing_summary()]
                 if len(_features_to_run) > 1:
                     _batch_summary = ['Batch: %d features processed' % len(ss['batch_results'])]
                     for br in ss['batch_results']:
                         _batch_summary.append('  %s: %d TCs | %s' % (br['feature_id'], br['tc_count'], br['file']))
-                    timing_items = ['⏱ %s: %.1fs' % (name, dur) for name, dur in timings]
                     ss['exit_report'] = {
-                        'title': 'Batch Generation Complete — %d features' % len(ss['batch_results']),
-                        'items': _batch_summary + [''] + exit_items[-5:] + [''] + timing_items,
+                        'title': 'Batch Complete — %d features' % len(ss['batch_results']),
+                        'items': _batch_summary + [''] + timing_items,
                         'footer': 'Completed at %s | Duration: %dm %ds | PI: %s' % (
                             datetime.now().strftime('%Y-%m-%d %H:%M:%S'), m, s, ss['selected_pi']),
                     }
                 else:
-                    timing_items = ['⏱ %s: %.1fs' % (name, dur) for name, dur in timings]
                     ss['exit_report'] = {
-                        'title': 'Generation Complete - %s' % feature_id,
+                        'title': 'Generation Complete — %s' % feature_id,
                         'items': exit_items + [''] + timing_items,
                         'footer': 'Completed at %s | Duration: %dm %ds | PI: %s' % (
                             datetime.now().strftime('%Y-%m-%d %H:%M:%S'), m, s, ss['selected_pi']),
                     }
 
+                st.rerun()
+
+            except PipelineError as pe:
+                elapsed = time.time() - t0
+                m, s = divmod(int(elapsed), 60)
+                logger.set('PIPELINE FAILED — %s' % pe.block_name)
+                print('\n[PIPELINE ERROR] %s' % pe, flush=True)
+                ss['exit_report'] = {
+                    'title': 'Generation FAILED — %s' % feature_id,
+                    'items': [
+                        'Pipeline block "%s" failed after %d attempts.' % (pe.block_name, pe.attempts),
+                        '',
+                        'Please Contact Dashboard Admin with below error message:',
+                        'Block: %s' % pe.block_name,
+                        'Error: %s' % pe.error_msg[:200],
+                    ] + exit_items,
+                    'footer': 'Failed at %s | Duration: %dm %ds' % (
+                        datetime.now().strftime('%Y-%m-%d %H:%M:%S'), m, s),
+                }
+                for _obj_name in ('context', 'browser', 'pw'):
+                    _obj = locals().get(_obj_name)
+                    if _obj:
+                        try:
+                            if _obj_name == 'pw': _obj.stop()
+                            else: _obj.close()
+                        except: pass
                 st.rerun()
 
             except Exception as e:
@@ -893,16 +875,12 @@ if run_btn:
                 logger.set('FAILED after %dm %ds' % (m, s))
                 print('\n[ERROR] %s' % e, flush=True)
                 traceback.print_exc()
-                exit_items.append('ERROR: %s' % str(e)[:100])
                 ss['exit_report'] = {
-                    'title': 'Generation FAILED - %s' % feature_id,
-                    'items': exit_items,
+                    'title': 'Generation FAILED — %s' % feature_id,
+                    'items': exit_items + ['ERROR: %s' % str(e)[:200]],
                     'footer': 'Failed at %s | Duration: %dm %ds' % (
                         datetime.now().strftime('%Y-%m-%d %H:%M:%S'), m, s),
                 }
-                log_generation(feature_id, ss.get('selected_pi',''), 0, 0, strategy, '', status='FAILED')
-                log_generation_db(feature_id, ss.get('selected_pi',''), 0, 0, strategy, '', status='FAILED')
-                # Point 3: safe cleanup — variables may not exist if crash was early
                 for _obj_name in ('context', 'browser', 'pw'):
                     _obj = locals().get(_obj_name)
                     if _obj:
