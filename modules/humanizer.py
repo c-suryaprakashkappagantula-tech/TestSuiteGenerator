@@ -280,13 +280,91 @@ def flag_low_value(test_cases, log=print):
 
 
 # ================================================================
+# 6. CONTENT CLEANER — fix common issues across all TCs
+# ================================================================
+
+# CDR/Mediation keywords — these features don't use ITMBO/NBOP channels
+_CDR_KEYWORDS = ['cdr', 'mediation', 'prr', 'ild', 'international roaming', 'country code',
+                 'roaming', 'call detail', 'usage record', 'call origin', 'call destination']
+
+
+def clean_tc_content(test_cases, log=print):
+    """Fix common content issues across all TCs."""
+    fixes = 0
+
+    # Detect if this is a CDR/Mediation feature
+    all_text = ' '.join(tc.summary.lower() + ' ' + tc.description.lower() for tc in test_cases)
+    is_cdr = sum(1 for kw in _CDR_KEYWORDS if kw in all_text) >= 2
+
+    for tc in test_cases:
+        # Fix 1: Replace ITMBO/NBOP with Mediation for CDR features
+        if is_cdr:
+            for field in ['summary', 'description', 'preconditions']:
+                val = getattr(tc, field, '') or ''
+                if 'ITMBO' in val or 'NBOP' in val:
+                    new_val = val.replace('via ITMBO', 'via Mediation pipeline')
+                    new_val = new_val.replace('via NBOP', 'via Mediation pipeline')
+                    new_val = new_val.replace('channel ITMBO', 'Mediation pipeline')
+                    new_val = new_val.replace('channel NBOP', 'Mediation pipeline')
+                    new_val = new_val.replace('with ITMBO', 'via Mediation')
+                    new_val = new_val.replace('with NBOP', 'via Mediation')
+                    if new_val != val:
+                        setattr(tc, field, new_val)
+                        fixes += 1
+
+        # Fix 2: Clean up step text — remove special chars, fix encoding
+        for step in tc.steps:
+            step.summary = step.summary.replace('→', '-').replace('←', '-')
+            step.summary = re.sub(r'["""]', '', step.summary)
+            step.expected = step.expected.replace('→', '-').replace('←', '-')
+            step.expected = re.sub(r'["""]', '', step.expected)
+
+        # Fix 3: Remove "Reasoning:" lines from description (internal, not for testers)
+        if 'Reasoning:' in tc.description:
+            tc.description = re.sub(r'\nReasoning:.*$', '', tc.description, flags=re.MULTILINE).strip()
+            fixes += 1
+
+        # Fix 4: Clean up "Variants (merged):" to be more readable
+        if 'Variants (merged):' in tc.description:
+            tc.description = tc.description.replace('Variants (merged):', '\nAlso covers:')
+
+        # Fix 5: Remove empty/whitespace-only lines in description
+        if tc.description:
+            lines = [l for l in tc.description.split('\n') if l.strip()]
+            tc.description = '\n'.join(lines)
+
+        # Fix 6: Ensure preconditions are numbered properly
+        if tc.preconditions:
+            pre_lines = tc.preconditions.split('\n')
+            renumbered = []
+            num = 1
+            for line in pre_lines:
+                line = line.strip()
+                if not line:
+                    continue
+                # Strip existing numbering
+                line = re.sub(r'^\d+[\.\)]\s*', '', line)
+                line = re.sub(r'^\d+\.\t', '', line)
+                renumbered.append('%d.\t%s' % (num, line))
+                num += 1
+            tc.preconditions = '\n'.join(renumbered)
+
+    if fixes:
+        log('[HUMANIZE] Content cleaner: %d fixes applied' % fixes)
+    return test_cases
+
+
+# ================================================================
 # MAIN ENTRY — run all humanization passes
 # ================================================================
 
 def humanize_suite(test_cases, log=print):
     """Run all humanization passes on the test suite.
-    Order: dedup → priority → humanize descriptions → flag low-value → reorder."""
+    Order: clean → dedup → priority → humanize descriptions → flag low-value → reorder."""
     log('[HUMANIZE] Starting humanization pass on %d TCs...' % len(test_cases))
+
+    # 0. Clean pass — fix common issues before other passes
+    test_cases = clean_tc_content(test_cases, log)
 
     # 1. Dedup/merge first (reduces TC count)
     test_cases = dedup_and_merge(test_cases, log)
