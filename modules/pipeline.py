@@ -226,14 +226,22 @@ def block_build_suite(jira, chalk, parsed_docs, options, log=print):
     return {'suite': suite, 'total_steps': total_steps}
 
 
-def block_generate_output(suite, feature_id, pi, strategy, log=print):
-    """Block 6: Generate Excel, save to DB, log transaction."""
+def block_generate_output(suite, feature_id, pi, strategy, jira=None, chalk=None, log=print):
+    """Block 6: Generate Excel + Feature Doc, save to DB, log transaction."""
     from .excel_generator import generate_excel
+    from .doc_generator import generate_feature_doc
     from .database import save_test_suite, log_generation_db
     from .transaction_log import log_generation
 
     out_path = generate_excel(suite, log=log)
     total_steps = sum(len(tc.steps) for tc in suite.test_cases)
+
+    # Generate Feature Objective doc
+    doc_path = None
+    try:
+        doc_path = generate_feature_doc(suite, jira, chalk, log=log)
+    except Exception as e:
+        log('[PIPELINE] Feature doc warning: %s' % str(e)[:60])
 
     suite_id = 0
     try:
@@ -246,6 +254,6 @@ def block_generate_output(suite, feature_id, pi, strategy, log=print):
     log_generation_db(feature_id, pi, len(suite.test_cases), total_steps, strategy, str(out_path))
 
     return {
-        'out_path': out_path, 'suite_id': suite_id,
+        'out_path': out_path, 'doc_path': doc_path, 'suite_id': suite_id,
         'tc_count': len(suite.test_cases), 'total_steps': total_steps,
     }

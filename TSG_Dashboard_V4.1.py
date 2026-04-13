@@ -559,13 +559,24 @@ with right:
                 st.markdown("**All generated suites:**")
                 for _bi, _br in enumerate(ss['batch_results']):
                     _bp = Path(_br.get('file_path', _br.get('path', '')))
+                    _dp = Path(_br.get('doc_path', '')) if _br.get('doc_path') else None
                     if _bp.exists():
-                        st.download_button(
-                            '📥 %s — %d TCs' % (_br['feature_id'], _br['tc_count']),
-                            data=_bp.read_bytes(),
-                            file_name=_bp.name,
-                            use_container_width=True,
-                            key='dl_batch_%d' % _bi)
+                        _dc1, _dc2 = st.columns([2, 1])
+                        with _dc1:
+                            st.download_button(
+                                '📥 %s — %d TCs' % (_br['feature_id'], _br['tc_count']),
+                                data=_bp.read_bytes(),
+                                file_name=_bp.name,
+                                use_container_width=True,
+                                key='dl_batch_%d' % _bi)
+                        with _dc2:
+                            if _dp and _dp.exists():
+                                st.download_button(
+                                    '📄 Summary',
+                                    data=_dp.read_bytes(),
+                                    file_name=_dp.name,
+                                    use_container_width=True,
+                                    key='dl_doc_%d' % _bi)
 
     # ── Exit Report ──
     if ss.get('exit_report'):
@@ -878,7 +889,7 @@ if run_btn:
                     # Block 6: Excel + DB Save (with self-heal retry)
                     logger.set('%sBlock 6: Generating output %s...' % (_bp, feature_id))
                     output = pipe.run('Output_%s' % feature_id,
-                        lambda: block_generate_output(suite, feature_id, ss['selected_pi'], strategy, log=logger))
+                        lambda: block_generate_output(suite, feature_id, ss['selected_pi'], strategy, jira=jira, chalk=chalk, log=logger))
 
                     out_path = output['out_path']
                     sheet_count = len(suite.groups) + 2 if len(suite.groups) > 1 else 3
@@ -893,7 +904,8 @@ if run_btn:
                     ss['batch_results'].append({
                         'feature_id': feature_id, 'tc_count': output['tc_count'],
                         'step_count': output['total_steps'], 'file': out_path.name,
-                        'file_path': str(out_path), 'title': jira.summary[:60]})
+                        'file_path': str(out_path), 'title': jira.summary[:60],
+                        'doc_path': str(output.get('doc_path', '')) if output.get('doc_path') else ''})
                     exit_items.append('%s%s: %d TCs | %s' % (_bp, feature_id, output['tc_count'], out_path.name))
 
                 # ── END BATCH LOOP — close browser ──

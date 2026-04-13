@@ -1,5 +1,16 @@
 [
   {
+    "timestamp": "2026-04-13 20:44:50",
+    "feature_id": "MWTGPROV-3985",
+    "pi": "PI-53",
+    "tc_count": 20,
+    "step_count": 83,
+    "strategy": "Smart Suite (Recommended)",
+    "file_path": "C:\\Users\\P3314665\\Documents\\mcp-jira-server\\TestSuiteGenerator\\outputs\\MWTGPROV-3985_53.2_Network_Reset_20260413_204450.xlsx",
+    "file_name": "MWTGPROV-3985_53.2_Network_Reset_20260413_204450.xlsx",
+    "status": "SUCCESS"
+  },
+  {
     "timestamp": "2026-04-13 20:21:17",
     "feature_id": "MWTGPROV-4254",
     "pi": "PI-53",
