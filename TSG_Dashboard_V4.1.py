@@ -176,7 +176,7 @@ with left:
         else:
             st.caption('Select a PI iteration above')
     with rc2:
-        refresh_pi_btn = st.button('Refresh from Chalk', key='refresh_pi', type='secondary', use_container_width=True)
+        refresh_pi_btn = st.button('🔄 Sync All from Chalk', key='refresh_pi', type='secondary', use_container_width=True)
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -527,8 +527,8 @@ with right:
             </div>""" % (info.get('tc_count', 0), info.get('step_count', 0), info.get('sheet_count', 3)),
             unsafe_allow_html=True)
 
-            st.download_button('Download: %s — %s' % (
-                    ss.get('last_feature_id', ''), Path(ss['result_path']).stem[:50]),
+            st.download_button('📥 Download: %s (%d TCs)' % (
+                    ss.get('last_feature_id', 'Suite'), ss.get('suite_info', {}).get('tc_count', 0)),
                 data=Path(ss['result_path']).read_bytes(),
                 file_name=Path(ss['result_path']).name,
                 use_container_width=True, key='dl_main')
@@ -540,7 +540,7 @@ with right:
                     _bp = Path(_br.get('file_path', _br.get('path', '')))
                     if _bp.exists():
                         st.download_button(
-                            'Download: %s — %d TCs | %s' % (_br['feature_id'], _br['tc_count'], _br.get('title', '')[:40]),
+                            '📥 %s — %d TCs' % (_br['feature_id'], _br['tc_count']),
                             data=_bp.read_bytes(),
                             file_name=_bp.name,
                             use_container_width=True,
@@ -673,51 +673,82 @@ if history_btn:
         st.sidebar.info('No history yet.')
 
 if refresh_pi_btn:
-    with st.spinner('Refreshing ALL PIs, features, and Chalk data + updating DB...'):
-        try:
-            pw = sync_playwright().start()
-            browser = pw.chromium.launch(headless=True, channel=get_browser_channel())
-            ctx = browser.new_context(viewport={'width': 1920, 'height': 1080})
-            page = ctx.new_page()
-            # Refresh PI list
-            pi_links = discover_pi_links(page, log=lambda m: None)
-            ss['pi_list'] = [(p.label, p.url) for p in pi_links]
-            save_pi_pages(ss['pi_list'])
-            # Re-fetch ALL features + full Chalk data
-            _all = {}
-            _chalk_count = 0
-            for _pi_label, _pi_url in ss['pi_list']:
-                st.toast('Scanning %s...' % _pi_label)
-                _feats = discover_features_on_pi(page, _pi_url, log=lambda m: None)
-                _all[_pi_label] = _feats
-                save_features(_pi_label, _feats)
-                # Fetch full Chalk data for each feature
-                for _fid, _ftitle in _feats:
-                    try:
-                        _chalk = fetch_feature_from_pi(page, _pi_url, _fid, log=lambda m: None)
-                        if _chalk and _chalk.scenarios:
-                            save_chalk(_fid, _pi_label, _chalk)
-                            _chalk_count += 1
-                    except:
-                        pass
-            ss['all_pi_features'] = _all
-            # Keep current PI selection, just refresh its features from new cache
-            if ss['selected_pi'] and ss['selected_pi'] in _all:
-                ss['pi_features'] = _all[ss['selected_pi']]
-            else:
-                ss['selected_pi'] = None
-                ss['selected_pi_url'] = ''
-                ss['pi_features'] = []
-            ctx.close(); browser.close(); pw.stop()
-            st.toast('Refreshed %d PIs | %d features | %d with full Chalk data — saved to DB' % (
-                len(_all), sum(len(v) for v in _all.values()), _chalk_count))
-            st.rerun()
-        except Exception as e:
-            st.error('Failed: %s' % e)
-            try: ctx.close()
-            except: pass
-            try: browser.close()
-            except: pass
+    ss['logs'] = []
+    ss['result_path'] = None
+    ss['exit_report'] = None
+
+    # Use the CLI terminal for progress
+    _sync_header = cli_header
+    _sync_log = cli_log
+
+    _sync_lines = []
+    def _sync_msg(msg):
+        _sync_lines.append('[%s] %s' % (ts_short(), msg))
+        view = '\n'.join(reversed(_sync_lines[-200:]))
+        _sync_log.markdown("<div class='cli-box'><pre>%s</pre></div>" % escape(view), unsafe_allow_html=True)
+
+    _sync_header.markdown("<div class='cli-header'>>> Syncing all features from Chalk...</div>", unsafe_allow_html=True)
+
+    try:
+        _sync_msg('Launching browser...')
+        pw = sync_playwright().start()
+        browser = pw.chromium.launch(headless=True, channel=get_browser_channel())
+        ctx = browser.new_context(viewport={'width': 1920, 'height': 1080})
+        page = ctx.new_page()
+        _sync_msg('Browser launched')
+
+        _sync_msg('Discovering PI pages...')
+        pi_links = discover_pi_links(page, log=lambda m: None)
+        ss['pi_list'] = [(p.label, p.url) for p in pi_links]
+        save_pi_pages(ss['pi_list'])
+        _sync_msg('Found %d PIs' % len(ss['pi_list']))
+
+        _all = {}
+        _chalk_count = 0
+        _total_feats = 0
+        for _pi_idx, (_pi_label, _pi_url) in enumerate(ss['pi_list'], 1):
+            _sync_msg('[%d/%d] Scanning %s...' % (_pi_idx, len(ss['pi_list']), _pi_label))
+            _feats = discover_features_on_pi(page, _pi_url, log=lambda m: None)
+            _all[_pi_label] = _feats
+            save_features(_pi_label, _feats)
+            _total_feats += len(_feats)
+            _sync_msg('[%d/%d] %s: %d features found' % (_pi_idx, len(ss['pi_list']), _pi_label, len(_feats)))
+
+            for _fi, (_fid, _ftitle) in enumerate(_feats, 1):
+                try:
+                    _chalk = fetch_feature_from_pi(page, _pi_url, _fid, log=lambda m: None)
+                    if _chalk and _chalk.scenarios:
+                        save_chalk(_fid, _pi_label, _chalk)
+                        _chalk_count += 1
+                except:
+                    pass
+            _sync_msg('[%d/%d] %s: Chalk data cached for %d features' % (_pi_idx, len(ss['pi_list']), _pi_label, _chalk_count))
+
+        ss['all_pi_features'] = _all
+        if ss['selected_pi'] and ss['selected_pi'] in _all:
+            ss['pi_features'] = _all[ss['selected_pi']]
+        else:
+            ss['selected_pi'] = None
+            ss['selected_pi_url'] = ''
+            ss['pi_features'] = []
+        ctx.close(); browser.close(); pw.stop()
+
+        _sync_msg('DONE: %d PIs | %d features | %d with Chalk data — saved to DB' % (
+            len(_all), _total_feats, _chalk_count))
+        _sync_header.markdown("<div class='cli-header'>>> Sync complete!</div>", unsafe_allow_html=True)
+        ss['logs'] = _sync_lines
+
+    except Exception as e:
+        _sync_msg('ERROR: %s' % str(e)[:200])
+        _sync_header.markdown("<div class='cli-header'>>> Sync FAILED</div>", unsafe_allow_html=True)
+        ss['logs'] = _sync_lines
+        for _obj_name in ('ctx', 'browser', 'pw'):
+            _obj = locals().get(_obj_name)
+            if _obj:
+                try:
+                    if _obj_name == 'pw': _obj.stop()
+                    else: _obj.close()
+                except: pass
             try: pw.stop()
             except: pass
 
