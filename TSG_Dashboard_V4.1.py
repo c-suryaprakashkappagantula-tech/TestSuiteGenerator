@@ -904,6 +904,17 @@ if run_btn:
                 _feat_label = '%d features' % len(_features_to_run) if len(_features_to_run) > 1 else feature_id
                 logger.set('DONE: %s in %dm %ds' % (_feat_label, m, s))
 
+                # Show completion banner in CLI
+                print('', flush=True)
+                print('*' * 50, flush=True)
+                print('***   TEST SUITE PREPARED SUCCESSFULLY   ***', flush=True)
+                print('***   %s | %dm %ds                    ***' % (_feat_label, m, s), flush=True)
+                print('*' * 50, flush=True)
+
+                # Auto-scroll to output/download section
+                import streamlit.components.v1 as components
+                components.html("<script>parent.document.getElementById('output').scrollIntoView({behavior:'smooth'});</script>", height=0)
+
                 # Print pipeline timing
                 print('\n' + '=' * 55, flush=True)
                 print('  PIPELINE TIMING', flush=True)
