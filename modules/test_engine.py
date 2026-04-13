@@ -395,9 +395,11 @@ def _extract_feature_name(summary, feature_id=''):
     'Enable Hotline for a subscriber (Phone/Tablet)' → 'Enable Hotline'
     """
     t = summary.strip()
-    # Strip tags
-    t = re.sub(r'^\[?(?:NENM|NSLNM|NBOP|INTG|MED|NSLQA|QA)(?:\s*,\s*(?:NENM|NSLNM|NBOP|INTG|MED|NSLQA|QA))*\]?\s*:?\s*', '', t, flags=re.IGNORECASE)
+    # Strip tags — handle any combination of uppercase tags in brackets or before colon
+    # Matches: [NSL, NE, INTG]: or NSLNM, NENM, INTG: or [MED, INTG]: etc.
+    t = re.sub(r'^\[?(?:[A-Z]{2,10})(?:\s*,\s*(?:[A-Z]{2,10}))*\]?\s*:?\s*', '', t)
     t = re.sub(r'^New\s+MVNO\s*[-:—]\s*', '', t, flags=re.IGNORECASE)
+    t = re.sub(r'^PI[-\s]?\d+\s*[-:—]\s*', '', t, flags=re.IGNORECASE)  # Strip PI-52 - prefix
     t = re.sub(r'^' + re.escape(feature_id) + r'[\s\-_:]*', '', t, flags=re.IGNORECASE)
     # Strip parenthetical device lists
     t = re.sub(r'\s*\([^)]*(?:Phone|Tablet|Smartwatch|ITMBO|NBOP)[^)]*\)', '', t)
@@ -801,11 +803,10 @@ def _clean_tc_title(raw_title, feature_id):
     t = _re.sub(r'\{[^}]+\}', '', t)
     t = _re.sub(r'\*([^*]+)\*', r'\1', t)
 
-    # Strip [NENM, NSLNM, NBOP, INTG] style tags — single or comma-separated
-    # Match known tag patterns (all-caps 2-6 chars, possibly with brackets)
-    t = _re.sub(r'^\[?(?:NENM|NSLNM|NBOP|INTG|MED|NSLQA|QA)(?:\s*,\s*(?:NENM|NSLNM|NBOP|INTG|MED|NSLQA|QA))*\]?\s*:?\s*', '', t, flags=_re.IGNORECASE)
-    # Also strip leftover partial tags like "iNTG]:" 
-    t = _re.sub(r'^[a-z]?(?:NENM|NSLNM|NBOP|INTG|MED)\]?\s*:?\s*', '', t, flags=_re.IGNORECASE)
+    # Strip [NENM, NSLNM, NBOP, INTG] style tags — any uppercase 2-10 char tags
+    t = _re.sub(r'^\[?(?:[A-Z]{2,10})(?:\s*,\s*(?:[A-Z]{2,10}))*\]?\s*:?\s*', '', t)
+    # Also strip leftover partial tags
+    t = _re.sub(r'^[a-z]?(?:[A-Z]{2,10})\]?\s*:?\s*', '', t)
 
     # Strip "New MVNO -" or "New MVNO:" prefix
     t = _re.sub(r'^New\s+MVNO\s*[-:]\s*', '', t, flags=_re.IGNORECASE)
@@ -822,9 +823,9 @@ def _clean_tc_title(raw_title, feature_id):
     # Strip parenthetical device/channel lists: (Phone/Tablet/Smartwatch), (ITMBO/NBOP), etc.
     t = _re.sub(r'\s*\([^)]*(?:Phone|Tablet|Smartwatch|ITMBO|NBOP|eSIM|pSIM|4G|5G)[^)]*\)', '', t)
 
-    # Second pass: strip tags again
-    t = _re.sub(r'^\[?(?:NENM|NSLNM|NBOP|INTG|MED|NSLQA|QA)(?:\s*,\s*(?:NENM|NSLNM|NBOP|INTG|MED|NSLQA|QA))*\]?\s*:?\s*', '', t, flags=_re.IGNORECASE)
-    t = _re.sub(r'^[a-z]?(?:NENM|NSLNM|NBOP|INTG|MED)\]?\s*:?\s*', '', t, flags=_re.IGNORECASE)
+    # Second pass: strip tags again (in case nested)
+    t = _re.sub(r'^\[?(?:[A-Z]{2,10})(?:\s*,\s*(?:[A-Z]{2,10}))*\]?\s*:?\s*', '', t)
+    t = _re.sub(r'^[a-z]?(?:[A-Z]{2,10})\]?\s*:?\s*', '', t)
     t = _re.sub(r'^New\s+MVNO\s*[-:—]\s*', '', t, flags=_re.IGNORECASE)
     t = t.strip(' -–—:•·[]')
 
@@ -1932,31 +1933,55 @@ def _quality_gate(test_cases, feature_name, feature_id, log=print):
         tc.summary = re.sub(r'(Validate|Verify)\s+(Validate|Verify)\s+', r'\1 ', tc.summary, flags=re.IGNORECASE)
         tc.description = re.sub(r'(To validate|To verify)\s+(that\s+)?(Validate|Verify)\s+', r'\1 that ', tc.description, flags=re.IGNORECASE)
 
-        # ── Check 6: Truncate long summaries — move overflow to description ──
-        _MAX_SUMMARY_LEN = 100
-        _name_part = re.sub(r'^TC\d+[_\s-]+' + re.escape(feature_id) + r'[_\s-]*', '', tc.summary, flags=re.IGNORECASE).strip()
-        if len(_name_part) > _MAX_SUMMARY_LEN:
-            # Find a good break point (at → or , or space)
-            _break = _MAX_SUMMARY_LEN
-            for _sep in [' → ', ', ', ' - ', ' ']:
-                _pos = _name_part.rfind(_sep, 0, _MAX_SUMMARY_LEN)
+        # ── Check 6: Clean summary — strip special chars, move flow details to description ──
+        _prefix_match = re.match(r'^(TC\d+_[\w-]+_)', tc.summary)
+        _prefix = _prefix_match.group(1) if _prefix_match else ''
+        _name_part = tc.summary[len(_prefix):].strip() if _prefix else tc.summary.strip()
+
+        # Split at flow arrows (→) — keep first meaningful part as summary, rest goes to description
+        if '→' in _name_part or '←' in _name_part:
+            _arrow_parts = re.split(r'\s*[→←]\s*', _name_part)
+            # Keep first 2-3 parts that form a complete scenario name
+            _summary_parts = []
+            _desc_parts = []
+            _char_count = 0
+            for _ap in _arrow_parts:
+                _ap = _ap.strip()
+                if not _ap:
+                    continue
+                if _char_count + len(_ap) <= 90 and len(_summary_parts) < 3:
+                    _summary_parts.append(_ap)
+                    _char_count += len(_ap) + 3
+                else:
+                    _desc_parts.append(_ap)
+            _name_part = ' - '.join(_summary_parts)
+            if _desc_parts:
+                _flow_desc = 'Full flow: ' + ' → '.join(_summary_parts + _desc_parts)
+                if _flow_desc not in tc.description:
+                    tc.description = tc.description.rstrip() + '\n' + _flow_desc
+
+        # Strip special characters from summary
+        _name_part = re.sub(r'[→←/&"\'<>|\\]', ' ', _name_part)
+        _name_part = re.sub(r'\s+', ' ', _name_part).strip()
+
+        # Truncate if still too long — find a clean break
+        if len(_name_part) > 100:
+            _break = 100
+            for _sep in [' - ', ', ', ' ']:
+                _pos = _name_part.rfind(_sep, 40, 100)
                 if _pos > 40:
                     _break = _pos
                     break
-            _short = _name_part[:_break].rstrip(' →,-')
-            _overflow = _name_part[_break:].lstrip(' →,-')
-            tc.summary = 'TC%03d_%s_%s' % (int(tc.sno) if tc.sno.isdigit() else 0, feature_id, _short)
+            _overflow = _name_part[_break:].strip(' -,')
+            _name_part = _name_part[:_break].rstrip(' -,')
             if _overflow and _overflow not in tc.description:
                 tc.description = tc.description.rstrip() + '\nAdditional scope: ' + _overflow
 
-        # ── Check 7: Strip special characters from summary ──
-        _sum_clean = re.sub(r'^(TC\d+_[\w-]+_)', '', tc.summary)
-        _prefix_match = re.match(r'^(TC\d+_[\w-]+_)', tc.summary)
-        _prefix = _prefix_match.group(1) if _prefix_match else ''
-        _sum_clean = _sum_clean.replace('→', '-').replace('←', '-')
-        _sum_clean = re.sub(r'[/&"\'<>|\\]', ' ', _sum_clean)
-        _sum_clean = re.sub(r'\s+', ' ', _sum_clean).strip()
-        tc.summary = _prefix + _sum_clean
+        # Ensure summary ends cleanly (not mid-word, add period)
+        if _name_part and _name_part[-1] not in '.!?)':
+            _name_part = _name_part.rstrip('.') + '.'
+
+        tc.summary = _prefix + _name_part
 
         clean_tcs.append(tc)
 

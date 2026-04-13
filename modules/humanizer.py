@@ -333,6 +333,15 @@ def clean_tc_content(test_cases, log=print):
             lines = [l for l in tc.description.split('\n') if l.strip()]
             tc.description = '\n'.join(lines)
 
+        # Fix 6: Strip leaked Jira tags from summary (e.g., "NSL, NE, INTG]: New MVNO -")
+        _sum_no_prefix = re.sub(r'^TC\d+_[\w-]+_', '', tc.summary)
+        if re.match(r'^(?:[A-Z]{2,10})(?:\s*,\s*(?:[A-Z]{2,10}))*\]?\s*:?\s*', _sum_no_prefix):
+            _cleaned = re.sub(r'^(?:[A-Z]{2,10})(?:\s*,\s*(?:[A-Z]{2,10}))*\]?\s*:?\s*', '', _sum_no_prefix)
+            _cleaned = re.sub(r'^New\s+MVNO\s*[-:]\s*', '', _cleaned, flags=re.IGNORECASE).strip(' -:[]')
+            _prefix_m = re.match(r'^(TC\d+_[\w-]+_)', tc.summary)
+            tc.summary = (_prefix_m.group(1) if _prefix_m else '') + _cleaned
+            fixes += 1
+
         # Fix 6: Ensure preconditions are numbered properly
         if tc.preconditions:
             pre_lines = tc.preconditions.split('\n')
