@@ -1122,12 +1122,19 @@ def _build_from_jira_only(jira, feature_name=''):
 
     # ── Mine 4: Channels mentioned ──
     channels = []
-    if 'itmbo' in all_text.lower():
-        channels.append('ITMBO')
-    if 'nbop' in all_text.lower():
-        channels.append('NBOP')
-    if not channels:
-        channels = ['ITMBO', 'NBOP']  # default both
+    # CDR/Mediation features don't flow through ITMBO/NBOP
+    _is_cdr_feature = any(kw in all_text.lower() for kw in ['cdr', 'mediation', 'prr', 'usage record',
+                                                              'ild', 'international roaming', 'country code',
+                                                              'roaming', 'call detail'])
+    if _is_cdr_feature:
+        channels = ['Mediation']
+    else:
+        if 'itmbo' in all_text.lower():
+            channels.append('ITMBO')
+        if 'nbop' in all_text.lower():
+            channels.append('NBOP')
+        if not channels:
+            channels = ['ITMBO', 'NBOP']  # default both
 
     # ── Generate TCs from transaction types (highest priority) ──
     if trans_types:

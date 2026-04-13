@@ -262,11 +262,14 @@ def enrich_scenarios(test_cases, feature_id, feature_context, log=print, feature
             idx += 1; log('[ENRICH]   L6: upstream timeout')
 
         if 'reject' not in existing_text or ('itmbo' not in existing_text and 'mbo' not in existing_text):
-            new_tcs.append(_neg(idx, feature_id,
-                'Negative: Validate %s handles upstream rejection from ITMBO/MBO' % fname,
-                'Upstream rejection during %s handled. Error code forwarded.' % fname,
-                ctx))
-            idx += 1; log('[ENRICH]   L6: upstream rejection')
+            # Skip ITMBO/MBO rejection for CDR/Mediation features — they don't use channels
+            _is_cdr = any(kw in ctx.lower() for kw in ['cdr', 'mediation', 'prr', 'ild', 'roaming', 'country code'])
+            if not _is_cdr:
+                new_tcs.append(_neg(idx, feature_id,
+                    'Negative: Validate %s handles upstream rejection from ITMBO/MBO' % fname,
+                    'Upstream rejection during %s handled. Error code forwarded.' % fname,
+                    ctx))
+                idx += 1; log('[ENRICH]   L6: upstream rejection')
 
     # ── Layer 7: Lifecycle Scenarios (feature-specific) ──
     # From 3941: Cancel Port-Out
