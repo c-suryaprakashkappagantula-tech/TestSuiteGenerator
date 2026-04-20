@@ -13,6 +13,13 @@ from contextlib import redirect_stdout
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+# Auto-clear __pycache__ on startup to ensure fresh module loading
+for _cache_dir in Path(__file__).parent.rglob('__pycache__'):
+    try:
+        shutil.rmtree(_cache_dir)
+    except Exception:
+        pass
+
 import streamlit as st
 from playwright.sync_api import sync_playwright
 
@@ -167,6 +174,11 @@ with left:
                 ss['result_path'] = None
                 ss['exit_report'] = None
                 ss['suite_info'] = None
+                ss['_batch_default'] = []
+                ss['feature_mode'] = 'dropdown'
+                ss['batch_results'] = []
+                ss['cp_path'] = None
+                ss['_reset_toggles'] = True
                 st.rerun()
 
     rc1, rc2 = st.columns([3, 1])
@@ -176,19 +188,44 @@ with left:
         else:
             st.caption('Select a PI iteration above')
     with rc2:
-        refresh_pi_btn = st.button('🔄 Sync All from Chalk', key='refresh_pi', type='secondary', use_container_width=True)
+        refresh_pi_btn = st.button('🔄 Sync from Chalk', key='refresh_pi', type='secondary', use_container_width=True)
         if refresh_pi_btn:
             ss['_sync_confirm'] = True
             st.rerun()
 
-    # Sync confirmation dialog
+    # Chalk Sync confirmation dialog
     if ss.get('_sync_confirm'):
-        st.warning('⚠️ This will re-fetch ALL features from Chalk pages and update the DB. This may take 5-10 minutes depending on the number of PIs and features.')
+        st.markdown("---")
+        st.markdown("#### 🔄 Sync from Chalk")
+
+        _sync_scope = st.radio('Sync Scope:', ['All Iterations', 'Specific Iteration(s)'],
+                                key='sync_scope', horizontal=True)
+
+        if _sync_scope == 'Specific Iteration(s)':
+            _available_pis = [label for label, url in ss.get('pi_list', [])]
+            if _available_pis:
+                _selected_sync_pis = st.multiselect(
+                    'Select PI(s) to sync:', options=_available_pis,
+                    default=[ss['selected_pi']] if ss.get('selected_pi') else [],
+                    key='sync_pi_select')
+                ss['_sync_specific_pis'] = _selected_sync_pis
+            else:
+                st.caption('No PIs cached yet. Use "All Iterations" for first sync.')
+                ss['_sync_specific_pis'] = []
+            _est_time = '%d-%.0f minutes' % (len(ss.get('_sync_specific_pis', [])), len(ss.get('_sync_specific_pis', [])) * 2)
+        else:
+            ss['_sync_specific_pis'] = []
+            _est_time = '5-10 minutes'
+
+        st.warning('⚠️ This will re-fetch features from Chalk and update the DB. Estimated time: %s. '
+                   'New PIs (e.g., PI-56) will be auto-discovered.' % _est_time)
+
         _cf1, _cf2, _cf3 = st.columns([2, 1, 1])
         with _cf2:
             if st.button('Yes, Sync Now', key='sync_yes', type='primary', use_container_width=True):
                 ss['_sync_confirm'] = False
                 ss['_sync_running'] = True
+                ss['_sync_scope'] = _sync_scope
                 st.rerun()
         with _cf3:
             if st.button('Cancel', key='sync_cancel', use_container_width=True):
@@ -197,8 +234,19 @@ with left:
 
     st.markdown("</div>", unsafe_allow_html=True)
 
+    # ── Block UI during sync ──
+    _sync_in_progress = ss.get('_sync_running', False) or ss.get('_sync_confirm', False)
+
     # ── Step 2: Feature ID ──
-    st.markdown("<div class='sec-title'><span class='icon'>&#128269;</span> Step 2: Feature ID</div>", unsafe_allow_html=True)
+    if _sync_in_progress:
+        st.markdown("<div class='sec-title' style='opacity:0.4'><span class='icon'>&#128269;</span> Step 2: Feature ID (blocked during sync)</div>", unsafe_allow_html=True)
+        st.info('⏳ Sync in progress — feature selection blocked until sync completes.')
+        manual_mode = False
+        batch_mode = False
+        feature_id = ''
+        feature_ids = []
+    else:
+        st.markdown("<div class='sec-title'><span class='icon'>&#128269;</span> Step 2: Feature ID</div>", unsafe_allow_html=True)
 
     # Load features: DB first (instant), Chalk scrape as fallback
     if not ss.get('all_pi_features'):
@@ -257,12 +305,21 @@ with left:
             st.caption('No features found for %s on Chalk page.' % ss['selected_pi'])
 
     if not ss.get('_sync_confirm'):
+        # Reset toggles if flagged (from PI change or feature change)
+        _batch_default_val = False
+        _manual_default_val = (ss['feature_mode'] == 'manual')
+        if ss.get('_reset_toggles'):
+            _batch_default_val = False
+            _manual_default_val = False
+            ss['feature_mode'] = 'dropdown'
+            ss['_reset_toggles'] = False
+
         _chk1, _chk2, _chk3 = st.columns([4, 2, 2])
         with _chk2:
-            manual_mode = st.checkbox('Manual', value=(ss['feature_mode'] == 'manual'), key='manual_toggle')
+            manual_mode = st.checkbox('Manual', value=_manual_default_val, key='manual_toggle')
             ss['feature_mode'] = 'manual' if manual_mode else 'dropdown'
         with _chk3:
-            batch_mode = st.checkbox('Batch', value=False, key='batch_toggle')
+            batch_mode = st.checkbox('Batch', value=_batch_default_val, key='batch_toggle')
     else:
         manual_mode = False
         batch_mode = False
@@ -306,6 +363,18 @@ with left:
             options=options, key='feature_dropdown')
         if selected and selected != '-- Select a Feature --':
             feature_id = selected.split(' - ')[0].strip()
+            # Clear previous execution results when selecting a new feature
+            if ss.get('_last_feature') != feature_id:
+                ss['_last_feature'] = feature_id
+                ss['logs'] = []
+                ss['result_path'] = None
+                ss['exit_report'] = None
+                ss['suite_info'] = None
+                ss['cp_path'] = None
+                ss['batch_results'] = []
+                ss['_batch_default'] = []
+                ss['_reset_toggles'] = True
+                st.rerun()
 
     if feature_ids and len(feature_ids) > 1:
         st.caption('Batch mode: %d features selected' % len(feature_ids))
@@ -313,7 +382,10 @@ with left:
         st.caption('%d features available in %s' % (len(ss['pi_features']), ss['selected_pi']))
 
     # ── Step 3: Test Matrix ──
-    st.markdown("<div class='sec-title'><span class='icon'>&#9881;</span> Step 3: Test Matrix & Strategy</div>", unsafe_allow_html=True)
+    if _sync_in_progress:
+        st.markdown("<div class='sec-title' style='opacity:0.4'><span class='icon'>&#9881;</span> Step 3: Test Matrix & Strategy (blocked during sync)</div>", unsafe_allow_html=True)
+    else:
+        st.markdown("<div class='sec-title'><span class='icon'>&#9881;</span> Step 3: Test Matrix & Strategy</div>", unsafe_allow_html=True)
 
     # Suite Strategy — checkboxes (user can select multiple)
     st.markdown("Suite Strategy:")
@@ -723,6 +795,9 @@ if ss.get('_sync_running'):
     ss['result_path'] = None
     ss['exit_report'] = None
 
+    _sync_scope = ss.get('_sync_scope', 'All Iterations')
+    _specific_pis = ss.get('_sync_specific_pis', [])
+
     # Use the CLI terminal for progress
     _sync_header = cli_header
     _sync_log = cli_log
@@ -733,7 +808,7 @@ if ss.get('_sync_running'):
         view = '\n'.join(reversed(_sync_lines[-200:]))
         _sync_log.markdown("<div class='cli-box'><pre>%s</pre></div>" % escape(view), unsafe_allow_html=True)
 
-    _sync_header.markdown("<div class='cli-header'>>> Syncing all features from Chalk...</div>", unsafe_allow_html=True)
+    _sync_header.markdown("<div class='cli-header'>>> Syncing from Chalk (%s)...</div>" % _sync_scope, unsafe_allow_html=True)
 
     try:
         _sync_msg('Launching browser...')
@@ -743,32 +818,54 @@ if ss.get('_sync_running'):
         page = ctx.new_page()
         _sync_msg('Browser launched')
 
-        _sync_msg('Discovering PI pages...')
+        # Always discover PI pages first — this auto-detects new PIs (e.g., PI-56)
+        _sync_msg('Discovering PI pages (auto-detecting new PIs)...')
         pi_links = discover_pi_links(page, log=lambda m: None)
-        ss['pi_list'] = [(p.label, p.url) for p in pi_links]
-        save_pi_pages(ss['pi_list'])
-        _sync_msg('Found %d PIs' % len(ss['pi_list']))
+        _new_pi_list = [(p.label, p.url) for p in pi_links]
 
-        _all = {}
+        # Check for new PIs
+        _old_labels = set(label for label, url in ss.get('pi_list', []))
+        _new_labels = set(label for label, url in _new_pi_list)
+        _added_pis = _new_labels - _old_labels
+        if _added_pis:
+            _sync_msg('NEW PIs detected: %s' % ', '.join(sorted(_added_pis)))
+
+        ss['pi_list'] = _new_pi_list
+        save_pi_pages(ss['pi_list'])
+        _sync_msg('Found %d PIs%s' % (len(ss['pi_list']),
+            ' (NEW: %s)' % ', '.join(sorted(_added_pis)) if _added_pis else ''))
+
+        # Determine which PIs to sync
+        if _sync_scope == 'Specific Iteration(s)' and _specific_pis:
+            _pis_to_sync = [(label, url) for label, url in ss['pi_list'] if label in _specific_pis]
+            _sync_msg('Syncing %d specific PI(s): %s' % (len(_pis_to_sync), ', '.join(_specific_pis)))
+        else:
+            _pis_to_sync = ss['pi_list']
+            _sync_msg('Syncing ALL %d PIs' % len(_pis_to_sync))
+
+        _all = ss.get('all_pi_features', {})  # Preserve existing data for non-synced PIs
         _chalk_count = 0
         _total_feats = 0
-        for _pi_idx, (_pi_label, _pi_url) in enumerate(ss['pi_list'], 1):
-            _sync_msg('[%d/%d] Scanning %s...' % (_pi_idx, len(ss['pi_list']), _pi_label))
+        for _pi_idx, (_pi_label, _pi_url) in enumerate(_pis_to_sync, 1):
+            _sync_msg('[%d/%d] Scanning %s...' % (_pi_idx, len(_pis_to_sync), _pi_label))
             _feats = discover_features_on_pi(page, _pi_url, log=lambda m: None)
             _all[_pi_label] = _feats
             save_features(_pi_label, _feats)
             _total_feats += len(_feats)
-            _sync_msg('[%d/%d] %s: %d features found' % (_pi_idx, len(ss['pi_list']), _pi_label, len(_feats)))
+            _sync_msg('[%d/%d] %s: %d features found' % (_pi_idx, len(_pis_to_sync), _pi_label, len(_feats)))
 
+            _pi_chalk = 0
             for _fi, (_fid, _ftitle) in enumerate(_feats, 1):
                 try:
                     _chalk = fetch_feature_from_pi(page, _pi_url, _fid, log=lambda m: None)
                     if _chalk and _chalk.scenarios:
                         save_chalk(_fid, _pi_label, _chalk)
                         _chalk_count += 1
+                        _pi_chalk += 1
                 except:
                     pass
-            _sync_msg('[%d/%d] %s: Chalk data cached for %d features' % (_pi_idx, len(ss['pi_list']), _pi_label, _chalk_count))
+            _sync_msg('[%d/%d] %s: %d features, %d with Chalk data' % (
+                _pi_idx, len(_pis_to_sync), _pi_label, len(_feats), _pi_chalk))
 
         ss['all_pi_features'] = _all
         if ss['selected_pi'] and ss['selected_pi'] in _all:
@@ -779,8 +876,11 @@ if ss.get('_sync_running'):
             ss['pi_features'] = []
         ctx.close(); browser.close(); pw.stop()
 
-        _sync_msg('DONE: %d PIs | %d features | %d with Chalk data — saved to DB' % (
-            len(_all), _total_feats, _chalk_count))
+        _done_msg = 'DONE: %d PIs synced | %d features | %d with Chalk data' % (
+            len(_pis_to_sync), _total_feats, _chalk_count)
+        if _added_pis:
+            _done_msg += ' | NEW PIs added: %s' % ', '.join(sorted(_added_pis))
+        _sync_msg(_done_msg)
         _sync_header.markdown("<div class='cli-header'>>> Sync complete!</div>", unsafe_allow_html=True)
         ss['logs'] = _sync_lines
 

@@ -304,7 +304,9 @@ def clean_tc_content(test_cases, log=print):
 
     for tc in test_cases:
         # Fix 1: Replace ITMBO/NBOP with Mediation for CDR features
-        if is_cdr:
+        # EXEMPT: UI Mirror TCs are supposed to mention NBOP — don't clean them
+        _is_ui_mirror = 'UI Verify' in (tc.summary or '')
+        if is_cdr and not _is_ui_mirror:
             for field in ['summary', 'description', 'preconditions']:
                 val = getattr(tc, field, '') or ''
                 if 'ITMBO' in val or 'NBOP' in val:
@@ -366,6 +368,27 @@ def clean_tc_content(test_cases, log=print):
                 renumbered.append('%d.\t%s' % (num, line))
                 num += 1
             tc.preconditions = '\n'.join(renumbered)
+
+        # Fix 7: Strip trailing dots/special chars from summary (global fix)
+        tc.summary = tc.summary.rstrip('.;,!?:- ')
+
+        # Fix 8: Normalize non-standard categories
+        _cat_normalize = {
+            'happy path workflow': 'Happy Path',
+            'edge case workflow': 'Edge Case',
+            'negative workflow': 'Negative',
+            'failure workflow': 'Negative',
+            'positive': 'Happy Path',
+            'positive workflow': 'Happy Path',
+            'edge cases': 'Edge Case',
+            'end-to-end': 'E2E',
+            'e2e workflow': 'E2E',
+            'regression workflow': 'Regression',
+            'rollback workflow': 'Rollback',
+        }
+        if tc.category and tc.category.lower() in _cat_normalize:
+            tc.category = _cat_normalize[tc.category.lower()]
+            fixes += 1
 
     if fixes:
         log('[HUMANIZE] Content cleaner: %d fixes applied' % fixes)
@@ -468,6 +491,31 @@ def humanize_suite(test_cases, log=print):
 
     # 6. Reorder by risk
     test_cases = reorder_by_risk(test_cases, log)
+
+    # 7. ABSOLUTE FINAL — strip trailing dots and normalize categories one last time
+    # This catches anything that slipped through all previous passes
+    import re as _re
+    _cat_final = {
+        'happy path workflow': 'Happy Path', 'edge case workflow': 'Edge Case',
+        'negative workflow': 'Negative', 'failure workflow': 'Negative',
+        'positive': 'Happy Path', 'positive workflow': 'Happy Path',
+        'edge cases': 'Edge Case', 'end-to-end': 'E2E',
+        'e2e workflow': 'E2E', 'regression workflow': 'Regression',
+        'rollback workflow': 'Rollback',
+    }
+    _final_fixes = 0
+    for tc in test_cases:
+        if tc.summary and tc.summary[-1] in '.;,!?:':
+            tc.summary = tc.summary.rstrip('.;,!?:- ')
+            _final_fixes += 1
+        if tc.category and tc.category.lower() in _cat_final:
+            tc.category = _cat_final[tc.category.lower()]
+            _final_fixes += 1
+        if not tc.preconditions or len(tc.preconditions.strip()) < 5:
+            tc.preconditions = '1.\tSystem in ready state\n2.\tTest data prepared'
+            _final_fixes += 1
+    if _final_fixes:
+        log('[HUMANIZE] Final sweep: %d fixes (dots/categories/preconditions)' % _final_fixes)
 
     log('[HUMANIZE] Done — %d TCs after humanization' % len(test_cases))
     return test_cases

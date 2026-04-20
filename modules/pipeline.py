@@ -233,6 +233,10 @@ def block_generate_output(suite, feature_id, pi, strategy, jira=None, chalk=None
     from .database import save_test_suite, log_generation_db
     from .transaction_log import log_generation
 
+    # Defensive: ensure groups dict is stable before Excel generation
+    if hasattr(suite, 'groups') and suite.groups:
+        suite.groups = dict(suite.groups)  # snapshot to avoid iteration issues
+
     out_path = generate_excel(suite, log=log)
     total_steps = sum(len(tc.steps) for tc in suite.test_cases)
 

@@ -125,9 +125,20 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print):
     log('[ENGINE] Step 3: Building test cases from Chalk...')
     if chalk and chalk.scenarios:
         for i, sc in enumerate(chalk.scenarios, 1):
-            tc = _chalk_scenario_to_tc(sc, i, jira.key)
+            tc = _chalk_scenario_to_tc(sc, i, jira.key, jira.channel)
             suite.test_cases.append(tc)
         log('[ENGINE]   Built %d TCs from Chalk' % len(suite.test_cases))
+
+        # Fix 4: ALSO mine AC text as supplementary source even when Chalk exists
+        # AC often has business rules (PL/YL/YD/YP, Syniverse actions) that Chalk doesn't cover
+        if jira.acceptance_criteria and len(jira.acceptance_criteria) > 50:
+            log('[ENGINE]   Also mining AC text for supplementary scenarios...')
+            ac_tcs = _build_from_jira_only(jira, feature_short)
+            if ac_tcs:
+                ac_tcs = _deduplicate_tcs(suite.test_cases, ac_tcs, log)
+                if ac_tcs:
+                    suite.test_cases.extend(ac_tcs)
+                    log('[ENGINE]   Added %d supplementary TCs from AC text' % len(ac_tcs))
     else:
         log('[ENGINE]   [WARN] No Chalk scenarios -- building from Jira description')
         suite.test_cases = _build_from_jira_only(jira, feature_short)
@@ -140,114 +151,244 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print):
             log('[ENGINE]   Found %d gap TCs from attachments' % len(gaps))
             suite.test_cases.extend(gaps)
 
+    # Classify feature ONCE — single source of truth for the entire pipeline
+    # Moved BEFORE negative generation so all downstream steps can use it
+    from .tc_templates import classify_feature
+    _fc = classify_feature(
+        feature_name=feature_short,
+        description=jira.description or '',
+        channel=jira.channel or '',
+        jira_summary=jira.summary or '',
+        ac_text=jira.acceptance_criteria or '',
+        scope=chalk.scope if chalk else '')
+    log('[ENGINE]   Feature classification: %s (ui=%s, api=%s, notif=%s)' % (
+        _fc.feature_type, _fc.is_ui, _fc.is_api, _fc.is_notification))
+
+    # ════════════════════════════════════════════════════════════════
+    # Step 4b: INTEGRATION CONTRACT — global knowledge base check
+    # This is the systemic fix: instead of per-feature hardcoding,
+    # we consult a single contract that knows which external systems
+    # each operation touches, and which it explicitly does NOT.
+    # ════════════════════════════════════════════════════════════════
+    log('[ENGINE] Step 4b: Integration Contract analysis...')
+    from .integration_contract import (resolve_operation, resolve_all_operations,
+                                        get_syniverse_assertion, get_must_not_call_systems,
+                                        get_mandatory_negatives, get_verify_steps)
+
+    _contract = resolve_operation(
+        feature_short,
+        description=jira.description or '',
+        ac_text=jira.acceptance_criteria or '',
+        scope=chalk.scope if chalk else '')
+
+    if _contract:
+        log('[ENGINE]   Contract matched: "%s" (category=%s, syniverse=%s)' % (
+            _contract.operation, _contract.category, _contract.syniverse_action))
+
+        # Store contract on suite for downstream use
+        suite._contract = _contract
+
+        # ── Contract-driven "MUST NOT CALL" assertions ──
+        _no_call_systems = get_must_not_call_systems(_contract)
+        _next_contract_idx = len(suite.test_cases) + 1
+        if _no_call_systems:
+            _existing_text = ' '.join(tc.summary.lower() + ' ' + tc.description.lower() +
+                                       ' '.join(s.summary.lower() + ' ' + s.expected.lower() for s in tc.steps)
+                                       for tc in suite.test_cases)
+            for sys_obj in _no_call_systems:
+                _sys_lower = sys_obj.name.lower()
+                # Check if we already have a "NOT called" assertion for this system
+                _has_no_call = ('no %s' % _sys_lower in _existing_text or
+                                '%s is not' % _sys_lower in _existing_text or
+                                '%s not called' % _sys_lower in _existing_text or
+                                'not call %s' % _sys_lower in _existing_text)
+                if not _has_no_call:
+                    _syn_assert = get_syniverse_assertion(_contract)
+                    _reason = _syn_assert.get('condition', '') if _sys_lower == 'syniverse' else ''
+                    # Use CDR-appropriate verification for CDR/mediation features
+                    _verify_method = sys_obj.verify_via
+                    if _contract.category in ('mediation', 'notification'):
+                        _verify_method = 'mediation pipeline logs'
+                    _tc = TestCase(
+                        sno=str(_next_contract_idx),
+                        summary='TC%03d_%s_Verify %s is NOT called during %s' % (
+                            _next_contract_idx, jira.key, sys_obj.name, feature_short),
+                        description='Verify that NO %s outbound call is made during %s. %s' % (
+                            sys_obj.name, feature_short, _reason),
+                        preconditions='1.\tMediation and PRR batch jobs running.\n2.\t%s accessible for verification.' % _verify_method
+                            if _contract.category in ('mediation', 'notification')
+                            else '1.\tPhone line in required state.\n2.\t%s accessible for verification.' % _verify_method,
+                        story_linkage=jira.key, label=jira.key, category='Happy Path',
+                        steps=[
+                            TestStep(1, 'Trigger %s operation with valid parameters' % feature_short,
+                                     'Operation accepted and processed'),
+                            TestStep(2, 'Check %s for %s outbound calls' % (_verify_method, sys_obj.name),
+                                     'NO %s outbound call found — confirmed not triggered' % sys_obj.name),
+                            TestStep(3, 'Verify operation completed successfully without %s' % sys_obj.name,
+                                     'Operation successful. %s not involved as per contract.' % sys_obj.name),
+                        ])
+                    suite.test_cases.append(_tc)
+                    _next_contract_idx += 1
+                    log('[ENGINE]   CONTRACT: Added "MUST NOT CALL %s" assertion' % sys_obj.name)
+
+        # ── Contract-driven mandatory negatives ──
+        _contract_negatives = get_mandatory_negatives(_contract)
+        if _contract_negatives:
+            _existing_summaries = ' '.join(tc.summary.lower() for tc in suite.test_cases)
+            for neg_desc in _contract_negatives:
+                # Extract key phrase for dedup check
+                _neg_key = neg_desc.lower().split('—')[0].strip() if '—' in neg_desc else neg_desc.lower()[:30]
+                _neg_words = [w for w in _neg_key.split() if len(w) > 3]
+                _already_covered = all(w in _existing_summaries for w in _neg_words) if _neg_words else False
+                if not _already_covered:
+                    _tc = TestCase(
+                        sno=str(_next_contract_idx),
+                        summary='TC%03d_%s_Negative: %s' % (_next_contract_idx, jira.key, neg_desc[:80]),
+                        description='Contract-mandated negative: %s' % neg_desc,
+                        preconditions='1.\tPrepare test data for negative scenario.',
+                        story_linkage=jira.key, label=jira.key, category='Negative',
+                        steps=[
+                            TestStep(1, 'Prepare invalid/error condition: %s' % neg_desc[:60],
+                                     'Error condition prepared'),
+                            TestStep(2, 'Trigger %s operation' % feature_short,
+                                     'System rejects or handles gracefully'),
+                            TestStep(3, 'Verify no data corruption and appropriate error response',
+                                     'System state unchanged. Error logged.'),
+                        ])
+                    suite.test_cases.append(_tc)
+                    _next_contract_idx += 1
+                    log('[ENGINE]   CONTRACT: Added mandatory negative: %s' % neg_desc[:50])
+
+        # ── Contract-driven verification points ──
+        _verify_points = get_verify_steps(_contract)
+        if _verify_points:
+            _existing_text_lower = ' '.join(tc.summary.lower() + ' ' +
+                                             ' '.join(s.summary.lower() + ' ' + s.expected.lower() for s in tc.steps)
+                                             for tc in suite.test_cases)
+            _missing_verifications = []
+            for vp in _verify_points:
+                _vp_words = [w.lower() for w in vp.split() if len(w) > 4]
+                _covered = sum(1 for w in _vp_words if w in _existing_text_lower)
+                if _covered < len(_vp_words) * 0.4:
+                    _missing_verifications.append(vp)
+            if _missing_verifications:
+                log('[ENGINE]   CONTRACT: %d/%d verification points missing — will be added by analyst' % (
+                    len(_missing_verifications), len(_verify_points)))
+                # Store for analyst to pick up
+                suite._missing_verifications = _missing_verifications
+    else:
+        log('[ENGINE]   No contract match — using default pipeline')
+        suite._contract = None
+
     if options.get('include_negative', True):
-        log('[ENGINE] Step 5: Generating negative scenarios...')
-        neg = _generate_negative_scenarios(suite, jira.key, log)
-        suite.test_cases.extend(neg)
-        log('[ENGINE]   Added %d negative TCs' % len(neg))
+        # Skip generic API negatives for notification/CDR features — they get CDR-specific negatives from analyst
+        if _fc.is_notification:
+            log('[ENGINE] Step 5: Skipping generic negatives for notification/CDR feature')
+        else:
+            log('[ENGINE] Step 5: Generating negative scenarios...')
+            neg = _generate_negative_scenarios(suite, jira.key, log)
+            suite.test_cases.extend(neg)
+            log('[ENGINE]   Added %d negative TCs' % len(neg))
 
     log('[ENGINE] Step 6: Preparing for expansion...')
+    log('[ENGINE]   Feature classification: %s (is_ui=%s)' % (_fc.feature_type, _fc.is_ui))
 
     # Step 5a: Test Analyst Reasoning — think like a QA engineer
     log('[ENGINE] Step 5a: Test Analyst reasoning...')
     from .test_analyst import analyze_and_suggest
+    from .tc_templates import build_description, build_precondition, build_steps
     analyst_suggestions = analyze_and_suggest(
         feature_name=feature_short, feature_id=jira.key,
         scope=chalk.scope if chalk else '', description=jira.description or '',
         existing_scenarios=[tc.summary.lower() for tc in suite.test_cases],
-        log=log)
+        log=log, ac_text=jira.acceptance_criteria or '',
+        channel=jira.channel or '', jira_summary=jira.summary or '')
+
     if analyst_suggestions:
         _next_idx = len(suite.test_cases) + 1
-        for sg in analyst_suggestions[:8]:  # cap at 8 analyst TCs
-            # Build steps based on category — a real QA writes different steps for different types
+        _analyst_cap = 15 if _fc.is_ui else 8
+        for sg in analyst_suggestions[:_analyst_cap]:
             _cat = sg['category']
-            _title_low = sg['title'].lower()
-            if _cat == 'Negative':
-                _steps = [
-                    TestStep(1, 'Prepare the error/negative condition as per scenario', 'Error condition ready'),
-                    TestStep(2, sg['title'][:120], 'System handles the condition as expected'),
-                    TestStep(3, 'Verify appropriate error code and message returned', 'Clear error response received'),
-                    TestStep(4, 'Verify no data corruption — DB state unchanged', 'System state clean after rejection'),
-                ]
-            elif 'century' in _title_low or 'mig table' in _title_low or 'genesis' in _title_low or 'transaction history' in _title_low:
-                _steps = [
-                    TestStep(1, 'Complete the primary %s operation successfully' % feature_short, 'Operation completed with SUCC00'),
-                    TestStep(2, sg['title'][:120], 'Verification target accessible'),
-                    TestStep(3, 'Verify all fields match expected post-operation state', 'All data correct and consistent'),
-                    TestStep(4, 'Verify no stale, duplicate, or orphaned records', 'Data integrity confirmed'),
-                ]
-            elif 'regression' in _title_low:
-                _steps = [
-                    TestStep(1, 'Complete %s operation successfully' % feature_short, 'Operation completed'),
-                    TestStep(2, 'Run Line Inquiry for the same MDN', 'Line Inquiry returns correct data'),
-                    TestStep(3, 'Run Service Grouping for the same MDN', 'Service Grouping returns correct data'),
-                    TestStep(4, 'Verify Transaction History is intact', 'No regression detected'),
-                ]
-            elif _cat == 'Edge Case':
-                _steps = [
-                    TestStep(1, 'Set up the edge case condition as per scenario', 'Edge case condition prepared'),
-                    TestStep(2, sg['title'][:120], 'System handles edge case correctly'),
-                    TestStep(3, 'Verify no unexpected side effects or data corruption', 'System state consistent'),
-                    TestStep(4, 'Verify Century Report and Transaction History', 'Audit trail complete'),
-                ]
-            else:
-                _steps = [
-                    TestStep(1, 'Set up preconditions for %s' % feature_short, 'Preconditions met'),
-                    TestStep(2, sg['title'][:120], '%s completes as expected' % feature_short),
-                    TestStep(3, 'Verify NSL response and all downstream systems', 'All systems consistent'),
-                    TestStep(4, 'Verify Century Report and Transaction History', 'Audit trail complete'),
-                ]
+            _title = sg['title']
+
+            # Build everything from templates — no cross-contamination
+            _desc = sg.get('description', build_description(_fc, feature_short, _title, _cat))
+            _precon = sg.get('precondition', '')
+            if not _precon:
+                _precon = build_precondition(_fc, feature_short, _cat, _title)
+            elif not _precon.startswith('1.'):
+                _precon = '1.\t%s' % _precon
+            _step_tuples = build_steps(_fc, feature_short, _title, _cat)
+            _steps = [TestStep(i+1, s, e) for i, (s, e) in enumerate(_step_tuples)]
 
             tc = TestCase(
                 sno=str(_next_idx),
                 summary='TC%03d_%s_%s' % (_next_idx, jira.key, sg['title'][:90]),
-                description='%s\nReasoning: %s' % (sg['description'], sg.get('reasoning', '')),
-                preconditions='1.\tActive TMO subscriber line\n2.\tSystem in ready state',
+                description=_desc,
+                preconditions=_precon,
                 story_linkage=jira.key, label=jira.key, category=sg['category'],
                 steps=_steps)
             suite.test_cases.append(tc)
             _next_idx += 1
-        log('[ENGINE]   Added %d analyst-derived TCs' % len(analyst_suggestions[:8]))
+        log('[ENGINE]   Added %d analyst-derived TCs' % len(analyst_suggestions[:_analyst_cap]))
 
     # Step 5c: Mine Jira comments for additional scenarios
-    log('[ENGINE] Step 5c: Mining Jira comments and subtasks...')
-    comment_tcs = _mine_jira_comments(jira, suite, log)
-    if comment_tcs:
-        comment_tcs = _deduplicate_tcs(suite.test_cases, comment_tcs, log)
-        suite.test_cases.extend(comment_tcs)
-
-    # Step 5d: Mine Jira subtasks for testable items
-    log('[ENGINE] Step 5d: Mining Jira subtasks (%d subtasks found)...' % len(jira.subtasks))
-    for st in jira.subtasks:
-        log('[ENGINE]   Subtask: %s | %s | desc=%d chars' % (
-            st.get('key', '?'), st.get('summary', '?')[:50], len(st.get('description', ''))))
-    subtask_tcs = _mine_jira_subtasks(jira, suite, log)
-    if subtask_tcs:
-        subtask_tcs = _deduplicate_tcs(suite.test_cases, subtask_tcs, log)
-        suite.test_cases.extend(subtask_tcs)
-        log('[ENGINE]   Added %d subtask-derived TCs' % len(subtask_tcs))
+    # SKIP only for PURE UI features — hybrid features need subtask/comment mining
+    if _fc.feature_type == 'ui_portal':
+        log('[ENGINE] Step 5c: Skipping comment/subtask mining for pure UI feature')
     else:
-        log('[ENGINE]   No new TCs from subtasks')
+        log('[ENGINE] Step 5c: Mining Jira comments and subtasks...')
+        comment_tcs = _mine_jira_comments(jira, suite, log)
+        if comment_tcs:
+            comment_tcs = _deduplicate_tcs(suite.test_cases, comment_tcs, log)
+            suite.test_cases.extend(comment_tcs)
+
+        # Step 5d: Mine Jira subtasks for testable items
+        log('[ENGINE] Step 5d: Mining Jira subtasks (%d subtasks found)...' % len(jira.subtasks))
+        for st in jira.subtasks:
+            log('[ENGINE]   Subtask: %s | %s | desc=%d chars' % (
+                st.get('key', '?'), st.get('summary', '?')[:50], len(st.get('description', ''))))
+        subtask_tcs = _mine_jira_subtasks(jira, suite, log)
+        if subtask_tcs:
+            # Split table-derived TCs (bypass dedup) from text-derived (dedup normally)
+            table_tcs = [tc for tc in subtask_tcs if hasattr(tc, '_from_table') and tc._from_table]
+            text_tcs = [tc for tc in subtask_tcs if tc not in table_tcs]
+            text_tcs = _deduplicate_tcs(suite.test_cases, text_tcs, log)
+            suite.test_cases.extend(table_tcs)
+            suite.test_cases.extend(text_tcs)
+            log('[ENGINE]   Added %d subtask TCs (%d table, %d text)' % (
+                len(table_tcs) + len(text_tcs), len(table_tcs), len(text_tcs)))
+        else:
+            log('[ENGINE]   No new TCs from subtasks')
 
     # Step 5b: Scenario Enrichment (universal gap filler)
-    log('[ENGINE] Step 5b: Scenario enrichment...')
-    # Build rich context: feature title + TC summaries + Chalk scope + Jira description
-    _enrich_ctx = _scenario_context_from_suite(suite)
-    if chalk and chalk.scope:
-        _enrich_ctx += ' ' + chalk.scope
-    if jira.description:
-        _enrich_ctx += ' ' + jira.description[:500]
-    enriched = enrich_scenarios(suite.test_cases, jira.key, _enrich_ctx, log, feature_name=feature_short)
-    if enriched:
-        # Split mandatory negatives (bypass dedup) from optional (dedup normally)
-        mandatory = [tc for tc in enriched if hasattr(tc, '_mandatory') and tc._mandatory]
-        optional = [tc for tc in enriched if tc not in mandatory]
-        # Dedup only optional TCs
-        optional = _deduplicate_tcs(suite.test_cases, optional, log)
-        suite.test_cases.extend(mandatory)
-        suite.test_cases.extend(optional)
-        if mandatory:
-            log('[ENGINE]   Added %d mandatory + %d optional enrichment TCs' % (len(mandatory), len(optional)))
+    # SKIP for pure UI features — KB scenarios from analyst are sufficient
+    # For notification features: skip GENERIC enrichment but ALLOW contract-driven enrichment
+    _skip_enrichment = _fc.feature_type == 'ui_portal'
+    # Notification features with an integration contract should still get enriched
+    if _fc.feature_type == 'notification' and not getattr(suite, '_contract', None):
+        _skip_enrichment = True
+    if _skip_enrichment:
+        log('[ENGINE] Step 5b: Skipping enrichment for %s feature' % _fc.feature_type)
+    else:
+        log('[ENGINE] Step 5b: Scenario enrichment...')
+        # Build rich context: feature title + TC summaries + Chalk scope + Jira description
+        _enrich_ctx = _scenario_context_from_suite(suite)
+        if chalk and chalk.scope:
+            _enrich_ctx += ' ' + chalk.scope
+        if jira.description:
+            _enrich_ctx += ' ' + jira.description[:500]
+        enriched = enrich_scenarios(suite.test_cases, jira.key, _enrich_ctx, log, feature_name=feature_short)
+        if enriched:
+            # Split mandatory negatives (bypass dedup) from optional (dedup normally)
+            mandatory = [tc for tc in enriched if hasattr(tc, '_mandatory') and tc._mandatory]
+            optional = [tc for tc in enriched if tc not in mandatory]
+            # Dedup only optional TCs
+            optional = _deduplicate_tcs(suite.test_cases, optional, log)
+            suite.test_cases.extend(mandatory)
+            suite.test_cases.extend(optional)
+            if mandatory:
+                log('[ENGINE]   Added %d mandatory + %d optional enrichment TCs' % (len(mandatory), len(optional)))
 
     # Step 6b: Apply custom instruction extras
     if adjustments:
@@ -354,6 +495,19 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print):
     # Step 8b: Enrich preconditions with test data suggestions
     log('[ENGINE] Step 8b: Adding test data suggestions...')
     _enrich_test_data_hints(suite.test_cases, log)
+
+    # Step 8b2: UI VERIFICATION MIRROR — add NBOP verification TCs for API operations
+    # This is ADDITIVE — never modifies existing TCs, only appends new ones
+    # Only runs for features that have API TCs with matching NBOP menu paths
+    if not _fc.is_notification or getattr(suite, '_contract', None):
+        log('[ENGINE] Step 8b2: UI Verification Mirror...')
+        from .ui_mirror import generate_ui_mirror_tcs
+        ui_tcs = generate_ui_mirror_tcs(suite.test_cases, jira.key, feature_short, log)
+        if ui_tcs:
+            suite.test_cases.extend(ui_tcs)
+            log('[ENGINE]   Added %d UI verification mirror TCs' % len(ui_tcs))
+    else:
+        log('[ENGINE] Step 8b2: Skipping UI mirror for pure notification/CDR feature')
 
     # Step 8c: QUALITY GATE — every TC must pass through this
     log('[ENGINE] Step 8c: Quality gate — validating all TC names and descriptions...')
@@ -541,8 +695,77 @@ def _build_feature_desc(jira, chalk):
 # CHALK SCENARIO -> TEST CASE (the key enrichment logic)
 # ================================================================
 
-def _chalk_scenario_to_tc(sc, idx, feature_id):
+def _clean_ui_text(text):
+    """Strip API/backend language from text for UI features.
+    Preserves the test intent while removing technical API references."""
+    import re as _re
+    if not text:
+        return text
+    # Replace API-specific phrases with UI equivalents
+    replacements = [
+        # API endpoint / response patterns
+        (r'\bAPI\s+endpoint\s+accessible\s+and\s+authenticated\b', 'NBOP portal accessible and user logged in'),
+        (r'\bAPI\s+endpoint\s+accessible\b', 'NBOP portal accessible'),
+        (r'\bAPI\s+endpoint\b', 'NBOP screen'),
+        (r'\bAPI\s+returns?\b', 'NBOP displays'),
+        (r'\bAPI\s+rejects?\b', 'NBOP shows error for'),
+        (r'\bAPI\s+response\s+payload\b', 'displayed data'),
+        (r'\bAPI\s+response\b', 'displayed result'),
+        (r'\bAPI\s+request\b', 'request'),
+        (r'\bAPI\s+payload\b', 'displayed data'),
+        (r'\bAPI\s+logs\b', 'system logs'),
+        (r'\bAPI\s+call\b', 'operation'),
+        (r'\bvia\s+API\b', 'via NBOP'),
+        (r'\bHTTP\s+\d{3}\b', 'success/error response'),
+        (r'\bHTTP\s+response\b', 'response'),
+        # NSL patterns
+        (r'\bNSL\s+accepts?\b', 'system processes'),
+        (r'\bNSL\s+sends?\s+request\s+to\s+TMO\b', 'system processes the request'),
+        (r'\bNSL\s+sends?\b', 'system sends'),
+        (r'\bNSL\s+rejects?\b', 'system rejects'),
+        (r'\bNSL\s+processes?\b', 'system processes'),
+        (r'\bNSL\s+response\b', 'system response'),
+        (r'\bNSL\s+DB\s+state\b', 'subscriber data state'),
+        (r'\bNSL\s+DB\b', 'subscriber data'),
+        (r'\bNSL\s+API\b', 'system'),
+        (r'\bNSL\b', 'system'),
+        # Backend systems
+        (r'\bAPOLLO[_-]?NE\b', 'TMO network'),
+        (r'\bSUCC00\b', 'success'),
+        (r'\bCentury\s+Report\b', 'transaction records'),
+        # "This API is used to" pattern
+        (r'\bThis\s+API\s+is\s+used\s+to\b', 'Validate'),
+        (r'\bHit\s+API\b', 'Perform operation'),
+        (r'\bTrigger\s+(?:the\s+)?API\b', 'Perform the operation'),
+        # Request/response patterns
+        (r'\brequest\s+body\b', 'input data'),
+        (r'\bupstream\s+timeout\b', 'system timeout'),
+        (r'\bmid-operation\s+failure\b', 'operation failure'),
+        (r'\brollback\b', 'undo/revert'),
+        (r'\bcurl\b', 'request'),
+        # Precondition cleanup
+        (r'API\s+endpoint\s+accessible\s+and\s+authenticated', 'NBOP portal accessible and user logged in'),
+        (r'Expired\s+or\s+invalid\s+OAuth\s+token', 'Invalid session or credentials'),
+    ]
+    result = text
+    for pattern, replacement in replacements:
+        result = _re.sub(pattern, replacement, result, flags=_re.IGNORECASE)
+    return result
+
+
+def _chalk_scenario_to_tc(sc, idx, feature_id, channel=''):
     """Convert a Chalk scenario into a rich, checkpoint-quality TestCase."""
+    # Pure UI: channel=NBOP with no API tags in the feature title
+    # Hybrid features (NBOP + NSLNM/NENM) should NOT be cleaned
+    _is_pure_ui = (channel or '').strip().upper() == 'NBOP'
+    # Check if feature_id's Jira summary has API tags — if so, it's hybrid, don't clean
+    _is_ui = _is_pure_ui  # Will be overridden below if hybrid detected
+    # Detect business-specific terms in Chalk — hybrid features have these
+    _has_business_terms = any(kw in (sc.title + ' ' + (sc.validation or '')).lower()
+                              for kw in ['err', 'syniverse', 'itmbo', 'emm', 'transaction type',
+                                         'callback', 'notification', 'kafka', 'mbo',
+                                         'pl ', 'yl ', 'yd ', 'ym ', 'yp ',
+                                         'nslnm', 'nenm', 'apollo'])
 
     # Description: build a proper test description
     clean_title = _clean_tc_title(sc.title, feature_id)
@@ -574,12 +797,15 @@ def _chalk_scenario_to_tc(sc, idx, feature_id):
     if _clean_validation and _clean_validation != sc.title and len(_clean_validation) > 20:
         description = 'To validate that %s.\nExpected Result: %s' % (desc_title, _clean_validation[:200])
     else:
-        # Build a meaningful description based on the scenario context
+        # Use channel to determine description style
+        _is_ui_channel = (channel or '').strip().upper() == 'NBOP'
         ctx = _scenario_context(sc)
-        if ctx != 'specified':
-            description = 'To validate that %s for %s scenario. Verify API response, downstream system updates, and audit trail.' % (desc_title, ctx)
+        if _is_ui_channel or ctx == 'UI':
+            description = 'Validate %s through NBOP portal.' % desc_title
+        elif ctx != 'specified':
+            description = 'This API is used to %s for %s scenario.' % (desc_title, ctx)
         else:
-            description = 'To validate that %s. Verify operation completes, all systems updated, and transaction logged.' % desc_title
+            description = 'Validate %s completes successfully.' % desc_title
 
     # Preconditions: numbered list
     pre_lines = []
@@ -590,7 +816,10 @@ def _chalk_scenario_to_tc(sc, idx, feature_id):
             pre_lines.append('%d.\t%s' % (i, p))
     has_cdr = bool(sc.cdr_input) or 'cdr' in sc.title.lower() or 'prr' in (sc.validation or '').lower()
     has_api = 'api' in (sc.title + ' ' + (sc.validation or '')).lower()
-    has_ui = any(kw in (sc.title + ' ' + (sc.validation or '')).lower() for kw in ['menu', 'display', 'ui', 'nbop', 'portal'])
+    has_ui = _is_ui or any(kw in (sc.title + ' ' + (sc.validation or '')).lower() for kw in ['menu', 'display', 'ui', 'nbop', 'portal'])
+    # Pure UI channel overrides API detection — but NOT for hybrid features with business terms
+    if _is_ui and not _has_business_terms:
+        has_api = False
     if has_cdr:
         existing = '\n'.join(pre_lines).lower()
         if 'mediation' not in existing:
@@ -610,8 +839,8 @@ def _chalk_scenario_to_tc(sc, idx, feature_id):
     steps = []
     step_num = 1
 
-    # Step 1: Activate
-    if 'active' in (sc.prereq or '').lower() or 'activate' in (sc.prereq or '').lower():
+    # Step 1: Activate — but NOT for UI features (they navigate via portal, not API)
+    if not has_ui and ('active' in (sc.prereq or '').lower() or 'activate' in (sc.prereq or '').lower()):
         steps.append(TestStep(step_num, 'Activate subscriber line in TMO',
                               'Subscriber line should be active in TMO'))
         step_num += 1
@@ -677,12 +906,50 @@ def _chalk_scenario_to_tc(sc, idx, feature_id):
     if not steps:
         # Use domain-specific step templates
         context = _scenario_context(sc)
-        chain = get_step_chain(sc.title, sc.validation, context)
+        # Enrich context with feature-level keywords for better routing
+        # This ensures sync subscriber scenarios get sync steps, not notification steps
+        _feature_ctx = (feature_id + ' ' + channel + ' ' + context).lower()
+        # Determine feature type for step routing
+        _ft = ''
+        if _has_business_terms and any(kw in (sc.title + ' ' + (sc.validation or '')).lower()
+                                        for kw in ['cdr', 'prr', 'mediation', 'ild', 'roaming',
+                                                    'country code', 'usage']):
+            _ft = 'notification'
+        chain = get_step_chain(sc.title, sc.validation, _feature_ctx, feature_type=_ft)
         for i, (step_sum, step_exp) in enumerate(chain, 1):
             steps.append(TestStep(i, step_sum, step_exp))
 
     # Clean the title for TC summary — must be short and crisp
     clean_title = _clean_tc_title(sc.title, feature_id)
+
+    # For PURE UI features, clean API language from all text fields
+    # But NOT for hybrid features — their Chalk contains real business logic
+    if _is_ui and not _has_business_terms:
+        clean_title = _clean_ui_text(clean_title)
+        description = _clean_ui_text(description)
+        preconditions = _clean_ui_text(preconditions)
+        for i, step in enumerate(steps):
+            steps[i] = TestStep(step.step_num,
+                                _clean_ui_text(step.summary),
+                                _clean_ui_text(step.expected))
+
+    # ── Global Kafka/BI EVENT_MESSAGES verification ──
+    # If Chalk scenario mentions kafka/networkProvider/BI event,
+    # append an EVENT_MESSAGES verification step as the LAST step.
+    # This is a side-effect check, not a separate TC.
+    _all_sc_text = (sc.title + ' ' + (sc.validation or '') + ' ' + ' '.join(sc.steps)).lower()
+    _has_kafka_ref = any(kw in _all_sc_text for kw in ['kafka', 'networkprovider', 'network provider',
+                                                         'bi event', 'event_messages', 'tmo indicator'])
+    if _has_kafka_ref and not _is_ui:
+        # Check if we already have an EVENT_MESSAGES step
+        _existing_steps_text = ' '.join(s.summary.lower() for s in steps)
+        if 'event_messages' not in _existing_steps_text and 'event message' not in _existing_steps_text:
+            _kafka_step_num = len(steps) + 1
+            steps.append(TestStep(_kafka_step_num,
+                'Verify Century Report → EVENT_MESSAGES table: filter by ROOT_TRANSACTION_ID, '
+                'validate EVENT_STATUS=Success and REQUEST_MSG contains networkProvider=TMO',
+                'EVENT_MESSAGES entry found with correct EVENT_TYPE, EVENT_STATUS=Success, '
+                'and REQUEST_MSG JSON includes "networkProvider":"TMO" for TMO transactions'))
 
     return TestCase(
         sno=str(idx),
@@ -767,6 +1034,14 @@ def _step_expected_result(step_text, sc):
     if 'database' in s or 'table' in s or 'insert' in s: return 'Database record created/updated correctly'
     # Upstream systems
     if 'mbo' in s: return 'MBO system updated with correct data'
+    if 'syniverse' in s and ('not' in s or 'no ' in s):
+        return 'Verified: NO Syniverse outbound call triggered. Operation is internal only.'
+    if 'syniverse' in s and 'createsubscriber' in s:
+        return 'Syniverse CreateSubscriber executed with correct IMSI, MDN, and wholesale plan'
+    if 'syniverse' in s and 'removesubscriber' in s:
+        return 'Syniverse RemoveSubscriber executed — subscriber removed from Syniverse'
+    if 'syniverse' in s and 'swapimsi' in s:
+        return 'Syniverse SwapIMSI executed with new IMSI. Wholesale plan unchanged'
     if 'syniverse' in s: return 'Syniverse configuration updated correctly'
     if 'connection manager' in s: return 'Connection Manager notified successfully'
     # Rollback/Error
@@ -802,6 +1077,12 @@ def _clean_tc_title(raw_title, feature_id):
     # Strip Jira/Chalk markup
     t = _re.sub(r'\{[^}]+\}', '', t)
     t = _re.sub(r'\*([^*]+)\*', r'\1', t)
+    # Strip URLs
+    t = _re.sub(r'https?://\S+', '', t)
+    # Strip Jira ticket references in brackets [MWTGPROV-1234|...]
+    t = _re.sub(r'\[[^\]]*\|[^\]]*\]', '', t)
+    # Strip semicolons
+    t = t.replace(';', '')
 
     # Strip [NENM, NSLNM, NBOP, INTG] style tags — any uppercase 2-10 char tags
     t = _re.sub(r'^\[?(?:[A-Z]{2,10})(?:\s*,\s*(?:[A-Z]{2,10}))*\]?\s*:?\s*', '', t)
@@ -829,13 +1110,13 @@ def _clean_tc_title(raw_title, feature_id):
     t = _re.sub(r'^New\s+MVNO\s*[-:—]\s*', '', t, flags=_re.IGNORECASE)
     t = t.strip(' -–—:•·[]')
 
-    # If too long (>130 chars), extract first sentence or truncate cleanly
-    if len(t) > 130:
+    # If too long (>250 chars), extract first sentence or truncate cleanly
+    if len(t) > 250:
         sentences = _re.split(r'[.!]\s+', t)
-        if sentences and len(sentences[0]) <= 130:
+        if sentences and len(sentences[0]) <= 250:
             t = sentences[0]
         else:
-            t = t[:127].rsplit(' ', 1)[0]
+            t = t[:247].rsplit(' ', 1)[0]
 
     # Prefix with "Validate" if it doesn't start with an action verb
     t_low = t.lower()
@@ -848,9 +1129,8 @@ def _clean_tc_title(raw_title, feature_id):
     if not any(t_low.startswith(v) for v in ACTION_STARTS) and len(t) > 10:
         t = 'Validate ' + t
 
-    # Add trailing period
-    if t and t[-1] not in '.!?)':
-        t = t + '.'
+    # Strip trailing special characters — no periods, semicolons, etc.
+    t = t.rstrip('.;,!?:- ')
 
     return t
 
@@ -960,7 +1240,7 @@ def _mine_jira_comments(jira, suite, log=print):
 
 def _mine_jira_subtasks(jira, suite, log=print):
     """Mine Jira subtasks for testable scenarios.
-    Deep-analyzes subtask descriptions to generate specific, meaningful TCs."""
+    V2: Also parses HTML tables from subtask descriptions."""
     if not jira.subtasks:
         return []
 
@@ -980,62 +1260,124 @@ def _mine_jira_subtasks(jira, suite, log=print):
         if not summary or len(summary) < 10:
             continue
 
-        # Parse description for testable statements
         testable_items = []
-
-        # Source 1: Subtask summary itself
         testable_items.append(summary)
 
-        # Source 2: Description lines with testable keywords
         if description:
             desc_clean = re.sub(r'\{[^}]+\}', '', description)
+
+            # Fix 5: Parse Jira wiki tables — ||header|| for headers, |val| for data rows
+            # Each line is a separate row
+            table_headers = None
+            table_items = []  # Separate list — these bypass dedup
             for line in desc_clean.split('\n'):
-                line = line.strip(' *-#•')
+                line = line.strip()
+                # Header row: ||col1||col2||col3||
+                if line.startswith('||') and line.endswith('||'):
+                    table_headers = [h.strip() for h in line.strip('|').split('||') if h.strip()]
+                    continue
+                # Data row: |val1|val2|val3|
+                if table_headers and line.startswith('|') and not line.startswith('||'):
+                    cells = [c.strip() for c in line.strip('|').split('|') if c.strip()]
+                    if len(cells) >= len(table_headers):
+                        pairs = ['%s=%s' % (table_headers[i], cells[i]) for i in range(len(table_headers))]
+                        item = 'Verify %s when %s' % (feature_short, ', '.join(pairs))
+                        table_items.append(item)
+
+            # Add table-derived TCs directly (bypass dedup — they're test matrix data)
+            for item in table_items:
+                clean = _clean_tc_title(item, jira.key)
+                if len(clean) < 10:
+                    continue
+                tc = TestCase(
+                    sno=str(next_idx),
+                    summary='TC%03d_%s_%s' % (next_idx, jira.key, clean),
+                    description='To validate %s. Source: subtask %s table.' % (clean.rstrip('.'), key),
+                    preconditions='1.\tRefer to subtask %s for details\n2.\tActive TMO subscriber line' % key,
+                    story_linkage=jira.key, label=jira.key, category='Happy Path',
+                    steps=[
+                        TestStep(1, 'Set up preconditions per %s' % key, 'Preconditions met'),
+                        TestStep(2, 'Execute: %s' % clean[:120], '%s completes' % feature_short),
+                        TestStep(3, 'Verify outcome matches expected per table' , 'Expected behavior confirmed'),
+                    ])
+                tc._from_table = True  # Tag for dedup bypass
+                new_tcs.append(tc)
+                next_idx += 1
+                log('[ENGINE]   Table TC from %s: %s' % (key, clean[:60]))
+
+            # Also extract text lines with testable keywords
+            for line in desc_clean.split('\n'):
+                line = line.strip(' *-#•|')
                 if not line or len(line) < 15:
                     continue
                 line_low = line.lower()
                 if any(kw in line_low for kw in ['shall ', 'must ', 'should ', 'verify ', 'validate ',
                                                    'ensure ', 'send ', 'update ', 'trigger ',
                                                    'instead of', 'new mdn', 'async', 'callback',
-                                                   'rollback', 'retry', 'regression']):
+                                                   'rollback', 'retry', 'regression',
+                                                   'use ', 'successful ', 'for yl ', 'for yd ',
+                                                   'for yp ', 'for ym ', 'for pl ',
+                                                   'syniverse', 'itmbo', 'emm']):
                     testable_items.append(line)
 
-        # Source 3: AC from subtask
         if ac:
             for line in ac.split('\n'):
                 line = line.strip(' *-#')
                 if line and len(line) > 15:
                     testable_items.append(line)
 
-        # Deduplicate and filter
+        # Mine subtask comments for testable items
+        st_comments = st.get('comments', [])
+        if st_comments:
+            log('[ENGINE]   Subtask %s has %d comments — mining...' % (key, len(st_comments)))
+            for cmt in st_comments:
+                body = cmt.get('body', '') if isinstance(cmt, dict) else str(cmt)
+                if not body or len(body) < 20:
+                    continue
+                for line in body.split('\n'):
+                    line = line.strip(' *-#•|')
+                    if not line or len(line) < 15:
+                        continue
+                    line_low = line.lower()
+                    if any(kw in line_low for kw in ['shall ', 'must ', 'should ', 'verify ',
+                                                       'validate ', 'ensure ', 'test ', 'bug ',
+                                                       'defect ', 'fix ', 'regression ',
+                                                       'found that', 'issue:', 'note:']):
+                        testable_items.append(line)
+
+        # Log subtask attachments (for awareness — actual download is separate)
+        st_attachments = st.get('attachments', [])
+        if st_attachments:
+            log('[ENGINE]   Subtask %s has %d attachments: %s' % (
+                key, len(st_attachments),
+                ', '.join(a.get('filename', '?')[:30] for a in st_attachments[:3])))
+
+        # Deduplicate
         seen = set()
         unique_items = []
         for item in testable_items:
-            key_text = ' '.join(re.findall(r'\b\w{4,}\b', item.lower()))[:60]
+            key_text = ' '.join(re.findall(r'\b\w{4,}\b', item.lower()))[:80]
             if key_text not in seen and key_text not in existing_text[:5000]:
                 seen.add(key_text)
                 unique_items.append(item)
 
-        # Generate TCs from testable items
-        for item in unique_items[:5]:  # cap at 5 per subtask
-            # Clean the item into a proper TC title
+        # Fix 6: Increased cap from 5 to 20 per subtask
+        for item in unique_items[:20]:
             clean = _clean_tc_title(item, jira.key)
             if len(clean) < 10:
                 continue
 
-            # Check not already covered
             item_kw = set(re.findall(r'\b\w{4,}\b', clean.lower()))
             existing_kw = set(re.findall(r'\b\w{4,}\b', existing_text))
             overlap = len(item_kw & existing_kw) / max(len(item_kw), 1)
             if overlap >= 0.6:
                 continue
 
-            # Determine category
             item_low = item.lower()
             if any(kw in item_low for kw in ['negative', 'invalid', 'error', 'fail', 'reject']):
                 category = 'Negative'
             elif any(kw in item_low for kw in ['regression', 'unaffected', 'not break']):
-                category = 'Edge Case'
+                category = 'Regression'
             elif any(kw in item_low for kw in ['rollback', 'revert']):
                 category = 'Negative'
             else:
@@ -1054,12 +1396,12 @@ def _mine_jira_subtasks(jira, suite, log=print):
                     TestStep(4, 'Verify no regression on related %s flows' % feature_short, 'No regression'),
                 ]))
             next_idx += 1
-            existing_text += ' ' + clean.lower()  # prevent duplicates within subtasks
+            existing_text += ' ' + clean.lower()
             log('[ENGINE]   Subtask TC from %s: %s' % (key, clean[:60]))
 
-    # Cap total at 10
-    if len(new_tcs) > 10:
-        new_tcs = new_tcs[:10]
+    # Fix 6: Increased total cap from 10 to 30
+    if len(new_tcs) > 30:
+        new_tcs = new_tcs[:30]
 
     if new_tcs:
         log('[ENGINE]   Mined %d TCs from %d Jira subtasks' % (len(new_tcs), len(jira.subtasks)))
@@ -1219,6 +1561,14 @@ def _build_from_jira_only(jira, feature_name=''):
             if any(kw in line_low for kw in ['shall ', 'must ', 'should ', 'verify ', 'ensure ',
                                                'when ', 'the system ', 'api ', 'trigger ',
                                                'validate ', 'check ']):
+                # Fix 3: Require at least one domain-specific keyword — skip vague scope text
+                DOMAIN_KEYWORDS = ['mdn', 'iccid', 'imei', 'eid', 'line', 'subscriber', 'account',
+                                   'api', 'http', 'nsl', 'tmo', 'century', 'nbop', 'mig', 'transaction',
+                                   'callback', 'async', 'sync', 'port', 'swap', 'activate', 'hotline',
+                                   'error', 'response', 'request', 'payload', 'status', 'device',
+                                   'sim', 'esim', 'psim', 'channel', 'itmbo', 'kafka', 'notification']
+                if not any(dk in line_low for dk in DOMAIN_KEYWORDS):
+                    continue  # Skip non-domain-specific lines (scope statements, planning text)
                 clean = _clean_tc_title(line, jira.key)
                 if len(clean) > 15:
                     tc = TestCase(
@@ -1586,9 +1936,34 @@ def _generate_negative_scenarios(suite, feature_id, log=print):
     has_ui = any(kw in all_text for kw in ['menu', 'display', 'portal', 'nbop', 'ui'])
     has_auth = any(kw in all_text for kw in ['auth', 'token', 'login', 'session'])
 
+    # Detect UI-primary features — suppress API-specific negatives
+    _is_ui_primary = (
+        'nbop to implement' in all_text or
+        ('nbop' in all_text and any(kw in all_text for kw in ['screen', 'menu', 'navigation'])) or
+        'launch nbop' in all_text  # Our UI step templates use this
+    )
+
     # Skip if Chalk already provided many negatives (like 3949 with 14 negative TCs)
     if existing_neg >= 5:
         log('[ENGINE]   Skipping auto-negatives: Chalk already has %d negative TCs' % existing_neg)
+        return neg_tcs
+
+    # For UI features, generate UI-appropriate negatives instead of API negatives
+    if _is_ui_primary:
+        log('[ENGINE]   UI feature detected — generating UI-appropriate negatives only')
+        if 'invalid' not in all_text or 'input' not in all_text:
+            neg_tcs.append(TestCase(
+                sno=str(next_idx),
+                summary='TC%02d_%s - Negative: Validate NBOP screen handles invalid input.' % (next_idx, feature_id),
+                description='Validate error handling for invalid input through NBOP portal.',
+                preconditions='1.\tUser must have access to NBOP.\n2.\tPrepare invalid test data.',
+                story_linkage=feature_id, label=feature_id, category='Negative',
+                steps=[
+                    TestStep(1, 'Login to NBOP and navigate to the relevant screen', 'Screen loads'),
+                    TestStep(2, 'Enter invalid/malformed data and submit', 'NBOP displays error message'),
+                    TestStep(3, 'Verify no changes made to subscriber data', 'Line status and profile unchanged'),
+                    TestStep(4, 'Validate Line table unchanged', 'No data corruption'),
+                ])); next_idx += 1
         return neg_tcs
 
     if has_input and 'invalid/null input' not in all_text:
@@ -1661,7 +2036,7 @@ def _build_ac_traceability(suite):
             match = sum(1 for kw in ac_kw if kw in tc_text)
             if match >= max(1, len(ac_kw) * 0.2):
                 covering.append('TC%s' % tc.sno.zfill(2))
-        mapping[ac[:100]] = covering if covering else ['NO COVERAGE']
+        mapping[ac[:300]] = covering if covering else ['NO COVERAGE']
     return mapping
 
 
@@ -1872,6 +2247,27 @@ _JUNK_TC_PATTERNS = [
     r'^summary:',
     r'^scope:',
     r'^description:',
+    # Fix 1: Catch vague/meta scenario titles mined from Jira scope text
+    r'^validate\s+\w+\s+scenarios\.?$',          # "Validate TMO scenarios" — too vague
+    r'across all supported',                       # "across all supported APIs" — scope statement
+    r'without redeploy',                           # "without redeploys" — infra concern, not testable
+    r'based upon mapping file',                    # planning language, not a test scenario
+    r'configuration.management tests',             # meta-description of test type
+    r'to ensure mappings can',                     # scope/design language
+    r'^validate\s+\w+\s+tests?\b',                # "Validate Configuration-management tests" — meta
+    r'confirm based upon',                         # "confirm based upon" — planning language
+    # Design discussion / question items from Jira comments/subtasks
+    r'^does\s+\w+\s+have',                         # "Does Ericsson have a library..."
+    r'^the story does not',                         # "The story does not include..."
+    r'^following the analysis',                     # "Following the analysis in story..."
+    r'create the matching',                         # design implementation notes
+    r'intermediary files',                          # infrastructure notes
+    r'collectors.*folders',                         # infrastructure notes
+    r'^the prr files should',                       # requirement statement, not test scenario
+    r'lookup table we can use',                     # design question
+    r'^we need to',                                 # planning language
+    r'^can we ',                                    # question, not test
+    r'^how (do|does|can|should)',                   # question, not test
 ]
 
 
@@ -1895,6 +2291,19 @@ def _quality_gate(test_cases, feature_name, feature_id, log=print):
         if is_junk:
             rejected += 1
             log('[QUALITY]   Rejected junk TC: %s' % name_core[:60])
+            continue
+
+        # ── Check 1b: Is the TC name too vague? (Fix 2) ──
+        # Short titles with < 3 meaningful words are scope statements, not test scenarios
+        _FILLER_WORDS = {'validate', 'verify', 'check', 'ensure', 'test', 'confirm',
+                         'the', 'for', 'and', 'with', 'that', 'all', 'are', 'can',
+                         'should', 'must', 'will', 'from', 'into', 'new', 'both'}
+        meaningful_words = [w for w in re.findall(r'\b\w{3,}\b', name_low)
+                           if w not in _FILLER_WORDS]
+        if len(meaningful_words) < 3:
+            rejected += 1
+            log('[QUALITY]   Rejected vague TC: %s (only %d meaningful words)' % (
+                name_core[:60], len(meaningful_words)))
             continue
 
         # ── Check 2: Is the TC name a raw description paragraph? ──
@@ -1928,6 +2337,25 @@ def _quality_gate(test_cases, feature_name, feature_id, log=print):
         if not tc.description or len(tc.description) < 10:
             desc_title = re.sub(r'^TC\d+[_\s-]+' + re.escape(feature_id) + r'[_\s-]*', '', tc.summary).strip()
             tc.description = 'To validate that %s completes successfully.' % desc_title.rstrip('.')
+
+        # ── Check 4b: Ensure precondition is not empty — context-aware ──
+        if not tc.preconditions or len(tc.preconditions.strip()) < 5:
+            _tc_text = (tc.summary + ' ' + (tc.description or '')).lower()
+            _is_cdr_tc = any(kw in _tc_text for kw in ['cdr', 'prr', 'mediation', 'ild', 'roaming',
+                                                         'country code', 'derivation', 'usage file',
+                                                         'call type', 'metering'])
+            _is_notif_tc = any(kw in _tc_text for kw in ['notification', 'dpfo', 'kafka', 'threshold',
+                                                           'suppress', 'speed reduction'])
+            _is_ui_tc = any(kw in _tc_text for kw in ['nbop', 'portal', 'screen', 'menu', 'display',
+                                                        'navigation'])
+            if _is_cdr_tc:
+                tc.preconditions = '1.\tMediation and PRR batch jobs are up and running\n2.\tSFTP access available via FileZilla\n3.\tTest CDR/PRR data prepared'
+            elif _is_notif_tc:
+                tc.preconditions = '1.\tActive TMO subscriber line\n2.\tNotification/KAFKA endpoints accessible\n3.\tMediation pipeline running'
+            elif _is_ui_tc:
+                tc.preconditions = '1.\tUser must have access to NBOP portal\n2.\tActive TMO subscriber line available'
+            else:
+                tc.preconditions = '1.\tActive TMO subscriber line\n2.\tAPI endpoint accessible and authenticated'
 
         # ── Check 5: Remove "Validate Validate" or "Verify Verify" double prefix ──
         tc.summary = re.sub(r'(Validate|Verify)\s+(Validate|Verify)\s+', r'\1 ', tc.summary, flags=re.IGNORECASE)
@@ -1965,10 +2393,10 @@ def _quality_gate(test_cases, feature_name, feature_id, log=print):
         _name_part = re.sub(r'\s+', ' ', _name_part).strip()
 
         # Truncate if still too long — find a clean break
-        if len(_name_part) > 100:
-            _break = 100
+        if len(_name_part) > 200:
+            _break = 200
             for _sep in [' - ', ', ', ' ']:
-                _pos = _name_part.rfind(_sep, 40, 100)
+                _pos = _name_part.rfind(_sep, 80, 200)
                 if _pos > 40:
                     _break = _pos
                     break
@@ -1977,11 +2405,164 @@ def _quality_gate(test_cases, feature_name, feature_id, log=print):
             if _overflow and _overflow not in tc.description:
                 tc.description = tc.description.rstrip() + '\nAdditional scope: ' + _overflow
 
-        # Ensure summary ends cleanly (not mid-word, add period)
-        if _name_part and _name_part[-1] not in '.!?)':
-            _name_part = _name_part.rstrip('.') + '.'
+        # Ensure summary ends cleanly — strip trailing special chars
+        _name_part = _name_part.rstrip('.;,!?:- ')
+        # Don't add trailing period — keep it clean
 
+        # ── FIX: Also strip trailing dots from the FULL summary after prefix reassembly ──
         tc.summary = _prefix + _name_part
+        tc.summary = tc.summary.rstrip('.;,!?:- ')
+
+        # ── FIX: Normalize non-standard categories ──
+        _cat_map = {
+            'happy path workflow': 'Happy Path',
+            'edge case workflow': 'Edge Case',
+            'negative workflow': 'Negative',
+            'failure workflow': 'Negative',
+            'positive': 'Happy Path',
+            'positive workflow': 'Happy Path',
+            'edge cases': 'Edge Case',
+            'end-to-end': 'E2E',
+            'e2e workflow': 'E2E',
+            'regression workflow': 'Regression',
+            'rollback workflow': 'Rollback',
+        }
+        if tc.category and tc.category.lower() in _cat_map:
+            tc.category = _cat_map[tc.category.lower()]
+
+        # ── FIX: Ensure preconditions start with numbered format ──
+        if tc.preconditions and not re.match(r'^\d+[\.\t]', tc.preconditions.strip()):
+            _lines = [l.strip() for l in tc.preconditions.split('\n') if l.strip()]
+            tc.preconditions = '\n'.join('%d.\t%s' % (i, l.lstrip('0123456789.-)\t '))
+                                         for i, l in enumerate(_lines, 1))
+
+        # ── FIX: Cross-contamination cleanup ──
+        # EXEMPT: UI Mirror TCs are supposed to mention NBOP — don't clean them
+        _is_ui_mirror_tc = 'UI Verify' in tc.summary
+        from .tc_templates import classify_feature as _qg_classify
+        _qg_fc = _qg_classify(feature_name, description=tc.description or '', channel='')
+
+        if _qg_fc.is_notification and not _qg_fc.is_api and not _is_ui_mirror_tc:
+            # CDR/Notification features should NOT have UI or API verification language
+            _api_contam_terms = ['century report', 'service grouping', 'ne portal',
+                                  'nbop mig', 'mig table', 'mig_device', 'mig_sim', 'mig_line',
+                                  'nsl response', 'succ00', 'http 200', 'http 202']
+            _ui_contam_terms = ['nbop', 'portal', 'screen', 'menu', 'navigation']
+            _all_contam = _api_contam_terms + _ui_contam_terms
+
+            # Clean description
+            for _term in _all_contam:
+                if _term in tc.description.lower():
+                    tc.description = re.sub(r'(?i)\b' + re.escape(_term) + r'\b', '', tc.description).strip()
+                    tc.description = re.sub(r'\s{2,}', ' ', tc.description)
+
+            # Clean steps — replace API verification steps with CDR-appropriate ones
+            _cleaned_steps = []
+            for _step in tc.steps:
+                _s_low = _step.summary.lower()
+                _e_low = _step.expected.lower()
+                _has_contam = any(t in _s_low or t in _e_low for t in _api_contam_terms + _ui_contam_terms)
+                if _has_contam:
+                    # Replace with CDR-appropriate step
+                    if 'century report' in _s_low or 'nbop mig' in _s_low or 'mig table' in _s_low:
+                        _cleaned_steps.append(TestStep(_step.step_num,
+                            'Verify PRR output file on SFTP matches expected results',
+                            'PRR output contains correct derivation rule mappings'))
+                    elif 'nsl response' in _s_low or 'succ00' in _s_low:
+                        _cleaned_steps.append(TestStep(_step.step_num,
+                            'Verify mediation pipeline processes records without errors',
+                            'All records processed successfully through mediation'))
+                    elif 'ne portal' in _s_low:
+                        _cleaned_steps.append(TestStep(_step.step_num,
+                            'Verify mediation batch job logs show successful processing',
+                            'Batch job completed with expected record count'))
+                    else:
+                        # Generic cleanup — strip the term but keep the step
+                        _new_sum = _step.summary
+                        _new_exp = _step.expected
+                        for _term in _all_contam:
+                            _new_sum = re.sub(r'(?i)\b' + re.escape(_term) + r'\b', 'mediation logs', _new_sum, count=1)
+                            _new_exp = re.sub(r'(?i)\b' + re.escape(_term) + r'\b', 'mediation output', _new_exp, count=1)
+                        _cleaned_steps.append(TestStep(_step.step_num, _new_sum.strip(), _new_exp.strip()))
+                else:
+                    _cleaned_steps.append(_step)
+            tc.steps = _cleaned_steps
+
+        # ── FIX: Inquiry feature step cleanup ──
+        # Inquiry features should NOT have Century Report, subscriber profile, line table steps
+        # These are read-only operations — replace with response payload validation
+        _is_inquiry_feature = any(kw in feature_name.lower() for kw in
+            ['inquiry', 'enquiry', 'query', 'retrieve', 'sim-info', 'sim info',
+             'device details', 'device lock', 'event status', 'order status',
+             'eligibility', 'biller line', 'login auth', 'get transaction', 'retrigger'])
+        if _is_inquiry_feature and not _is_ui_mirror_tc:
+            _inquiry_contam = ['century report', 'service grouping', 'ne portal',
+                               'line table', 'subscriber profile', 'nbop mig',
+                               'mig table', 'mig_device', 'mig_sim', 'mig_line']
+            _inq_cleaned = []
+            for _step in tc.steps:
+                _s_low = _step.summary.lower()
+                _e_low = _step.expected.lower()
+                _has_inq_contam = any(t in _s_low or t in _e_low for t in _inquiry_contam)
+                if _has_inq_contam:
+                    if 'century report' in _s_low or 'service grouping' in _s_low:
+                        _inq_cleaned.append(TestStep(_step.step_num,
+                            'Validate API response payload contains all required fields',
+                            'Response includes expected data fields with correct values'))
+                    elif 'line table' in _s_low or 'subscriber profile' in _s_low or 'mig' in _s_low:
+                        _inq_cleaned.append(TestStep(_step.step_num,
+                            'Verify NBOP displays the inquiry results correctly',
+                            'NBOP screen shows data matching the API response'))
+                    elif 'ne portal' in _s_low:
+                        _inq_cleaned.append(TestStep(_step.step_num,
+                            'Validate response status and error handling',
+                            'No errors in response. Read-only operation confirmed'))
+                    else:
+                        _new_s = _step.summary
+                        _new_e = _step.expected
+                        for _t in _inquiry_contam:
+                            _new_s = re.sub(r'(?i)\b' + re.escape(_t) + r'\b', 'API response', _new_s, count=1)
+                            _new_e = re.sub(r'(?i)\b' + re.escape(_t) + r'\b', 'query results', _new_e, count=1)
+                        _inq_cleaned.append(TestStep(_step.step_num, _new_s.strip(), _new_e.strip()))
+                else:
+                    _inq_cleaned.append(_step)
+            tc.steps = _inq_cleaned
+
+        # ── FIX: Ensure minimum 2 steps per TC ──
+        if len(tc.steps) < 2:
+            _tc_text_low = (tc.summary + ' ' + tc.description).lower()
+            if len(tc.steps) == 0:
+                tc.steps = [
+                    TestStep(1, 'Execute operation as per scenario: %s' % tc.summary.split('_')[-1][:60],
+                             'Operation initiated'),
+                    TestStep(2, 'Verify expected outcome',
+                             tc.description[:100] if tc.description else 'Operation completed as expected'),
+                ]
+            elif len(tc.steps) == 1:
+                # Add a verification step
+                tc.steps.append(
+                    TestStep(2, 'Verify expected outcome and validate results',
+                             tc.description[:100] if tc.description else 'Results match expected behavior'))
+
+        # ── FIX: Replace generic expected results ──
+        _generic_expected = {'step completed successfully', 'completed', 'success', 'pass', 'ok',
+                             'step completed', 'completed successfully'}
+        for _si, _step in enumerate(tc.steps):
+            if _step.expected and _step.expected.strip().lower() in _generic_expected:
+                # Try to derive a better expected result from the step summary
+                _s_low = _step.summary.lower()
+                if 'verify' in _s_low or 'validate' in _s_low:
+                    tc.steps[_si] = TestStep(_step.step_num, _step.summary,
+                        'Verification passed — results match expected behavior')
+                elif 'trigger' in _s_low or 'execute' in _s_low or 'submit' in _s_low:
+                    tc.steps[_si] = TestStep(_step.step_num, _step.summary,
+                        'Operation processed successfully with expected response')
+                elif 'download' in _s_low or 'report' in _s_low:
+                    tc.steps[_si] = TestStep(_step.step_num, _step.summary,
+                        'Report/file downloaded and available for validation')
+                else:
+                    tc.steps[_si] = TestStep(_step.step_num, _step.summary,
+                        'Step completed with expected outcome — no errors')
 
         clean_tcs.append(tc)
 
@@ -2129,7 +2710,7 @@ _MAX_SINGLE_SHEET = 15
 def _auto_group_tcs(test_cases):
     """Auto-detect groups from TC titles. Feature-aware sheet naming.
     TCs not matching any specific rule go to 'Core' (not 'General')."""
-    categories = set(tc.category for tc in test_cases)
+    categories = set(tc.category for tc in list(test_cases))
     has_mixed_categories = len(categories) > 1
 
     if len(test_cases) <= _MAX_SINGLE_SHEET and not has_mixed_categories:

@@ -171,10 +171,29 @@ def fetch_jira_issue(page, issue_key: str, log=print) -> JiraIssue:
                             if any(kw in val.lower() for kw in ['shall', 'must', 'verify', 'when', 'then']):
                                 st['acceptance_criteria'] = val
                                 break
+                    # Deep-fetch: subtask attachments
+                    st_attachments = sf.get('attachment', [])
+                    if st_attachments:
+                        st['attachments'] = [
+                            {'filename': a.get('filename', ''), 'size': a.get('size', 0),
+                             'mimeType': a.get('mimeType', ''), 'url': a.get('content', '')}
+                            for a in st_attachments
+                        ]
+                    # Deep-fetch: subtask comments
+                    st_comments = sf.get('comment', {}).get('comments', [])
+                    if st_comments:
+                        st['comments'] = [
+                            {'author': (c.get('author') or {}).get('displayName', ''),
+                             'created': c.get('created', '')[:10],
+                             'body': c.get('body', '')}
+                            for c in st_comments[:10]  # Cap at 10 per subtask
+                        ]
                     desc_len = len(st.get('description', ''))
                     ac_len = len(st.get('acceptance_criteria', ''))
+                    att_count = len(st.get('attachments', []))
+                    cmt_count = len(st.get('comments', []))
                     log(f'[JIRA]     ✅ {st["key"]}: {st["summary"][:50]}')
-                    log(f'[JIRA]        Type={st.get("issue_type","")} | Status={st.get("status","")} | Desc={desc_len} chars | AC={ac_len} chars')
+                    log(f'[JIRA]        Type={st.get("issue_type","")} | Status={st.get("status","")} | Desc={desc_len} chars | AC={ac_len} chars | Att={att_count} | Cmt={cmt_count}')
                     if desc_len > 0:
                         # Show first 100 chars of description
                         log(f'[JIRA]        Desc preview: {st["description"][:100]}')

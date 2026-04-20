@@ -397,34 +397,23 @@ def _build_testcases_sheet(wb, suite: TestSuite, sheet_name=None, tc_subset=None
     ws.column_dimensions['I'].width = 18
     ws.column_dimensions['J'].width = 18
 
-    # Row 1: Feature description (clean leading dashes/brackets)
-    import re as _re
-    desc = suite.feature_desc.lstrip(' -')
-    desc = _re.sub(r'^\[.*?\]\s*:?\s*', '', desc)
-    ws.append([desc] + [''] * (len(EXCEL_HEADERS) - 1))
-    ws.merge_cells('A1:%s1' % chr(64 + len(EXCEL_HEADERS)))
-    ws['A1'].font = Font(name='Calibri', bold=True, size=12, color=NAVY)
-    ws['A1'].alignment = _wrap
-    ws['A1'].fill = PatternFill(start_color='E8EAF6', end_color='E8EAF6', fill_type='solid')  # soft indigo tint
-    ws.row_dimensions[1].height = 30
-
-    # Row 2: Headers — bold white on soft navy
+    # Row 1: Headers — bold white on soft navy (no feature description banner)
     ws.append(EXCEL_HEADERS)
     _header_fill = PatternFill(start_color='1A237E', end_color='1A237E', fill_type='solid')  # deep indigo
     _header_font = Font(name='Calibri', bold=True, size=11, color='FFFFFF')
     for ci in range(1, len(EXCEL_HEADERS) + 1):
-        c = ws.cell(row=2, column=ci)
+        c = ws.cell(row=1, column=ci)
         c.font = _header_font
         c.fill = _header_fill
         c.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
         c.border = _bdr
 
-    # Freeze panes — keep Row 1 (description) + Row 2 (headers) visible
-    ws.freeze_panes = 'A3'
+    # Freeze panes — keep Row 1 (headers) visible
+    ws.freeze_panes = 'A2'
 
     # Write test cases (renumbered per-sheet starting from 1)
     tc_start_rows = []
-    row = 3
+    row = 2
     for sheet_idx, tc in enumerate(tcs, 1):
         tc_start_rows.append(row)
         # Per-sheet S.No

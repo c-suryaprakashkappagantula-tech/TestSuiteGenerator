@@ -510,13 +510,9 @@ def _parse_numbered_format(lines, data, fid, numbered_row_pat, log=print):
 
 def _parse_freeform(lines, data, fid, log=print):
     """Fallback parser for section-based Chalk formats.
-    Rules:
-    - Lines before first section header → scope/description (NEVER scenarios)
-    - Section headers: 'Positive Scenarios:', 'Negative Scenarios:', 'Edge Scenarios:'
-    - Lines AFTER a section header → scenarios (short, actionable lines only)
-    - Long narrative paragraphs (>120 chars) → description, not scenario title
-    - 'Confirm:' lines → sub-validation of previous scenario, not new scenario
+    V2: Fixed to extract long scenario lines and recognize more section headers.
     """
+    # Fix 2: Expanded section headers to cover all Chalk formats
     SECTION_HEADERS = {
         'positive scenarios': 'Happy Path',
         'positive:': 'Happy Path',
@@ -526,14 +522,27 @@ def _parse_freeform(lines, data, fid, log=print):
         'edge scenarios': 'Edge Case',
         'edge cases': 'Edge Case',
         'edge:': 'Edge Case',
+        'regression scenarios': 'Regression',
+        'regression:': 'Regression',
+        'api testing': 'Happy Path',
+        'apis': 'Happy Path',
+        'nbop ui': 'Happy Path',
+        'nbop testing': 'Happy Path',
+        'nbop:': 'Happy Path',
+        'failure scenarios': 'Negative',
+        'failure:': 'Negative',
+        'integration workflow': 'Happy Path',
+        'happy path workflow': 'Happy Path',
+        'failure workflow': 'Negative',
+        'edge case workflow': 'Edge Case',
     }
-    # Lines that are clearly NOT scenarios
     SKIP_WORDS = ['summary:', 'scope:', 'description:', 'feature id', 'feature:',
                   'note:', 'notes:', 'channels -', 'devices:', 'external systems',
-                  'has not implemented', 'will not', 'confirm:']
+                  'has not implemented', 'will not', 'confirm:',
+                  'click here to expand', 'click here']
 
     idx = 1
-    current_category = None  # None = we're in scope, not in a scenario section yet
+    current_category = None
     current_scenario = None
 
     for ln in lines:
@@ -543,35 +552,30 @@ def _parse_freeform(lines, data, fid, log=print):
         if not ln_stripped or len(ln_stripped) < 5:
             continue
 
-        # Skip the feature ID line itself
         if fid in ln_stripped.upper() and len(ln_stripped) < 80:
             continue
 
-        # Skip feature title lines: [NENM, NSLNM, INTG]: New MVNO - ...
         if re.match(r'^\[?[A-Z]{2,6}(?:\s*,\s*[A-Z]{2,6})*\]?\s*:', ln_stripped):
             data.scope += ln_stripped + '\n'
             continue
 
-        # Skip "New MVNO - ..." standalone title lines
         if ln_low.startswith('new mvno'):
             data.scope += ln_stripped + '\n'
             continue
 
-        # Skip known non-scenario lines
         if any(ln_low.startswith(p) for p in SKIP_WORDS):
             continue
 
         # Detect section headers → switch category
         is_section = False
         for header, cat in SECTION_HEADERS.items():
-            if header in ln_low and len(ln_stripped) < 50:
+            if header in ln_low and len(ln_stripped) < 60:
                 current_category = cat
                 is_section = True
                 break
         if is_section:
             continue
 
-        # 'Confirm:' is a sub-validation marker, not a scenario
         if ln_low.startswith('confirm'):
             continue
 
@@ -580,23 +584,29 @@ def _parse_freeform(lines, data, fid, log=print):
             data.scope += ln_stripped + '\n'
             continue
 
-        # We're inside a scenario section — but filter out junk content
-        # A scenario title should be < 120 chars. Longer = description/scope text.
-        if len(ln_stripped) > 120:
+        # Fix 1: REMOVED the 120-char limit. Long scenario lines ARE scenarios.
+        # The YL/YD/YP/YM/PL scenarios are 150-280 chars — they are real test cases.
+        # Only skip lines that are clearly NOT scenarios (pure narrative/description).
+        _is_narrative = (
+            ln_low.startswith(('this feature', 'this change', 'this api is used',
+                               'currently,', 'the goal', 'the system')) and
+            not any(kw in ln_low for kw in ['use ', 'verify ', 'validate ', 'ensure ',
+                                             'successful ', 'confirm '])
+        )
+        if _is_narrative:
             data.scope += ln_stripped + '\n'
             continue
 
-        # Filter out developer notes, Jira refs, execution labels, planning comments
+        # Filter out junk
         JUNK_PATTERNS = [
-            r'^test only',                          # "TEST ONLY Feature..."
-            r'^fix (will|details|is)',              # "Fix will be available..."
-            r'^MWTG(PROV|TEST)-\d+$',              # bare Jira ticket reference
-            r'^(INTG|UAT|SIT|PROD)\s*[-—]',        # execution environment labels
-            r'PROGRESSION|REGRESSION',              # test cycle labels
-            r'once the fix is ready',               # planning notes
-            r'will be available on',                # date-based notes
-            r'^N/A$|^NA$|^TBD$|^TODO$',            # placeholder text
-            r'^\d+\.\d+\s*$',                      # bare version numbers like "50.2"
+            r'^test only',
+            r'^fix (will|details|is)',
+            r'^MWTG(PROV|TEST)-\d+$',
+            r'^(INTG|UAT|SIT|PROD)\s*[-—]',
+            r'once the fix is ready',
+            r'will be available on',
+            r'^N/A$|^NA$|^TBD$|^TODO$',
+            r'^\d+\.\d+\s*$',
         ]
         is_junk = any(re.search(p, ln_stripped, re.IGNORECASE) for p in JUNK_PATTERNS)
         if is_junk:
@@ -618,27 +628,23 @@ def _parse_freeform(lines, data, fid, log=print):
     if current_scenario:
         data.scenarios.append(current_scenario)
 
-    # Deduplicate scenarios by title (fuzzy — handles typos and partial matches)
+    # Fix 3: Dedup uses TITLE-BASED comparison, not word overlap.
+    # Similar scenarios like "YL sync active→suspend" vs "YL sync suspend→active"
+    # share 90% words but are DIFFERENT test cases. Use exact title match only.
     unique = []
+    seen_titles = set()
     for sc in data.scenarios:
-        words = set(re.findall(r'\b\w{3,}\b', sc.title.lower()))
-        is_dup = False
-        for existing in unique:
-            existing_words = set(re.findall(r'\b\w{3,}\b', existing.title.lower()))
-            if not words or not existing_words:
-                continue
-            overlap = len(words & existing_words) / min(len(words), len(existing_words))
-            if overlap >= 0.7:
-                is_dup = True
-                break
-        if not is_dup:
+        # Normalize: lowercase, strip punctuation, collapse whitespace
+        norm = re.sub(r'[^\w\s]', '', sc.title.lower())
+        norm = re.sub(r'\s+', ' ', norm).strip()
+        if norm not in seen_titles:
+            seen_titles.add(norm)
             unique.append(sc)
     data.scenarios = unique
 
-    # ── FALLBACK: If no scenarios found from section headers, extract from workflow tables ──
+    # Fallback: if no scenarios found, try workflow tables
     if not data.scenarios:
         _parse_workflow_tables(lines, data, fid, log)
-        # Also extract bullet-point descriptions as scope context
         for ln in lines:
             ln_stripped = ln.strip().strip('•·-–—*').strip()
             ln_low = ln_stripped.lower()

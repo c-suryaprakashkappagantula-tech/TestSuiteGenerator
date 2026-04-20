@@ -86,34 +86,44 @@ def _pi_to_iteration(pi_label):
     suffix = '.2' if num >= 50 else '.1'
     return '%d%s' % (num, suffix)
 
-def _clean_filename(text, max_len=40):
-    """Clean text for use in filename."""
+def _clean_filename(text, max_len=80):
+    """Clean text for use in filename — preserves Chalk title structure.
+    Keeps [TAG, TAG] prefix and 'New MVNO -' for readability."""
     import re
-    t = re.sub(r'\[.*?\]', '', text)  # strip [NSLNM, NENM, INTG] etc
-    t = re.sub(r'New MVNO\s*-?\s*', '', t)  # strip common prefix
-    t = re.sub(r'[^\w\s-]', '', t)  # strip special chars
-    t = re.sub(r'\s+', '_', t.strip())  # spaces to underscores
-    return t[:max_len].rstrip('_')
+    t = text.strip()
+    # Strip leading dashes/spaces
+    t = t.lstrip(' -')
+    # Replace characters that are invalid in filenames
+    t = re.sub(r'[<>:"/\\|?*]', '', t)
+    # Replace multiple spaces with single space
+    t = re.sub(r'\s+', ' ', t)
+    # Truncate if too long
+    if len(t) > max_len:
+        t = t[:max_len].rsplit(' ', 1)[0]
+    # Replace spaces with underscores for filename
+    t = t.replace(' ', '_')
+    return t.rstrip('_.-')
 
 def output_path(fid, pi='', title=''):
     iteration = _pi_to_iteration(pi)
     clean_title = _clean_filename(title) if title else ''
-    parts = [fid]
+    # Format: MWTGPROV-4254_53.2_[MED,_INTG]_New_MVNO_-_ILD_and_..._20260416.xlsx
+    name_parts = [fid]
     if iteration:
-        parts.append(iteration)
+        name_parts.append(iteration)
     if clean_title:
-        parts.append(clean_title)
-    parts.append(ts())
-    return OUTPUTS / ('_'.join(parts) + '.xlsx')
+        name_parts.append(clean_title)
+    name_parts.append(ts())
+    return OUTPUTS / ('_'.join(name_parts) + '.xlsx')
 
 def checkpoint_path(fid, ver='v1', pi='', title=''):
     iteration = _pi_to_iteration(pi)
     clean_title = _clean_filename(title) if title else ''
-    parts = ['CHECKPOINT', fid]
+    name_parts = ['CHECKPOINT', fid]
     if iteration:
-        parts.append(iteration)
+        name_parts.append(iteration)
     if clean_title:
-        parts.append(clean_title)
-    parts.append(ver)
-    parts.append(ts())
-    return CHECKPOINTS / ('_'.join(parts) + '.xlsx')
+        name_parts.append(clean_title)
+    name_parts.append(ver)
+    name_parts.append(ts())
+    return CHECKPOINTS / ('_'.join(name_parts) + '.xlsx')

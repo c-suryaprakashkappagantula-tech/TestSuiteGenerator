@@ -150,6 +150,36 @@ def init_db():
             last_seen       TEXT DEFAULT (datetime('now','localtime')),
             PRIMARY KEY (feature_id, artifact_type, source)
         );
+
+        -- Transaction log: every action performed via TSG Dashboard
+        CREATE TABLE IF NOT EXISTS tsg_transactions (
+            txn_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            action          TEXT NOT NULL,
+            feature_id      TEXT,
+            pi_label        TEXT,
+            details         TEXT,
+            tc_count        INTEGER DEFAULT 0,
+            step_count      INTEGER DEFAULT 0,
+            file_path       TEXT,
+            status          TEXT DEFAULT 'SUCCESS',
+            duration_sec    REAL DEFAULT 0,
+            user_session    TEXT DEFAULT '',
+            created_at      TEXT DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_txn_feature ON tsg_transactions(feature_id);
+        CREATE INDEX IF NOT EXISTS idx_txn_action ON tsg_transactions(action);
+
+        -- Audit log: system events, errors, config changes
+        CREATE TABLE IF NOT EXISTS tsg_audit_log (
+            audit_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type      TEXT NOT NULL,
+            severity        TEXT DEFAULT 'INFO',
+            message         TEXT NOT NULL,
+            feature_id      TEXT,
+            details_json    TEXT,
+            created_at      TEXT DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_audit_type ON tsg_audit_log(event_type);
     ''')
     c.commit()
     c.close()
@@ -758,5 +788,82 @@ def get_artifact_hashes(feature_id: str) -> List[Dict]:
     rows = c.execute(
         'SELECT artifact_type, content_hash, source, last_seen FROM artifact_hashes WHERE feature_id = ?',
         (feature_id,)).fetchall()
+    c.close()
+    return [dict(r) for r in rows]
+
+
+# ================================================================
+# TSG TRANSACTION LOG
+# ================================================================
+
+def log_transaction(action: str, feature_id: str = '', pi_label: str = '',
+                    details: str = '', tc_count: int = 0, step_count: int = 0,
+                    file_path: str = '', status: str = 'SUCCESS', duration_sec: float = 0):
+    """Log a TSG dashboard transaction (generate, sync, export, etc.)."""
+    c = _conn()
+    c.execute('''INSERT INTO tsg_transactions
+        (action, feature_id, pi_label, details, tc_count, step_count, file_path, status, duration_sec)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+        (action, feature_id, pi_label, details, tc_count, step_count, file_path, status, duration_sec))
+    c.commit(); c.close()
+
+
+def get_transactions(feature_id: str = None, action: str = None, limit: int = 50) -> List[Dict]:
+    """Get transaction history, optionally filtered."""
+    c = _conn()
+    query = 'SELECT * FROM tsg_transactions WHERE 1=1'
+    params = []
+    if feature_id:
+        query += ' AND feature_id = ?'; params.append(feature_id)
+    if action:
+        query += ' AND action = ?'; params.append(action)
+    query += ' ORDER BY created_at DESC LIMIT ?'; params.append(limit)
+    rows = c.execute(query, params).fetchall()
+    c.close()
+    return [dict(r) for r in rows]
+
+
+def get_transaction_stats() -> Dict:
+    """Get transaction statistics."""
+    c = _conn()
+    total = c.execute('SELECT COUNT(*) FROM tsg_transactions').fetchone()[0]
+    by_action = c.execute('SELECT action, COUNT(*) as cnt FROM tsg_transactions GROUP BY action ORDER BY cnt DESC').fetchall()
+    by_status = c.execute('SELECT status, COUNT(*) as cnt FROM tsg_transactions GROUP BY status').fetchall()
+    recent = c.execute('SELECT * FROM tsg_transactions ORDER BY created_at DESC LIMIT 5').fetchall()
+    c.close()
+    return {
+        'total': total,
+        'by_action': {r['action']: r['cnt'] for r in by_action},
+        'by_status': {r['status']: r['cnt'] for r in by_status},
+        'recent': [dict(r) for r in recent],
+    }
+
+
+# ================================================================
+# TSG AUDIT LOG
+# ================================================================
+
+def log_audit(event_type: str, message: str, severity: str = 'INFO',
+              feature_id: str = '', details_json: str = ''):
+    """Log an audit event (error, warning, config change, etc.)."""
+    c = _conn()
+    c.execute('''INSERT INTO tsg_audit_log
+        (event_type, severity, message, feature_id, details_json)
+        VALUES (?, ?, ?, ?, ?)''',
+        (event_type, severity, message, feature_id, details_json))
+    c.commit(); c.close()
+
+
+def get_audit_log(event_type: str = None, severity: str = None, limit: int = 100) -> List[Dict]:
+    """Get audit log entries, optionally filtered."""
+    c = _conn()
+    query = 'SELECT * FROM tsg_audit_log WHERE 1=1'
+    params = []
+    if event_type:
+        query += ' AND event_type = ?'; params.append(event_type)
+    if severity:
+        query += ' AND severity = ?'; params.append(severity)
+    query += ' ORDER BY created_at DESC LIMIT ?'; params.append(limit)
+    rows = c.execute(query, params).fetchall()
     c.close()
     return [dict(r) for r in rows]
