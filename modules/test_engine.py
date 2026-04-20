@@ -836,6 +836,64 @@ def _chalk_scenario_to_tc(sc, idx, feature_id, channel=''):
             pre_lines.append('%d.\tNBOP portal accessible and user logged in' % (len(pre_lines) + 1))
     preconditions = '\n'.join(pre_lines) if pre_lines else sc.prereq
 
+    # ── Sync Subscriber: derive preconditions from scenario title ──
+    _sc_title_low = sc.title.lower()
+    _is_sync_sc = any(kw in _sc_title_low for kw in ['sync subscriber', 'yl sync', 'yd sync',
+                                                        'ym sync', 'yp sync', 'pl sync',
+                                                        'sync line', 'sync with network', 'sync key'])
+    _is_sync_sc = _is_sync_sc or (('yl ' in _sc_title_low or 'yd ' in _sc_title_low or
+                                     'ym ' in _sc_title_low or 'yp ' in _sc_title_low or
+                                     'pl ' in _sc_title_low) and 'sync' in _sc_title_low)
+    if _is_sync_sc:
+        _sync_pre = []
+        # Derive starting state from title
+        if 'active' in _sc_title_low and 'deactive' in _sc_title_low:
+            if _sc_title_low.index('active') < _sc_title_low.index('deactive'):
+                _sync_pre.append('1.\tSubscriber line is Active on NSL')
+                _sync_pre.append('2.\tTMO has changed line status to Deactive')
+            else:
+                _sync_pre.append('1.\tSubscriber line is Deactive on NSL')
+                _sync_pre.append('2.\tTMO has changed line status to Active')
+        elif 'active' in _sc_title_low and 'hotline' in _sc_title_low:
+            if _sc_title_low.index('active') < _sc_title_low.index('hotline'):
+                _sync_pre.append('1.\tSubscriber line is Active on NSL')
+                _sync_pre.append('2.\tTMO has changed line status to Hotlined')
+            else:
+                _sync_pre.append('1.\tSubscriber line is Hotlined on NSL')
+                _sync_pre.append('2.\tTMO has changed line status to Active')
+        elif 'active' in _sc_title_low and 'suspend' in _sc_title_low:
+            if _sc_title_low.index('active') < _sc_title_low.index('suspend'):
+                _sync_pre.append('1.\tSubscriber line is Active on NSL')
+                _sync_pre.append('2.\tTMO has changed line status to Suspended')
+            else:
+                _sync_pre.append('1.\tSubscriber line is Suspended on NSL')
+                _sync_pre.append('2.\tTMO has changed line status to Active')
+        elif 'iccid' in _sc_title_low and 'change' in _sc_title_low and 'not' not in _sc_title_low:
+            _sync_pre.append('1.\tSubscriber line is Active on NSL')
+            _sync_pre.append('2.\tTMO has changed the ICCID (new SIM assigned)')
+        elif 'iccid' in _sc_title_low and 'does not change' in _sc_title_low:
+            _sync_pre.append('1.\tSubscriber line is Active on NSL')
+            _sync_pre.append('2.\tICCID is same on both TMO and NSL')
+        elif 'no line status change' in _sc_title_low or 'no changes' in _sc_title_low:
+            _sync_pre.append('1.\tSubscriber line status is same on both TMO and NSL')
+            _sync_pre.append('2.\tNo pending state changes')
+        elif 'yd ' in _sc_title_low:
+            _sync_pre.append('1.\tSubscriber line is Active on NSL')
+            _sync_pre.append('2.\tDevice/SIM change detected on TMO')
+        elif 'yp ' in _sc_title_low:
+            _sync_pre.append('1.\tSubscriber line is Active on NSL')
+            _sync_pre.append('2.\tFeature/plan change detected on TMO')
+        elif 'pl ' in _sc_title_low:
+            _sync_pre.append('1.\tSubscriber line is Active on NSL')
+            _sync_pre.append('2.\tPlan-level sync triggered (internal only)')
+        else:
+            _sync_pre.append('1.\tSubscriber line exists with valid LineId and MDN')
+            _sync_pre.append('2.\tSync trigger condition met on TMO')
+
+        _sync_pre.append('%d.\tAPI endpoint accessible and authenticated' % (len(_sync_pre) + 1))
+        _sync_pre.append('%d.\tCentury Report accessible for verification' % (len(_sync_pre) + 1))
+        preconditions = '\n'.join(_sync_pre)
+
     steps = []
     step_num = 1
 
@@ -2439,14 +2497,18 @@ def _quality_gate(test_cases, feature_name, feature_id, log=print):
         # ── FIX: Cross-contamination cleanup ──
         # EXEMPT: UI Mirror TCs are supposed to mention NBOP — don't clean them
         _is_ui_mirror_tc = 'UI Verify' in tc.summary
-        from .tc_templates import classify_feature as _qg_classify
-        _qg_fc = _qg_classify(feature_name, description=tc.description or '', channel='')
+        # Use FEATURE-LEVEL classification (not per-TC) for consistent cleanup
+        # _fc is already computed at the top of build_test_suite
+        _is_feature_cdr = any(kw in feature_name.lower() for kw in
+            ['cdr', 'mediation', 'prr', 'ild', 'roaming', 'usage file', 'call type',
+             'metering', 'mhs data', 'country translation', 'country code'])
+        _is_feature_notification = _fc.is_notification if '_fc' in dir() else False
 
-        if _qg_fc.is_notification and not _qg_fc.is_api and not _is_ui_mirror_tc:
+        if (_is_feature_cdr or (_is_feature_notification and not _fc.is_api)) and not _is_ui_mirror_tc:
             # CDR/Notification features should NOT have UI or API verification language
             _api_contam_terms = ['century report', 'service grouping', 'ne portal',
                                   'nbop mig', 'mig table', 'mig_device', 'mig_sim', 'mig_line',
-                                  'nsl response', 'succ00', 'http 200', 'http 202']
+                                  'nsl response', 'succ00', 'http 200', 'http 202', 'apollo_ne']
             _ui_contam_terms = ['nbop', 'portal', 'screen', 'menu', 'navigation']
             _all_contam = _api_contam_terms + _ui_contam_terms
 

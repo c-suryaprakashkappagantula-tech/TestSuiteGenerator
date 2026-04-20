@@ -623,34 +623,39 @@ def _sync_subscriber_steps(title, validation, t):
             ('Step 5: Download Century Report and verify all backend calls logged',
              val),
         ]
-    elif 'no' in t_low and ('change' in t_low or 'same' in t_low) or \
-         ('active and active' in t_low or 'deactive and deactive' in t_low or 'hotlined and hotlined' in t_low):
-        # No state change — should do nothing
-        return [
-            ('Step 1: Trigger YL Sync Subscriber API with valid LineId and MDN (same status on both TMO and NSL)',
-             'NSL accepts sync request with 200 OK'),
-            ('Step 2: Verify NSL detects no line status change',
-             'NSL confirms status is already in sync — no update needed'),
-            ('Step 3: Verify NO changes made to NSL DB, ITMBO, EMM, or Syniverse',
-             'No outbound calls triggered. No DB updates. System state unchanged'),
-            ('Step 4: Verify Century Report shows sync with no-op result',
-             val),
-        ]
-    elif 'yd ' in t_low or 'iccid' in t_low:
-        # YD — device/SIM change sync
+    elif 'yd ' in t_low or ('iccid' in t_low and 'change' in t_low):
+        # YD — device/SIM change sync (ICCID changes → SwapIMSI)
+        # But NOT if "does not change" or "no changes"
+        if 'does not change' in t_low or 'no changes' in t_low or 'iccid does not' in t_low:
+            return [
+                ('Step 1: Trigger YD Sync Subscriber API with valid LineId and MDN (ICCID unchanged)',
+                 'NSL accepts sync request with 200 OK'),
+                ('Step 2: Verify NSL detects no ICCID change — no device sync needed',
+                 'NSL confirms ICCID is same on TMO and NSL — no update'),
+                ('Step 3: Verify NO Syniverse SwapIMSI call triggered',
+                 'No Syniverse call — ICCID unchanged means no IMSI swap needed'),
+                ('Step 4: Verify NO changes to NSL DB, ITMBO, or EMM',
+                 'No outbound calls. System state unchanged'),
+                ('Step 5: Verify Century Report shows YD sync with no-op result',
+                 val),
+            ]
         return [
             ('Step 1: Trigger YD Sync Subscriber API with valid LineId and MDN (ICCID changed on TMO)',
              'NSL accepts sync request with 200 OK'),
             ('Step 2: Verify NSL syncs new ICCID/IMSI from TMO to NSL DB',
              'NSL DB updated with new ICCID and IMSI'),
-            ('Step 3: Verify Syniverse SwapIMSI is called with new IMSI (wholesale plan unchanged)',
-             'Syniverse SwapIMSI executed. Wholesale plan NOT modified'),
-            ('Step 4: Verify ITMBO and EMM are notified of the device change',
-             'ITMBO and EMM receive device change notification'),
-            ('Step 5: Download Century Report and verify all backend calls logged',
+            ('Step 3: Verify Syniverse SwapIMSI is called with new IMSI',
+             'Syniverse SwapIMSI executed with new IMSI derived from new ICCID'),
+            ('Step 4: Verify wholesale plan remains UNCHANGED after SwapIMSI',
+             'Wholesale plan NOT modified — only IMSI changed per Syniverse contract'),
+            ('Step 5: Verify ITMBO and EMM are notified of the device/SIM change',
+             'ITMBO and EMM receive device change notification with new ICCID'),
+            ('Step 6: Download Century Report and verify SwapIMSI call logged',
+             'Century Report shows YD sync with Syniverse SwapIMSI call'),
+            ('Step 7: Verify NBOP SIM Information section shows new ICCID',
              val),
         ]
-    elif 'yp ' in t_low or 'feature' in t_low:
+    elif 'yp ' in t_low or ('feature' in t_low and 'sync' in t_low):
         # YP — plan/feature change sync
         return [
             ('Step 1: Trigger YP Sync Subscriber API with valid LineId and MDN',
@@ -672,6 +677,21 @@ def _sync_subscriber_steps(title, validation, t):
             ('Step 3: Verify NSL DB unchanged — PL is internal only',
              'No DB updates. PL transaction logged but no action taken'),
             ('Step 4: Download Century Report and verify PL no-op logged',
+             val),
+        ]
+    elif ('no line status change' in t_low or 'no changes' in t_low or
+          'active and active' in t_low or 'deactive and deactive' in t_low or
+          'hotlined and hotlined' in t_low or
+          ('iccid' in t_low and 'does not change' in t_low)):
+        # No state change — should do nothing
+        return [
+            ('Step 1: Trigger Sync Subscriber API with valid LineId and MDN (same status on both TMO and NSL)',
+             'NSL accepts sync request with 200 OK'),
+            ('Step 2: Verify NSL detects no state change',
+             'NSL confirms status is already in sync — no update needed'),
+            ('Step 3: Verify NO changes made to NSL DB, ITMBO, EMM, or Syniverse',
+             'No outbound calls triggered. No DB updates. System state unchanged'),
+            ('Step 4: Verify Century Report shows sync with no-op result',
              val),
         ]
     else:
