@@ -36,6 +36,10 @@ def get_step_chain(sc_title, sc_validation, feature_context, feature_type=''):
     if _is_ui_sync(t, ctx):
         return _ui_sync_subscriber_steps(sc_title, sc_validation, t)
 
+    # UI-based Network Reset (via NBOP portal) — check BEFORE generic UI flow
+    if _is_ui_network_reset(t, ctx):
+        return _ui_network_reset_steps(sc_title, sc_validation, t)
+
     # UI flow takes priority — prevents API templates from firing on
     # NBOP features that mention "activate", "port", "hotline" etc.
     if _is_ui_flow(t, ctx):
@@ -51,6 +55,10 @@ def get_step_chain(sc_title, sc_validation, feature_context, feature_type=''):
     # because sync scenarios mention state changes that would match those templates
     if _is_sync_subscriber(t, ctx):
         return _sync_subscriber_steps(sc_title, sc_validation, t)
+
+    # Network Reset — API-based (must check before generic API flow)
+    if _is_network_reset(t, ctx):
+        return _network_reset_steps(sc_title, sc_validation, t)
 
     # Syniverse integration flows (must check before generic API)
     if _is_syniverse_flow(t, ctx):
@@ -146,6 +154,22 @@ def _is_sync_subscriber(t, ctx):
                                    'sync with network', 'sync key']) or \
            (('yl ' in t or 'yd ' in t or 'ym ' in t or 'yp ' in t or 'pl ' in t) and
             'sync' in (t + ' ' + ctx))
+
+def _is_network_reset(t, ctx):
+    """Detect Network Reset scenarios (API-based)."""
+    return any(kw in t for kw in ['network reset', 'reset network', 'network-reset',
+                                   'reset-network']) or \
+           ('network' in ctx and 'reset' in t)
+
+def _is_ui_network_reset(t, ctx=''):
+    """Detect UI-based Network Reset scenarios (trigger via NBOP portal)."""
+    return any(kw in t for kw in [
+        'network reset via nbop', 'network reset through nbop',
+        'reset via nbop', 'reset through nbop',
+        'nbop network reset', 'ui: network reset',
+        'ui verify: network reset', 'validate network reset through nbop',
+        'perform network reset via nbop', 'perform network reset operation via nbop',
+    ])
 
 def _is_inquiry(t, ctx):
     """Detect inquiry/query features — read-only operations that return data."""
@@ -779,6 +803,42 @@ def _ui_sync_subscriber_steps(title, validation, t=''):
     )
 
     return steps
+
+
+def _network_reset_steps(title, validation, t=''):
+    """API-based Network Reset — trigger via API, verify Century Report + NBOP."""
+    val = validation or title
+    return [
+        ('Step 1: Trigger Network Reset API with valid parameters (MDN, OSP Account Number, PIN)',
+         'NSL accepts Network Reset request with 200 OK. Transaction ID generated'),
+        ('Step 2: Verify NSL sends Network Reset request to TMO via APOLLO_NE',
+         'APOLLO_NE receives Network Reset outbound call with correct parameters'),
+        ('Step 3: Verify TMO sends asynchronous response with reset confirmation',
+         'Async callback received with success status'),
+        ('Step 4: Download Century Report (SERVICE_GROUPING) and verify Network Reset transaction logged',
+         'Century Report shows Network Reset transaction with correct ROOT TRANSACTION ID'),
+        ('Step 5: Verify NBOP MIG tables updated correctly (MIG_DEVICE, MIG_SIM, MIG_LINE)',
+         'NBOP MIG tables reflect correct IMEI, ICCID, MDN, and line status'),
+        ('Step 6: Verify Transaction History records the Network Reset operation',
+         val),
+    ]
+
+
+def _ui_network_reset_steps(title, validation, t=''):
+    """UI-based Network Reset — trigger via NBOP portal, verify Transaction History + Century Report."""
+    val = validation or title
+    return [
+        ('Step 1: Trigger Network Reset via NBOP UI (≡ Menu → Reset Line → Network → Click Reset)',
+         'Network Reset triggered successfully via NBOP portal — confirmation displayed'),
+        ('Step 2: Wait 20s for backend processing, then verify Transaction History in NBOP shows Network Reset entry',
+         'Transaction History shows latest Network Reset entry with Order Status = COMPLETED'),
+        ('Step 3: Click Transaction ID in Transaction History and verify Order Status = COMPLETED',
+         'Transaction detail page shows Order Status = COMPLETED'),
+        ('Step 4: Download Century Report (SERVICE_GROUPING) and verify Network Reset transaction logged',
+         'Century Report shows Network Reset transaction with correct ROOT TRANSACTION ID'),
+        ('Step 5: Verify NBOP Line Information reflects reset status — MDN, IMEI, ICCID unchanged',
+         val),
+    ]
 
 
 def _report_steps(title, validation):

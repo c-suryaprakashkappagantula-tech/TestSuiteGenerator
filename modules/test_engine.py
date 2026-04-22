@@ -520,6 +520,87 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print):
 
     # Step 9: Renumber after expansion
     log('[ENGINE] Step 9: Final renumbering...')
+
+    # ── PRE-RENUMBER: Remove VZW/Verizon TCs from TMO-only features ──
+    # All PI-53 features are TMO MVNO — remove any Verizon/VZW TCs
+    _is_tmo_feature = any(kw in (feature_short + ' ' + jira.summary + ' ' + (jira.description or '')).lower()
+                          for kw in ['tmo', 'tmobile', 't-mobile', 'new mvno', 'mvno', 'nslnm', 'nenm'])
+    if _is_tmo_feature:
+        _before = len(suite.test_cases)
+        suite.test_cases = [
+            tc for tc in suite.test_cases
+            if not any(kw in (tc.summary + ' ' + tc.description + ' ' + tc.preconditions).lower()
+                       for kw in ['verizon', ' vzw ', 'vzw subscriber', 'vzw sync',
+                                  'for a verizon', 'verizon subscriber'])
+        ]
+        _removed = _before - len(suite.test_cases)
+        if _removed:
+            log('[ENGINE]   Removed %d Verizon/VZW TCs from TMO-only feature' % _removed)
+
+    # ── PRE-RENUMBER: Clean up raw Jira subtask titles ──
+    for tc in suite.test_cases:
+        _s = tc.summary
+        # Remove _UAT_PROGRESSION_, _REGRESSION_, _SIT_ prefixes (with or without version)
+        _s = re.sub(r'_?UAT_PROGRESSION_[\d.]*_?', '', _s)
+        _s = re.sub(r'_?SIT_PROGRESSION_[\d.]*_?', '', _s)
+        _s = re.sub(r'_?REGRESSION_[\d.]*_?', '', _s)
+        # Remove MWTGTEST-XXXXX references from summary
+        _s = re.sub(r'MWTGTEST-\d+\s*', '', _s)
+        # Remove leading/trailing underscores and whitespace
+        _s = re.sub(r'^(TC\d+_MWTGPROV-\d+_)Validate\s+_+', r'\1Validate ', _s)
+        _s = re.sub(r'__+', '_', _s).strip('_ ')
+        if _s != tc.summary:
+            tc.summary = _s
+
+    # ── PRE-RENUMBER: Remove junk subtask-derived TCs ──
+    # These are raw Jira text that passed the quality gate but aren't real test scenarios
+    _before_junk = len(suite.test_cases)
+    _junk_patterns = [
+        r'User must have a line',           # Raw requirement, not a test
+        r'Validate has ensured that all',    # Vague scope statement
+        r'Validate For \w+ transaction\*',   # Vague with asterisk
+        r'UI Verify.*Validate Activate.*(?:Sync|Network Reset|Reclaim)',  # Cross-contamination
+    ]
+    suite.test_cases = [
+        tc for tc in suite.test_cases
+        if not any(re.search(p, tc.summary, re.IGNORECASE) for p in _junk_patterns)
+    ]
+    _junk_removed = _before_junk - len(suite.test_cases)
+    if _junk_removed:
+        log('[ENGINE]   Removed %d junk subtask-derived TCs' % _junk_removed)
+
+    # ── PRE-RENUMBER: Add NBOP UI trigger TCs for Sync Subscriber matrix ──
+    # For sync subscriber features, generate UI-based TCs for key status combos
+    _is_sync_feature = any(kw in feature_short.lower() for kw in ['sync subscriber', 'sync sub'])
+    if _is_sync_feature:
+        _existing_text = ' '.join(tc.summary.lower() for tc in suite.test_cases)
+        _ui_combos = [
+            ('Active', 'Active', 'No action'),
+            ('Active', 'Hotline', 'No action (TMO doesn\'t expose hotline status)'),
+            ('Deactive', 'Active', 'Remove subscriber from Syniverse'),
+        ]
+        _added_ui = 0
+        _next = len(suite.test_cases) + 1
+        for tmo_st, nsl_st, syn_action in _ui_combos:
+            _check = f'nbop.*tmo.*{tmo_st.lower()}.*nsl.*{nsl_st.lower()}'
+            if not re.search(_check, _existing_text):
+                from TestSuiteGenerator.modules.step_templates import _ui_sync_subscriber_steps
+                _title = f'UI: Sync Subscriber via NBOP (TMO={tmo_st}, NSL={nsl_st}, Syniverse={syn_action})'
+                _steps_data = _ui_sync_subscriber_steps(_title, '', _title.lower())
+                _steps = [TestStep(i+1, s, e) for i, (s, e) in enumerate(_steps_data)]
+                suite.test_cases.append(TestCase(
+                    sno=str(_next),
+                    summary='TC%03d_%s_%s' % (_next, jira.key, _title),
+                    description='Trigger Sync Subscriber via NBOP UI and verify Transaction History + Century Report.',
+                    preconditions='1.\tTMO subscriber line status = %s\n2.\tNSL line status = %s\n3.\tNBOP portal accessible' % (tmo_st, nsl_st),
+                    story_linkage=jira.key, label=jira.key, category='Happy Path',
+                    steps=_steps,
+                ))
+                _next += 1
+                _added_ui += 1
+        if _added_ui:
+            log('[ENGINE]   Added %d NBOP UI Sync Subscriber matrix TCs' % _added_ui)
+
     for i, tc in enumerate(suite.test_cases, 1):
         tc.sno = str(i)
         for j, step in enumerate(tc.steps, 1):
@@ -2714,6 +2795,19 @@ def _quality_gate(test_cases, feature_name, feature_id, log=print):
                 else:
                     tc.steps[_si] = TestStep(_step.step_num, _step.summary,
                         'Step completed with expected outcome — no errors')
+
+        # ── Fix: Replace generic step text with feature-specific content ──
+        for _si, _step in enumerate(tc.steps):
+            _s = _step.summary
+            # "Trigger the API operation as per scenario" → "Trigger {feature} API"
+            if 'api operation as per scenario' in _s.lower():
+                _s = re.sub(r'(?i)the API operation as per scenario',
+                            f'{feature_name} API with valid parameters', _s)
+                tc.steps[_si] = TestStep(_step.step_num, _s, _step.expected)
+            # "Step 1: Step 1:" duplicate prefix
+            if re.match(r'^Step\s+\d+:\s+Step\s+\d+:', _s):
+                _s = re.sub(r'^Step\s+\d+:\s+', '', _s)
+                tc.steps[_si] = TestStep(_step.step_num, _s, _step.expected)
 
         clean_tcs.append(tc)
 
