@@ -31,6 +31,11 @@ def get_step_chain(sc_title, sc_validation, feature_context, feature_type=''):
     if _is_inquiry(t, ctx) and not _is_ui_flow(t, ctx):
         return _inquiry_steps(sc_title, sc_validation, t)
 
+    # UI-based Sync Subscriber (via NBOP portal) — check BEFORE generic
+    # _is_ui_flow because titles contain "NBOP" which would match UI flow
+    if _is_ui_sync(t, ctx):
+        return _ui_sync_subscriber_steps(sc_title, sc_validation, t)
+
     # UI flow takes priority — prevents API templates from firing on
     # NBOP features that mention "activate", "port", "hotline" etc.
     if _is_ui_flow(t, ctx):
@@ -144,11 +149,11 @@ def _is_sync_subscriber(t, ctx):
 
 def _is_inquiry(t, ctx):
     """Detect inquiry/query features — read-only operations that return data."""
-    return any(kw in t for kw in ['inquiry', 'enquiry', 'query', 'retrieve', 'fetch',
+    return any(kw in t for kw in ['inquiry', 'enquiry', 'query subscriber', 'retrieve device',
                                    'get transaction', 'get order', 'order status',
-                                   'sim-info', 'sim info', 'line info', 'biller line',
-                                   'device details', 'device lock', 'event status',
-                                   'reconnect eligibility', 'esim status',
+                                   'sim-info', 'sim info api', 'line info api', 'biller line info',
+                                   'device lock status', 'event status check',
+                                   'reconnect eligibility', 'esim status query',
                                    'reference number'])
 
 def _is_notification(t, ctx):
@@ -161,12 +166,19 @@ def _is_kafka_event(t, ctx):
                                    'network provider', 'bi event', 'tmo indicator'])
 
 def _is_ui_flow(t, ctx):
-    # Only block UI routing for PURE API features (itmbo without nbop)
-    # Hybrid features (both nbop and nslnm in context) should still get UI steps for UI scenarios
+    # Strong UI indicators in the title — always route to UI regardless of channel
+    # These are explicit UI visibility/accessibility checks
+    _strong_ui = any(kw in t for kw in ['menu is visible', 'menu is accessible', 'menu is displayed',
+                                         'visible and accessible', 'screen load', 'page load',
+                                         'navigation to', 'navigate to', 'launch nbop',
+                                         'login to nbop', 'nbop portal'])
+    if _strong_ui:
+        return True
+    # Standard UI indicators — only route to UI if channel includes NBOP
     _has_nbop = 'nbop' in ctx
     _has_api_only = any(kw in ctx for kw in ['itmbo']) and not _has_nbop
     if _has_api_only:
-        return False  # Pure API feature — don't route to UI steps
+        return False
     return any(kw in t for kw in ['menu', 'display', 'navigation', 'screen', 'portal',
                                    'nbop', 'visible', 'click', 'dropdown'])
 
@@ -708,6 +720,65 @@ def _sync_subscriber_steps(title, validation, t):
             ('Step 5: Verify NBOP reflects synced data',
              val),
         ]
+
+
+def _is_ui_sync(t, ctx=''):
+    """Detect UI-based Sync Subscriber scenarios (trigger via NBOP portal)."""
+    return any(kw in t for kw in [
+        'sync subscriber through nbop', 'sync subscriber via nbop',
+        'sync via nbop', 'sync through nbop', 'nbop sync',
+        'sync with network', 'sync line via', 'ui verify: sync',
+        'ui: sync subscriber', 'validate sync subscriber through nbop',
+    ])
+
+
+def _ui_sync_subscriber_steps(title, validation, t=''):
+    """UI-based Sync Subscriber — trigger via NBOP portal, verify Transaction History + Century Report."""
+    val = validation or title
+
+    # Determine expected Syniverse behavior from title
+    _expects_syniverse = any(kw in t for kw in [
+        'removesubscriber', 'createsubscriber', 'swapimsi',
+        'syniverse action=remove', 'syniverse action=create',
+    ])
+    _expects_no_syniverse = any(kw in t for kw in [
+        'no action', 'not called', 'no syniverse',
+        'syniverse action=no', 'doesn\'t expose',
+    ])
+
+    steps = [
+        ('Step 1: Trigger Sync Subscriber via NBOP UI (≡ Menu → Sync Line → Sync with Network → Click Sync)',
+         'Sync triggered successfully via NBOP portal — confirmation displayed'),
+        ('Step 2: Wait 20s for backend processing, then verify Transaction History in NBOP shows Sync Line Status entry',
+         'Transaction History shows latest Sync Line Status entry with Order Status = COMPLETED'),
+        ('Step 3: Click Transaction ID in Transaction History and verify Order Status = COMPLETED',
+         'Transaction detail page shows Order Status = COMPLETED, MNO = correct carrier'),
+        ('Step 4: Download Century Report (SERVICE_GROUPING) and verify Sync Subscriber transaction logged',
+         'Century Report shows Sync Subscriber transaction with correct ROOT TRANSACTION ID'),
+    ]
+
+    if _expects_no_syniverse:
+        steps.append(
+            ('Step 5: Verify Syniverse is NOT called in Century Report — No action expected',
+             'No Syniverse outbound call in SERVICE_GROUPING. No action per contract')
+        )
+    elif _expects_syniverse:
+        steps.append(
+            ('Step 5: Verify Syniverse call in Century Report per expected action',
+             'Syniverse outbound call found in SERVICE_GROUPING with correct action')
+        )
+    else:
+        steps.append(
+            ('Step 5: Verify external system calls in Century Report per sync rules',
+             'Correct outbound calls logged per transaction type rules')
+        )
+
+    steps.append(
+        ('Step 6: Verify NBOP Line Information reflects synced status',
+         val)
+    )
+
+    return steps
 
 
 def _report_steps(title, validation):

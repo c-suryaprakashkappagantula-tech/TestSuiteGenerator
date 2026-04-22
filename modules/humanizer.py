@@ -222,8 +222,14 @@ def dedup_and_merge(test_cases, log=print, threshold=0.85):
     for i in range(len(test_cases)):
         if i in to_remove:
             continue
+        # Skip table-derived TCs — they represent distinct test matrix rows
+        if hasattr(test_cases[i], '_from_table') and test_cases[i]._from_table:
+            continue
         for j in range(i + 1, len(test_cases)):
             if j in to_remove:
+                continue
+            # Skip table-derived TCs from being merged
+            if hasattr(test_cases[j], '_from_table') and test_cases[j]._from_table:
                 continue
             sim = _step_similarity(test_cases[i], test_cases[j])
             if sim >= threshold:

@@ -1328,6 +1328,7 @@ def _mine_jira_subtasks(jira, suite, log=print):
             # Each line is a separate row
             table_headers = None
             table_items = []  # Separate list — these bypass dedup
+            table_rows_structured = []  # Structured data for step generation
             for line in desc_clean.split('\n'):
                 line = line.strip()
                 # Header row: ||col1||col2||col3||
@@ -1338,27 +1339,115 @@ def _mine_jira_subtasks(jira, suite, log=print):
                 if table_headers and line.startswith('|') and not line.startswith('||'):
                     cells = [c.strip() for c in line.strip('|').split('|') if c.strip()]
                     if len(cells) >= len(table_headers):
+                        # Store structured row
+                        row_dict = {table_headers[i]: cells[i] for i in range(len(table_headers))}
+                        table_rows_structured.append(row_dict)
                         pairs = ['%s=%s' % (table_headers[i], cells[i]) for i in range(len(table_headers))]
                         item = 'Verify %s when %s' % (feature_short, ', '.join(pairs))
                         table_items.append(item)
 
-            # Add table-derived TCs directly (bypass dedup — they're test matrix data)
-            for item in table_items:
+            # Add table-derived TCs with DYNAMIC steps from table data
+            for ti, item in enumerate(table_items):
                 clean = _clean_tc_title(item, jira.key)
                 if len(clean) < 10:
                     continue
+
+                # Build steps dynamically from the table row
+                row = table_rows_structured[ti] if ti < len(table_rows_structured) else {}
+                _dynamic_steps = []
+
+                # Detect if this is a YL/sync state change table
+                _has_status_cols = any(k.lower() in ('tmo status', 'nsl status') for k in row.keys())
+                _has_syniverse_col = any('syniverse' in k.lower() for k in row.keys())
+
+                if _has_status_cols and _has_syniverse_col:
+                    # This is a YL sync state change table — generate specific steps
+                    _tmo_status = row.get('TMO Status', row.get('tmo status', ''))
+                    _nsl_status = row.get('NSL Status', row.get('nsl status', ''))
+                    _syn_action = ''
+                    for k, v in row.items():
+                        if 'syniverse' in k.lower():
+                            _syn_action = v; break
+
+                    _dynamic_steps.append(TestStep(1,
+                        'Trigger YL Sync Subscriber API (TMO Status=%s, NSL Status=%s)' % (_tmo_status, _nsl_status),
+                        'NSL accepts sync request with 200 OK'))
+
+                    if 'no action' in _syn_action.lower():
+                        _reason = _syn_action  # e.g., "No action (TMO doesn't expose hotline status)"
+                        _dynamic_steps.append(TestStep(2,
+                            'Verify NSL processes sync — TMO=%s, NSL=%s' % (_tmo_status, _nsl_status),
+                            'NSL detects state combination and applies correct logic'))
+                        _dynamic_steps.append(TestStep(3,
+                            'Verify Syniverse is NOT called — %s' % _reason,
+                            'No Syniverse outbound call triggered. %s' % _reason))
+                        _dynamic_steps.append(TestStep(4,
+                            'Verify Century Report confirms no Syniverse interaction',
+                            'Century Report shows sync completed without Syniverse call'))
+                    elif 'create' in _syn_action.lower():
+                        _dynamic_steps.append(TestStep(2,
+                            'Verify NSL syncs line status: TMO=%s overrides NSL=%s' % (_tmo_status, _nsl_status),
+                            'NSL DB updated to match TMO status'))
+                        _dynamic_steps.append(TestStep(3,
+                            'Verify Syniverse CreateSubscriber is called',
+                            'Syniverse CreateSubscriber executed with correct IMSI, MDN, wholesale plan'))
+                        _dynamic_steps.append(TestStep(4,
+                            'Verify ITMBO and EMM are notified of the status change',
+                            'ITMBO and EMM receive notification'))
+                        _dynamic_steps.append(TestStep(5,
+                            'Verify Century Report logs CreateSubscriber call',
+                            'Century Report shows sync with Syniverse CreateSubscriber'))
+                    elif 'remove' in _syn_action.lower():
+                        _dynamic_steps.append(TestStep(2,
+                            'Verify NSL syncs line status: TMO=%s overrides NSL=%s' % (_tmo_status, _nsl_status),
+                            'NSL DB updated to match TMO status'))
+                        _dynamic_steps.append(TestStep(3,
+                            'Verify Syniverse RemoveSubscriber is called',
+                            'Syniverse RemoveSubscriber executed — subscriber removed'))
+                        _dynamic_steps.append(TestStep(4,
+                            'Verify ITMBO and EMM are notified of the status change',
+                            'ITMBO and EMM receive notification'))
+                        _dynamic_steps.append(TestStep(5,
+                            'Verify Century Report logs RemoveSubscriber call',
+                            'Century Report shows sync with Syniverse RemoveSubscriber'))
+                    elif 'change imsi' in _syn_action.lower() or 'swapimsi' in _syn_action.lower():
+                        _dynamic_steps.append(TestStep(2,
+                            'Verify NSL detects ICCID change and syncs new ICCID/IMSI',
+                            'NSL DB updated with new ICCID and IMSI'))
+                        _dynamic_steps.append(TestStep(3,
+                            'Verify Syniverse SwapIMSI is called with new IMSI',
+                            'Syniverse SwapIMSI executed. Wholesale plan unchanged'))
+                        _dynamic_steps.append(TestStep(4,
+                            'Verify Century Report logs SwapIMSI call',
+                            'Century Report shows sync with Syniverse SwapIMSI'))
+                    else:
+                        _dynamic_steps.append(TestStep(2,
+                            'Execute sync per table: %s' % _syn_action[:80],
+                            'Sync completed per Jira subtask specification'))
+                        _dynamic_steps.append(TestStep(3,
+                            'Verify outcome matches expected: %s' % _syn_action[:80],
+                            'Expected behavior confirmed per subtask table'))
+
+                    # Build precondition from table data
+                    _precon = '1.\tTMO subscriber line status = %s\n2.\tNSL line status = %s\n3.\tExpected Syniverse action: %s\n4.\tAPI endpoint accessible' % (
+                        _tmo_status, _nsl_status, _syn_action[:60])
+                else:
+                    # Non-state-change table — use generic steps
+                    _dynamic_steps = [
+                        TestStep(1, 'Set up preconditions per %s' % key, 'Preconditions met'),
+                        TestStep(2, 'Execute: %s' % clean[:120], '%s completes' % feature_short),
+                        TestStep(3, 'Verify outcome matches expected per table', 'Expected behavior confirmed'),
+                    ]
+                    _precon = '1.\tRefer to subtask %s for details\n2.\tActive TMO subscriber line' % key
+
                 tc = TestCase(
                     sno=str(next_idx),
                     summary='TC%03d_%s_%s' % (next_idx, jira.key, clean),
                     description='To validate %s. Source: subtask %s table.' % (clean.rstrip('.'), key),
-                    preconditions='1.\tRefer to subtask %s for details\n2.\tActive TMO subscriber line' % key,
+                    preconditions=_precon,
                     story_linkage=jira.key, label=jira.key, category='Happy Path',
-                    steps=[
-                        TestStep(1, 'Set up preconditions per %s' % key, 'Preconditions met'),
-                        TestStep(2, 'Execute: %s' % clean[:120], '%s completes' % feature_short),
-                        TestStep(3, 'Verify outcome matches expected per table' , 'Expected behavior confirmed'),
-                    ])
-                tc._from_table = True  # Tag for dedup bypass
+                    steps=_dynamic_steps)
+                tc._from_table = True
                 new_tcs.append(tc)
                 next_idx += 1
                 log('[ENGINE]   Table TC from %s: %s' % (key, clean[:60]))

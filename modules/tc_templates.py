@@ -306,6 +306,23 @@ def build_steps(fc: FeatureClassification, feature_name: str,
     #  API STEPS (default)
     # ═══════════════════════════════════════════
     else:
+        # Check if scenario title says "through NBOP" or "via NBOP" — use UI steps
+        _sc_lower = scenario_title.lower()
+        _is_nbop_scenario = any(kw in _sc_lower for kw in ['through nbop', 'via nbop', 'in nbop',
+                                                             'nbop portal', 'nbop ui'])
+        if _is_nbop_scenario:
+            nav = fc.nbop_nav_path or 'NBOP → Mobile Service Management'
+            return [
+                ('Launch NBOP portal and search subscriber by MDN',
+                 'Subscriber profile loaded with all sections'),
+                ('Navigate to %s' % nav,
+                 'Target screen/section loads correctly'),
+                ('Perform %s operation via NBOP as per scenario' % feature_name,
+                 'Operation completed successfully through NBOP portal'),
+                ('Verify subscriber profile reflects the operation result',
+                 'All affected fields show correct post-operation values'),
+            ]
+
         # Check if this is an inquiry feature — use inquiry-specific steps
         _is_inquiry_feature = any(kw in (feature_name + ' ' + scenario_title).lower()
                                   for kw in ['inquiry', 'enquiry', 'query', 'retrieve',
