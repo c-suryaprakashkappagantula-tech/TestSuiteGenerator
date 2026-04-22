@@ -47,17 +47,27 @@ def classify_feature(feature_name: str, description: str = '', channel: str = ''
         ('[nbop' in ctx.split('\n')[0] if ctx else False) or
         ('nbop' in ctx and any(kw in ctx for kw in ['screen', 'menu', 'navigation', 'display']))
     )
-    # OVERRIDE: Pure UI inquiry features — even if they have NSLNM tags,
-    # these are read-only NBOP screens, not API triggers
+    # OVERRIDE: When NBOP is listed FIRST in component tags [NBOP, ...],
+    # it's the primary component — treat as pure UI regardless of other tags.
+    # Also covers features with [NBOP, INTG], [NBOP, NSLNM, INTG], etc.
+    _comp_str = (jira_summary + ' ' + scope).lower()
+    _nbop_is_first_component = bool(re.search(r'\[nbop[,\s]', _comp_str))
+    if _nbop_is_first_component:
+        nbop_primary = True
+        has_api_tags = False  # Force pure UI
+    # OVERRIDE: Pure UI inquiry/action features — even if they have NSLNM tags
     _is_pure_ui_inquiry = any(kw in ctx for kw in [
         'query esim status', 'query esim', 'esim status query',
         'validate portin eligibility', 'portin eligibility',
         'retrieve device details', 'device lock status',
         'line summary', 'account summary', 'order history',
+        'change bcd', 'change dpfo', 'dpfo reset day', 'bill cycle',
+        'usage inquiry', 'inquiry usage', 'get transaction status',
+        'retrigger transaction', 'remove hotline',
     ])
     if _is_pure_ui_inquiry and 'nbop' in ctx:
         nbop_primary = True
-        has_api_tags = False  # Force pure UI classification
+        has_api_tags = False
     # HYBRID: has both NBOP and API tags (NSLNM, NENM, NE)
     if nbop_primary and has_api_tags:
         result.feature_type = 'hybrid'
