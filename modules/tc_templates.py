@@ -12,6 +12,7 @@ Based on analysis of 2,107 manual TCs from PI-49/50/51.
 
 from typing import List, Tuple, Optional
 from dataclasses import dataclass, field
+import re
 
 
 @dataclass
