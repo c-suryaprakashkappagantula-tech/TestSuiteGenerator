@@ -285,7 +285,7 @@ def _build_summary_sheet(wb, suite: TestSuite):
         total_steps = 0
         for tc in suite.test_cases:
             import re as _re3
-            short_name = _re3.sub(r'^TC\d+_%s\s*-\s*' % suite.feature_id, '', tc.summary)
+            short_name = _re3.sub(r'^TC\d+[_\s-]+' + _re3.escape(suite.feature_id) + r'[_\s-]*', '', tc.summary)
             cat_color = CAT_COLORS.get(tc.category, 'FFFFFF')
             ws.cell(row=r, column=1, value=f'TC{tc.sno.zfill(2)}').font = _nf
             ws.cell(row=r, column=1).alignment = _center; ws.cell(row=r, column=1).border = _bdr

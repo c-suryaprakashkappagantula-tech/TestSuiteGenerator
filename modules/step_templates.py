@@ -7,9 +7,31 @@ import re
 
 
 def get_step_chain(sc_title, sc_validation, feature_context, feature_type=''):
-    """Return list of (step_summary, expected_result) tuples based on scenario type."""
+    """Return list of (step_summary, expected_result) tuples based on scenario type.
+
+    When feature_type='ui_portal', ALL scenarios route to UI step templates.
+    This prevents API steps (OAuth, Century Report, APOLLO_NE) from leaking
+    into pure NBOP UI features like Change BCD, Remove Hotline, etc.
+    """
     t = (sc_title + ' ' + (sc_validation or '')).lower()
     ctx = feature_context.lower()
+
+    # ════════════════════════════════════════════════════════════════
+    # GATE: ui_portal features ALWAYS get UI steps — no exceptions.
+    # The classification in tc_templates.classify_feature() is the
+    # single source of truth.  When it says ui_portal, we obey.
+    # ════════════════════════════════════════════════════════════════
+    if feature_type == 'ui_portal':
+        if _is_negative(t):
+            return _ui_negative_steps(sc_title, sc_validation)
+        # UI-based Sync Subscriber (via NBOP portal)
+        if _is_ui_sync(t, ctx):
+            return _ui_sync_subscriber_steps(sc_title, sc_validation, t)
+        # UI-based Network Reset (via NBOP portal)
+        if _is_ui_network_reset(t, ctx):
+            return _ui_network_reset_steps(sc_title, sc_validation, t)
+        # All other ui_portal scenarios → UI flow steps
+        return _ui_flow_steps(sc_title, sc_validation)
 
     # If feature is CDR/notification type, route to notification steps by default
     if feature_type in ('notification',):
@@ -17,8 +39,11 @@ def get_step_chain(sc_title, sc_validation, feature_context, feature_type=''):
             return _negative_steps(sc_title, sc_validation, t)
         return _notification_steps(sc_title, sc_validation)
 
-    # Check negative/error FIRST
+    # Check negative/error FIRST — but Sync Key Info negatives get their own handler
     if _is_negative(t):
+        # Sync Key Info error scenarios should use Sync Key Info steps, not generic negative
+        if _is_sync_key_info(t, ctx):
+            return _sync_key_info_steps(sc_title, sc_validation, t)
         if _is_ui_flow(t, ctx):
             return _ui_negative_steps(sc_title, sc_validation)
         return _negative_steps(sc_title, sc_validation, t)
@@ -50,6 +75,11 @@ def get_step_chain(sc_title, sc_validation, feature_context, feature_type=''):
     # contain "activate" which would match activation template
     if _is_kafka_event(t, ctx):
         return _kafka_event_steps(sc_title, sc_validation)
+
+    # Sync Key Info — must check BEFORE Sync Subscriber because both contain "sync"
+    # Sync Key Info is about account/key data sync (externalAccountNumber, MBO, NE, EMM, CM)
+    if _is_sync_key_info(t, ctx):
+        return _sync_key_info_steps(sc_title, sc_validation, t)
 
     # Sync Subscriber — must check BEFORE activation/deactivation/hotline/syniverse
     # because sync scenarios mention state changes that would match those templates
@@ -148,12 +178,26 @@ def _is_report(t, ctx):
     return any(kw in t for kw in ['report', 'column', 'csv', 'differential', 'batch', '.gz'])
 
 def _is_sync_subscriber(t, ctx):
-    """Detect Sync Subscriber (YL/YD/YM/YP/PL) scenarios."""
+    """Detect Sync Subscriber (YL/YD/YM/YP/PL) scenarios — NOT Sync Key Info."""
     return any(kw in t for kw in ['sync subscriber', 'sync sub', 'yl sync', 'yd sync',
                                    'ym sync', 'yp sync', 'pl sync', 'sync line',
-                                   'sync with network', 'sync key']) or \
+                                   'sync with network']) or \
            (('yl ' in t or 'yd ' in t or 'ym ' in t or 'yp ' in t or 'pl ' in t) and
             'sync' in (t + ' ' + ctx))
+
+def _is_sync_key_info(t, ctx):
+    """Detect Sync Key Info (YK) scenarios — account/key data sync, NOT state change."""
+    # Check in title+validation text
+    in_text = any(kw in t for kw in ['sync key info', 'sync key', 'yk sync', 'yk_sync',
+                                      'sync_key_info', 'key info', 'key_info',
+                                      'externalaccountnumber', 'external account',
+                                      'accountnumber', 'account update',
+                                      'account creation', 'account number',
+                                      'get line details', 'mbo retrieve'])
+    # Also check if the feature context is Sync Key Info (covers error scenarios
+    # where the title only mentions ERR codes, not the API name)
+    in_ctx = any(kw in ctx for kw in ['sync key', 'key info', '4019', 'yk sync', 'yk_sync'])
+    return in_text or in_ctx
 
 def _is_network_reset(t, ctx):
     """Detect Network Reset scenarios (API-based)."""
@@ -341,7 +385,7 @@ def _change_sim_steps(title, validation, t):
 
 
 def _change_bcd_steps(title, validation, t):
-    """Change BCD: V6 pipeline + sample 3948 (9 steps)."""
+    """Change BCD: V7 pipeline + sample 3948 (11 steps)."""
     val = validation or title
     return [
         ('Step 1: Obtain OAuth Token',
@@ -350,11 +394,13 @@ def _change_bcd_steps(title, validation, t):
          'NSL accepts and processes Change BCD with Response 200'),
         ('Step 3: Verify NSL fetches line/feature information from DB',
          'Correct DB details retrieved and outbound request prepared'),
-        ('Step 4: Verify NSL updates BCD for applicable features',
-         'Updated BCD sent for eligible features only'),
+        ('Step 4: Verify NSL updates BCD for ALL applicable features',
+         'Updated BCD sent for every eligible feature — not just the first'),
         ('Step 5: Download Century Report (Service Grouping)',
          'SERVICE_GROUPING HTML downloaded'),
-        ('Step 5b: Verify NE Portal transactions',
+        ('Step 5b: In Century Report, verify ALL features listed have the new BCD date',
+         'Every feature entry shows updated BCD date — no feature retains the old date'),
+        ('Step 5c: Verify NE Portal transactions',
          'NE Portal shows Change BCD transaction completed'),
         ('Step 6: Verify downstream updates complete (NSL DB, Mediation, IT-MBO)',
          'NSL DB, Mediation, IT-MBO updated with new BCD'),
@@ -746,6 +792,122 @@ def _sync_subscriber_steps(title, validation, t):
         ]
 
 
+def _sync_key_info_steps(title, validation, t):
+    """Sync Key Info (YK): account key data sync — externalAccountNumber, MBO, NE, EMM, CM.
+    Based on manual QMetry test patterns for MWTGPROV-4019."""
+    val = validation or title
+    t_low = t.lower()
+
+    # Negative: error scenarios (ERR20, ERR162, ERR165, etc.)
+    if any(kw in t_low for kw in ['err20', 'err162', 'err165', 'not found',
+                                    'deactive', 'deactivated', 'invalid',
+                                    'does not exist', 'not match']):
+        # Extract the specific error code if present
+        import re
+        err_match = re.search(r'(ERR\d+)', t, re.IGNORECASE)
+        err_code = err_match.group(1).upper() if err_match else 'appropriate error'
+
+        # Build scenario-specific trigger step to survive dedup
+        if 'err20' in t_low or ('not found' in t_low and 'iccid' not in t_low):
+            trigger = 'Step 1: Trigger the Sync Key Info API with MDN that does NOT exist in NSL DB'
+            trigger_exp = 'Sync Key Info API request sent with non-existent MDN'
+            verify = 'Step 2: Validate NSL returns ERR20 - MDN not found'
+            verify_exp = 'ERR20 returned: MDN not found in NSL DB'
+        elif 'err162' in t_low or 'deactiv' in t_low or 'not in active' in t_low:
+            trigger = 'Step 1: Trigger the Sync Key Info API with a Deactivated MDN'
+            trigger_exp = 'Sync Key Info API request sent with deactivated MDN'
+            verify = 'Step 2: Validate NSL returns ERR162 - MDN is not in active status'
+            verify_exp = 'ERR162 returned: MDN is not in active status'
+        elif 'err165' in t_low or 'does not exist' in t_low or 'not match' in t_low or 'combination' in t_low:
+            trigger = 'Step 1: Trigger the Sync Key Info API with MDN where ICCID/MDN combination does not match'
+            trigger_exp = 'Sync Key Info API request sent with mismatched MDN/ICCID'
+            verify = 'Step 2: Validate NSL returns ERR165 - MDN and ICCID combination does not exist'
+            verify_exp = 'ERR165 returned: MDN and ICCID combination does not exist'
+        else:
+            trigger = 'Step 1: Trigger the Sync Key Info API with the MDN per error scenario'
+            trigger_exp = 'Sync Key Info API request sent'
+            verify = 'Step 2: Validate NSL returns %s with descriptive error message' % err_code
+            verify_exp = '%s should be returned: %s' % (err_code, val[:150])
+
+        return [
+            (trigger, trigger_exp),
+            (verify, verify_exp),
+            ('Step 3: Verify no data corruption — line state and account data unchanged',
+             'NSL DB unchanged. No outbound calls to NE, EMM, or CM'),
+        ]
+
+    # Happy path: IB request WITH externalAccountNumber that MATCHES NSL DB (no-op)
+    if ('match' in t_low and 'not' not in t_low) or 'no-op' in t_low or 'suc00' in t_low:
+        return [
+            ('Step 1: Trigger the Sync Key Info API with CORRECT externalAccountNumber and externalAccountStatus for the MDN',
+             'Sync Key Info API should get triggered successfully'),
+            ('Step 2: Validate that the "Sync Key Info" and "Get Line Details" call is happened in the backend',
+             'The "Get Line Details" call should NOT be triggered (data already matches)'),
+            ('Step 3: Validate that NSL does NOT update the accountNumber and no calls triggered to NE, EMM and CM',
+             'No unnecessary account change; response code is SUC00; downstream systems remain consistent'),
+        ]
+
+    # Happy path: IB request WITH DIFFERENT externalAccountNumber (update without MBO)
+    if 'diff' in t_low and 'externalaccount' in t_low:
+        return [
+            ('Step 1: Trigger the Sync Key Info API with DIFFERENT externalAccountNumber and externalAccountStatus for the MDN',
+             'Sync Key Info API should get triggered successfully'),
+            ('Step 2: Validate that the "Sync Key Info" and "Get Line Details" call is happened in the backend',
+             'The "Get Line Details" call should NOT be triggered (externalAccountNumber provided)'),
+            ('Step 3: Validate that NSL updates the accountNumber as needed without calling MBO, then calls NE Update Label and updates EMM and CM',
+             'NSL should update the accountNumber, acct_id, elineid and mark the transaction status as "COMPLETED" in transaction history'),
+        ]
+
+    # Happy path: IB request WITHOUT externalAccountNumber, NSL DB HAS account (MBO call needed)
+    if ('without' in t_low or 'does not contain' in t_low or 'not contain' in t_low) and 'exist' in t_low:
+        return [
+            ('Step 1: Trigger the Sync Key Info API without externalAccountNumber and externalAccountStatus for the MDN',
+             'Sync Key Info API should get triggered successfully'),
+            ('Step 2: Validate that the "Sync Key Info" and "Get Line Details" call is happened in the backend',
+             'The "Sync Key Info" and "Get Line Details" call should get triggered and mark the transaction status as "IN-PROGRESS"'),
+            ('Step 3: Validate that NSL updates the accountNumber as needed, then calls NE Update Label and updates EMM and CM with the account data',
+             'NSL should update the accountNumber, acct_id, elineid and mark the transaction status as "COMPLETED" in transaction history'),
+        ]
+
+    # Happy path: IB request WITHOUT externalAccountNumber, NSL DB does NOT have account (create new)
+    if ('without' in t_low or 'does not contain' in t_low or 'not contain' in t_low) and ('not have' in t_low or 'no existing' in t_low or 'does not' in t_low):
+        return [
+            ('Step 1: Trigger the Sync Key Info API without externalAccountNumber and externalAccountStatus for the MDN',
+             'Sync Key Info API should get triggered successfully'),
+            ('Step 2: Validate that the "Sync Key Info" and "Get Line Details" call is happened in the backend',
+             'The "Sync Key Info" and "Get Line Details" call should get triggered and mark the transaction status as "IN-PROGRESS"'),
+            ('Step 3: Validate that NSL creates a new account number and the line is linked',
+             'The new account number should be created and the line should be linked'),
+            ('Step 4: Validate that NSL updates the accountNumber as needed, then calls NE Update Label and updates EMM and CM',
+             'NSL should update the accountNumber, acct_id, elineid and mark the transaction status as "COMPLETED" in transaction history'),
+        ]
+
+    # Happy path: IB request with externalAccountNumber NOT in NSL DB (create new)
+    if 'not in nsl' in t_low or 'not_in_nsl' in t_low:
+        return [
+            ('Step 1: Trigger the Sync Key Info API with externalAccountNumber and externalAccountStatus for the MDN',
+             'Sync Key Info API should get triggered successfully'),
+            ('Step 2: Validate that the "Sync Key Info" and "Get Line Details" call is happened in the backend',
+             'The "Get Line Details" call should NOT be triggered (externalAccountNumber provided)'),
+            ('Step 3: Validate that NSL creates a new account number and the line is linked',
+             'The new account number should be created and the line should be linked'),
+            ('Step 4: Validate that NSL updates the accountNumber as needed, then calls NE Update Label and updates EMM and CM',
+             'NSL should update the accountNumber, acct_id, elineid and mark the transaction status as "COMPLETED" in transaction history'),
+        ]
+
+    # Generic Sync Key Info happy path (fallback)
+    return [
+        ('Step 1: Trigger the Sync Key Info API with valid MDN, LineId, and account parameters',
+         'Sync Key Info API should get triggered successfully'),
+        ('Step 2: Validate backend calls: "Sync Key Info" and "Get Line Details" processing',
+         'Backend calls executed per business rules. Transaction status updated to "IN-PROGRESS"'),
+        ('Step 3: Validate NSL updates accountNumber, acct_id, elineid and calls NE, EMM, CM as needed',
+         'NSL should update account data and mark the transaction status as "COMPLETED" in transaction history'),
+        ('Step 4: Verify Century Report shows Sync Key Info transaction with all backend calls logged',
+         val[:200] if val else 'Sync Key Info completed successfully with correct account data'),
+    ]
+
+
 def _is_ui_sync(t, ctx=''):
     """Detect UI-based Sync Subscriber scenarios (trigger via NBOP portal)."""
     return any(kw in t for kw in [
@@ -991,18 +1153,22 @@ def _ui_flow_steps(title, validation):
                 return steps
     except Exception:
         pass
-    # Fallback if knowledge base not available
+    # Fallback if knowledge base not available — use feature name for specificity
+    import re as _re_ui
+    _action = _re_ui.sub(r'^(?:Validate|Verify|Check|Ensure|UI Verify\s*[-:]?\s*)', '', title, flags=_re_ui.IGNORECASE).strip()
+    _action = _re_ui.sub(r'New\s+MVNO\s*[-:—]\s*', '', _action, flags=_re_ui.IGNORECASE).strip()
+    _action = _action[:80] if _action else 'the feature'
     return [
-        ('Launch NBOP portal and navigate to the relevant menu/screen',
-         'NBOP screen loads successfully with all expected fields'),
-        ('Perform the UI action as per scenario: %s' % val[:100],
-         'Operation submitted successfully via NBOP portal'),
-        ('Confirm on NSL and TMO the operation is reflected correctly',
-         'NSL and TMO show updated state matching the UI action'),
-        ('Validate in TMO Genesis portal that changes are visible',
-         'Genesis portal reflects the correct updated values'),
-        ('Validate NBOP MIG tables and Line table',
-         'All NBOP tables (MIG_DEVICE, MIG_SIM, MIG_LINE, TRANSACTION_HISTORY) updated correctly'),
+        ('Launch NBOP portal and search subscriber by MDN',
+         'Subscriber profile loaded with header cards showing Account, MDN, IMEI, ICCID'),
+        ('Navigate to the menu for: %s' % _action[:70],
+         'Screen loads with all expected fields and controls'),
+        ('Perform %s via NBOP portal' % _action[:70],
+         'Operation submitted successfully — confirmation displayed'),
+        ('Verify subscriber profile reflects the change',
+         'All affected fields show correct post-operation values'),
+        ('Navigate to Transaction History and verify entry logged',
+         'Transaction History shows entry with correct timestamp, type, and SUCC status'),
     ]
 
 
@@ -1018,29 +1184,37 @@ def _ui_negative_steps(title, validation):
     except Exception:
         pass
     # Fallback
+    import re as _re_uin
+    _action = _re_uin.sub(r'^(?:Negative\s*[-:]?\s*|Validate|Verify|Check)\s*', '', title, flags=_re_uin.IGNORECASE).strip()
+    _action = _re_uin.sub(r'New\s+MVNO\s*[-:—]\s*', '', _action, flags=_re_uin.IGNORECASE).strip()
+    _action = _action[:70] if _action else 'the operation'
     return [
-        ('Launch NBOP portal and navigate to the relevant menu/screen',
-         'NBOP screen loads successfully'),
-        ('Perform the negative/invalid action as per scenario: %s' % val[:100],
+        ('Launch NBOP portal and search subscriber by MDN',
+         'Subscriber profile loaded'),
+        ('Navigate to the menu for: %s' % _action,
+         'Screen loads'),
+        ('Enter invalid/malformed data and attempt: %s' % _action,
          'NBOP displays appropriate error message to the user'),
-        ('Verify no changes were made in NSL or TMO',
-         'System state unchanged — no partial updates'),
-        ('Verify NBOP MIG tables and Line table remain unchanged',
-         'No data corruption — tables reflect pre-operation state'),
+        ('Verify no changes were made to subscriber data in NSL',
+         'System state unchanged — no partial updates. Line table unmodified'),
     ]
 
 
 def _api_flow_steps(title, validation):
     """API flow: from samples 4109, 4110."""
     val = validation or title
+    import re as _re_api
+    _action = _re_api.sub(r'^(?:Validate|Verify|Check|Ensure|Step\s*\d+\s*[-:]?\s*)', '', title, flags=_re_api.IGNORECASE).strip()
+    _action = _re_api.sub(r'New\s+MVNO\s*[-:—]\s*', '', _action, flags=_re_api.IGNORECASE).strip()
+    _action = _action[:80] if _action else 'the API operation'
     return [
-        ('Trigger the API with valid parameters as per scenario',
+        ('Trigger API: %s with valid parameters' % _action[:70],
          'NSL receives the request and begins processing'),
         ('Validate NSL sends outbound call to downstream system',
          'Downstream system receives request and responds'),
         ('Validate NSL processes response and prepares output',
          'NSL correctly processes downstream response'),
-        ('Validate NSL sends final response to requesting system',
+        ('Validate NSL sends final response with correct status',
          val),
         ('Validate Century Report for all backend calls',
          'All backend calls displayed correctly in Century Report'),
@@ -1050,11 +1224,15 @@ def _api_flow_steps(title, validation):
 def _negative_steps(title, validation, t):
     """Negative: specific error handling based on error type."""
     val = validation or title
+    # Extract a short action name from the title for step specificity
+    import re as _re
+    _action = _re.sub(r'^(?:Negative|Verify|Validate|Check|Ensure)\s*[-:]\s*', '', title, flags=_re.IGNORECASE).strip()
+    _action = _action[:80] if _action else 'the operation'
     steps = [
-        ('Prepare the request with invalid/error condition as per scenario',
-         'Invalid request prepared'),
-        ('Submit the request to the system',
-         'System receives and processes the request'),
+        ('Prepare request with invalid/error data to trigger: %s' % _action[:70],
+         'Invalid request prepared with error condition'),
+        ('Send API request to NSL',
+         'NSL receives and processes the request'),
     ]
     # Add specific error verification based on type
     if 'http 400' in t or 'schema' in t or 'invalid' in t:
@@ -1075,21 +1253,44 @@ def _negative_steps(title, validation, t):
 
 
 def _rollback_steps(title, validation, t):
-    """Rollback: specific restore verification."""
+    """Rollback: feature-specific restore verification."""
     val = validation or title
+    import re as _re_rb
+    _action = _re_rb.sub(r'^(?:Validate|Verify|Negative\s*[-:]?\s*)', '', title, flags=_re_rb.IGNORECASE).strip()
+    _action = _re_rb.sub(r'New\s+MVNO\s*[-:—]\s*', '', _action, flags=_re_rb.IGNORECASE).strip()
+    _action = _action[:70] if _action else 'the operation'
+
+    # Determine what gets rolled back based on feature context
+    if 'swap' in t:
+        restore_item = 'original ICCID/IMEI associations'
+    elif 'bcd' in t or 'dpfo' in t or 'bill cycle' in t:
+        restore_item = 'original BCD/DPFO reset day value'
+    elif 'rateplan' in t or 'rate plan' in t or 'feature' in t:
+        restore_item = 'original rate plan and feature assignments'
+    elif 'hotline' in t:
+        restore_item = 'original line status (pre-Hotline state)'
+    elif 'port' in t:
+        restore_item = 'original MDN and port status'
+    elif 'activate' in t or 'deactivat' in t:
+        restore_item = 'original line activation status'
+    elif 'sync' in t:
+        restore_item = 'original subscriber/account data'
+    elif 'account' in t:
+        restore_item = 'original account number and line association'
+    else:
+        restore_item = 'original subscriber state and data'
+
     return [
-        ('Execute the operation that triggers failure condition',
-         'Operation fails at the expected point'),
-        ('Verify rollback process is triggered automatically',
-         'Rollback initiated for all completed steps'),
-        ('Verify original ICCID/IMEI associations are restored',
-         'Original device and SIM associations restored'),
-        ('Verify MBO is notified of rollback',
-         'MBO receives rollback notification'),
-        ('Verify transaction history reflects rollback',
+        ('Trigger %s and simulate mid-operation failure' % _action[:60],
+         'Operation fails at the expected point during processing'),
+        ('Verify NSL initiates rollback automatically',
+         'Rollback triggered for all completed steps'),
+        ('Verify %s are restored' % restore_item,
+         '%s restored to pre-operation values' % restore_item.capitalize()),
+        ('Verify MBO and downstream systems notified of rollback',
+         'MBO receives rollback notification. No partial state in downstream systems'),
+        ('Verify Transaction History reflects rollback with correct status',
          val),
-        ('Verify both lines return to pre-operation state',
-         'Lines return to original state. No partial changes remain.'),
     ]
 
 
@@ -1103,10 +1304,13 @@ def _default_workflow_steps(title, validation):
         from .integration_contract import resolve_operation
         _contract = resolve_operation(title)
         if _contract:
+            import re as _re3
+            _action = _re3.sub(r'^(?:Validate|Verify|Check|Ensure|Step\s*\d+\s*[-:]?\s*)', '', title, flags=_re3.IGNORECASE).strip()
+            _action = _action[:70] if _action else 'the operation'
             steps = [
                 ('Step 1: Obtain OAuth Token',
                  'OAuth token generated successfully'),
-                ('Step 2: Execute the operation/API call as per scenario',
+                ('Step 2: Trigger API: %s' % _action,
                  'NSL processes request with 200 OK. Transaction ID generated'),
             ]
             step_num = 3
@@ -1146,16 +1350,20 @@ def _default_workflow_steps(title, validation):
         pass
 
     # Fallback: standard workflow without contract
+    # Extract feature action from title for step specificity
+    import re as _re2
+    _action = _re2.sub(r'^(?:Validate|Verify|Check|Ensure|Step\s*\d+\s*[-:]?\s*)', '', title, flags=_re2.IGNORECASE).strip()
+    _action = _action[:80] if _action else 'the operation'
     return [
         ('Step 1: Obtain OAuth Token',
          'OAuth token generated successfully'),
-        ('Step 2: Execute the operation/API call as per scenario',
+        ('Step 2: Trigger API: %s' % _action[:70],
          'NSL processes request with 200 OK. Transaction ID generated'),
         ('Step 3: Download Century Report (Service Grouping)',
          'SERVICE_GROUPING HTML downloaded'),
         ('Step 3b: Verify NE Portal transactions',
          'NE Portal shows transaction completed'),
-        ('Step 4: Validate Service Grouping',
+        ('Step 4: Validate Service Grouping for: %s' % _action[:60],
          val),
         ('Check audit logs (TRANSACTION_HISTORY & LINE_HISTORY)',
          'Transaction recorded correctly'),

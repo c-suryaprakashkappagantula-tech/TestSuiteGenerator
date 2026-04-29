@@ -122,37 +122,8 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print):
         suite.scope = chalk.scope
         suite.rules = chalk.rules
 
-    log('[ENGINE] Step 3: Building test cases from Chalk...')
-    if chalk and chalk.scenarios:
-        for i, sc in enumerate(chalk.scenarios, 1):
-            tc = _chalk_scenario_to_tc(sc, i, jira.key, jira.channel)
-            suite.test_cases.append(tc)
-        log('[ENGINE]   Built %d TCs from Chalk' % len(suite.test_cases))
-
-        # Fix 4: ALSO mine AC text as supplementary source even when Chalk exists
-        # AC often has business rules (PL/YL/YD/YP, Syniverse actions) that Chalk doesn't cover
-        if jira.acceptance_criteria and len(jira.acceptance_criteria) > 50:
-            log('[ENGINE]   Also mining AC text for supplementary scenarios...')
-            ac_tcs = _build_from_jira_only(jira, feature_short)
-            if ac_tcs:
-                ac_tcs = _deduplicate_tcs(suite.test_cases, ac_tcs, log)
-                if ac_tcs:
-                    suite.test_cases.extend(ac_tcs)
-                    log('[ENGINE]   Added %d supplementary TCs from AC text' % len(ac_tcs))
-    else:
-        log('[ENGINE]   [WARN] No Chalk scenarios -- building from Jira description')
-        suite.test_cases = _build_from_jira_only(jira, feature_short)
-        suite.warnings.append('No Chalk data available -- TCs built from Jira description only')
-
-    log('[ENGINE] Step 4: Cross-checking with attachments...')
-    if parsed_docs and options.get('include_attachments', True):
-        gaps = _cross_check_attachments(suite, parsed_docs, jira.key, log)
-        if gaps:
-            log('[ENGINE]   Found %d gap TCs from attachments' % len(gaps))
-            suite.test_cases.extend(gaps)
-
     # Classify feature ONCE — single source of truth for the entire pipeline
-    # Moved BEFORE negative generation so all downstream steps can use it
+    # Moved BEFORE TC building so step templates can use the classification
     from .tc_templates import classify_feature
     _fc = classify_feature(
         feature_name=feature_short,
@@ -164,6 +135,193 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print):
     log('[ENGINE]   Feature classification: %s (ui=%s, api=%s, notif=%s)' % (
         _fc.feature_type, _fc.is_ui, _fc.is_api, _fc.is_notification))
 
+    log('[ENGINE] Step 3: Building test cases from Chalk...')
+    log('[ENGINE] ═══════════════════════════════════════════════════')
+    if chalk and chalk.scenarios:
+        _rejected_chalk = 0
+        for i, sc in enumerate(chalk.scenarios, 1):
+            # ── Quality gate: reject junk Chalk scenarios ──
+            # Section headers, Jira ID references, linked feature refs
+            _sc_title = (sc.title or '').strip()
+            _sc_lower = _sc_title.lower()
+            _is_junk = (
+                # Pure Jira ID reference (e.g., "MWTGPROV-3948")
+                bool(re.match(r'^[A-Z]+-\d+$', _sc_title.strip())) or
+                # Section header ending with colon (e.g., "NBOP Implementation:")
+                (_sc_title.endswith(':') and len(_sc_title) < 40) or
+                # Linked feature reference (e.g., "Linked Feature in PI-51:")
+                'linked feature' in _sc_lower or
+                # Too short to be a real scenario (< 10 chars)
+                len(_sc_title) < 10 or
+                # Just the feature ID repeated
+                _sc_lower.strip(':').strip() == jira.key.lower()
+            )
+            if _is_junk:
+                _rejected_chalk += 1
+                log('[ENGINE]   [REJECT] Chalk SC%d: "%s" (junk scenario)' % (i, _sc_title[:50]))
+                continue
+            tc = _chalk_scenario_to_tc(sc, i, jira.key, jira.channel,
+                                       feature_type=_fc.feature_type)
+            suite.test_cases.append(tc)
+        log('[ENGINE]   Built %d TCs from Chalk (%d rejected as junk)' % (
+            len(suite.test_cases), _rejected_chalk))
+        log('[ENGINE]   Chalk TC pipeline: %d scenarios → %d rejected → %d TCs built' % (
+            len(chalk.scenarios), _rejected_chalk, len(suite.test_cases)))
+
+        # ── Within-Chalk dedup: remove duplicates among Chalk-generated TCs ──
+        # Three-pass: 1) exact summary match, 2) step-content overlap (>65%),
+        # 3) subset detection (TC with fewer steps is a subset of a larger TC)
+        if len(suite.test_cases) > 1:
+            _before_dedup = len(suite.test_cases)
+            _seen_norms = set()
+            _seen_step_sigs = []  # list of step_signature_sets
+            _deduped = []
+
+            def _normalize_step(text):
+                """Aggressively normalize step text for comparison.
+                Maps synonyms so 'Century Report' == 'transaction records',
+                'NSL' == 'system', etc."""
+                s = re.sub(r'\s+', ' ', text).strip().lower()[:100]
+                # Normalize common synonyms
+                s = s.replace('century report', 'transaction report')
+                s = s.replace('transaction records', 'transaction report')
+                s = s.replace('nsl db', 'subscriber data')
+                s = s.replace('nsl fetches', 'system fetches')
+                s = s.replace('nsl ', 'system ')
+                s = s.replace('system db', 'subscriber data')
+                s = s.replace('→', '-').replace('—', '-')
+                s = s.replace(' - ', ' ').replace('- ', ' ').replace(' -', ' ')
+                # Strip step numbering
+                s = re.sub(r'^step\s*\d+[:\.\s]*', '', s)
+                # Truncate to first 70 chars for comparison (avoids tail differences)
+                s = re.sub(r'\s+', ' ', s).strip()[:70]
+                return s
+
+            def _step_sig(tc):
+                return frozenset(
+                    _normalize_step(s.summary)
+                    for s in (tc.steps or []) if s.summary and len(s.summary.strip()) > 5
+                )
+
+            for tc in suite.test_cases:
+                _norm = re.sub(r'^TC\d+_[A-Z][A-Z0-9]+-\d+[_ -]*', '', tc.summary).strip()
+                _norm = re.sub(r'\s+', ' ', _norm).lower().strip()
+                _tc_steps = _step_sig(tc)
+
+                # Pass 1: exact normalized summary match — check if steps also match
+                if _norm in _seen_norms:
+                    _is_step_dup = False
+                    for _existing_sig in _seen_step_sigs:
+                        if not _tc_steps or not _existing_sig:
+                            continue
+                        _overlap = len(_tc_steps & _existing_sig) / max(len(_tc_steps), len(_existing_sig), 1)
+                        if _overlap > 0.65:
+                            _is_step_dup = True
+                            break
+                    if _is_step_dup:
+                        log('[ENGINE]   [DEDUP] Chalk duplicate (summary+steps): "%s"' % tc.summary[:50])
+                        continue
+                    log('[ENGINE]     ↳ Kept: steps differ from existing TC with same summary')
+
+                # Pass 2: step-content overlap (>65%) — catches near-identical TCs
+                _is_step_dup = False
+                if len(_tc_steps) >= 3:
+                    for _existing_sig in _seen_step_sigs:
+                        if not _existing_sig:
+                            continue
+                        _overlap = len(_tc_steps & _existing_sig) / max(len(_tc_steps), len(_existing_sig), 1)
+                        if _overlap > 0.65:
+                            _is_step_dup = True
+                            log('[ENGINE]   [DEDUP] Chalk duplicate (%.0f%% step overlap): "%s"' % (_overlap * 100, tc.summary[:50]))
+                            break
+                if _is_step_dup:
+                    continue
+
+                # Pass 3: subset detection — if this TC's steps are a subset of an existing TC
+                if len(_tc_steps) >= 2 and len(_tc_steps) <= 5:
+                    _is_subset = False
+                    for _existing_sig in _seen_step_sigs:
+                        if not _existing_sig or len(_existing_sig) <= len(_tc_steps):
+                            continue
+                        # Check if all of this TC's steps appear in the larger TC
+                        _contained = len(_tc_steps & _existing_sig)
+                        if _contained >= len(_tc_steps) * 0.8:
+                            _is_subset = True
+                            log('[ENGINE]   [DEDUP] Chalk subset (%d/%d steps in larger TC): "%s"' % (
+                                _contained, len(_tc_steps), tc.summary[:50]))
+                            break
+                    if _is_subset:
+                        continue
+
+                _deduped.append(tc)
+                _seen_norms.add(_norm)
+                _seen_step_sigs.append(_tc_steps)
+
+            suite.test_cases = _deduped
+            _removed = _before_dedup - len(suite.test_cases)
+            if _removed:
+                log('[ENGINE]   Removed %d within-Chalk duplicates' % _removed)
+
+        # Fix 4: ALSO mine AC text as supplementary source even when Chalk exists
+        # AC often has business rules (PL/YL/YD/YP, Syniverse actions) that Chalk doesn't cover
+        if jira.acceptance_criteria and len(jira.acceptance_criteria) > 50:
+            log('[ENGINE]   Also mining AC text for supplementary scenarios...')
+            ac_tcs = _build_from_jira_only(jira, feature_short)
+            if ac_tcs:
+                # ── Quality gate: reject wrong-feature TCs ──
+                # When feature is "Change BCD", reject TCs about "Change Rateplan",
+                # "Change Feature", etc. that leaked from AC mining.
+                # Only reject when the OPERATION is wrong, not when a state
+                # is mentioned as a precondition (e.g., "rejected for Deactivated MDN" is valid).
+                _feature_words = set(re.findall(r'\b\w{4,}\b', feature_short.lower()))
+                _before_filter = len(ac_tcs)
+                # These are OPERATION keywords — if the TC summary starts with or
+                # centers on one of these and it's not the current feature, reject it.
+                _wrong_feature_operations = [
+                    'change rateplan', 'change rate plan', 'change feature',
+                    'change sim', 'change mdn', 'swap mdn', 'change device',
+                    'activate subscriber', 'port-in', 'port in',
+                ]
+                # Only filter if the feature name is specific enough
+                if len(_feature_words) >= 2:
+                    _filtered_ac = []
+                    for _ac_tc in ac_tcs:
+                        _ac_lower = _ac_tc.summary.lower()
+                        # Strip the TC prefix to get the core operation text
+                        _ac_core = re.sub(r'^TC\d+_[A-Z]+-\d+[_ -]*', '', _ac_tc.summary).strip().lower()
+                        # Check if TC's core operation is a DIFFERENT feature
+                        _mentions_wrong = False
+                        for _wfk in _wrong_feature_operations:
+                            # Only reject if the wrong keyword appears as the OPERATION
+                            # (in the first 40 chars of core text), not as a state/precondition
+                            if _wfk in _ac_core[:40] and _wfk not in feature_short.lower():
+                                _mentions_wrong = True
+                                break
+                        if _mentions_wrong:
+                            log('[ENGINE]   [REJECT] AC TC: "%s" (wrong feature)' % _ac_tc.summary[:60])
+                        else:
+                            _filtered_ac.append(_ac_tc)
+                    ac_tcs = _filtered_ac
+
+                ac_tcs = _deduplicate_tcs(suite.test_cases, ac_tcs, log)
+                if ac_tcs:
+                    suite.test_cases.extend(ac_tcs)
+                    log('[ENGINE]   Added %d supplementary TCs from AC text' % len(ac_tcs))
+    else:
+        log('[ENGINE]   [WARN] No Chalk scenarios -- building from Jira description')
+        suite.test_cases = _build_from_jira_only(jira, feature_short)
+        suite.warnings.append('No Chalk data available -- TCs built from Jira description only')
+
+    log('[ENGINE] Step 4: Cross-checking with attachments...')
+    if parsed_docs and options.get('include_attachments', True):
+        try:
+            gaps = _cross_check_attachments(suite, parsed_docs, jira.key, log)
+            if gaps:
+                log('[ENGINE]   Found %d gap TCs from attachments' % len(gaps))
+                suite.test_cases.extend(gaps)
+        except Exception as _att_err:
+            log('[ENGINE]   WARNING: Attachment cross-check failed: %s — continuing' % str(_att_err)[:100])
+
     # ════════════════════════════════════════════════════════════════
     # Step 4b: INTEGRATION CONTRACT — global knowledge base check
     # This is the systemic fix: instead of per-feature hardcoding,
@@ -171,15 +329,42 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print):
     # each operation touches, and which it explicitly does NOT.
     # ════════════════════════════════════════════════════════════════
     log('[ENGINE] Step 4b: Integration Contract analysis...')
-    from .integration_contract import (resolve_operation, resolve_all_operations,
-                                        get_syniverse_assertion, get_must_not_call_systems,
-                                        get_mandatory_negatives, get_verify_steps)
+    # Skip contract TCs for features that don't need Syniverse/integration assertions:
+    # - ui_portal: pure NBOP UI features
+    # - notification: CDR/mediation/Kafka features
+    # - inquiry/read-only: features that don't modify subscriber data
+    _skip_contract = (
+        _fc.feature_type == 'ui_portal' or
+        (_fc.is_notification and not _fc.is_api) or
+        any(kw in feature_short.lower() for kw in [
+            'inquiry', 'usage detail', 'event status', 'login auth',
+            'biller line', 'device lock', 'sim lock', 'gsma',
+            'blocklist', 'retrieve device', 'get transaction',
+            'retrigger', 'data throttling', 'data usage notification',
+            'dpfo notification', 'usage file', 'kafka', 'bi kafka',
+            'differential report', 'error code', 'message mapping',
+            'nbop functionalities', 'sim-info', 'sim info',
+        ])
+    )
+    _contract = None
+    if _skip_contract:
+        log('[ENGINE]   Skipping integration contract for %s feature' % _fc.feature_type)
+        suite._contract = None
+    else:
+        try:
+            from .integration_contract import (resolve_operation, resolve_all_operations,
+                                                get_syniverse_assertion, get_must_not_call_systems,
+                                                get_mandatory_negatives, get_verify_steps)
 
-    _contract = resolve_operation(
-        feature_short,
-        description=jira.description or '',
-        ac_text=jira.acceptance_criteria or '',
-        scope=chalk.scope if chalk else '')
+            _contract = resolve_operation(
+                feature_short,
+                description=jira.description or '',
+                ac_text=jira.acceptance_criteria or '',
+                scope=chalk.scope if chalk else '')
+        except Exception as _contract_err:
+            log('[ENGINE]   WARNING: Integration contract analysis failed: %s — continuing without contract' % str(_contract_err)[:100])
+            _contract = None
+            suite._contract = None
 
     if _contract:
         log('[ENGINE]   Contract matched: "%s" (category=%s, syniverse=%s)' % (
@@ -209,24 +394,43 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print):
                     _verify_method = sys_obj.verify_via
                     if _contract.category in ('mediation', 'notification'):
                         _verify_method = 'mediation pipeline logs'
-                    _tc = TestCase(
-                        sno=str(_next_contract_idx),
-                        summary='TC%03d_%s_Verify %s is NOT called during %s' % (
-                            _next_contract_idx, jira.key, sys_obj.name, feature_short),
-                        description='Verify that NO %s outbound call is made during %s. %s' % (
-                            sys_obj.name, feature_short, _reason),
-                        preconditions='1.\tMediation and PRR batch jobs running.\n2.\t%s accessible for verification.' % _verify_method
-                            if _contract.category in ('mediation', 'notification')
-                            else '1.\tPhone line in required state.\n2.\t%s accessible for verification.' % _verify_method,
-                        story_linkage=jira.key, label=jira.key, category='Happy Path',
-                        steps=[
-                            TestStep(1, 'Trigger %s operation with valid parameters' % feature_short,
-                                     'Operation accepted and processed'),
-                            TestStep(2, 'Check %s for %s outbound calls' % (_verify_method, sys_obj.name),
-                                     'NO %s outbound call found — confirmed not triggered' % sys_obj.name),
-                            TestStep(3, 'Verify operation completed successfully without %s' % sys_obj.name,
-                                     'Operation successful. %s not involved as per contract.' % sys_obj.name),
-                        ])
+                    # For ui_portal features, use UI-appropriate steps
+                    if _fc.feature_type == 'ui_portal':
+                        _tc = TestCase(
+                            sno=str(_next_contract_idx),
+                            summary='TC%03d_%s_Verify %s is NOT called during %s' % (
+                                _next_contract_idx, jira.key, sys_obj.name, feature_short),
+                            description='Verify that NO %s outbound call is made during %s. %s' % (
+                                sys_obj.name, feature_short, _reason),
+                            preconditions='1.\tSubscriber line active in NBOP.\n2.\tNBOP portal accessible.',
+                            story_linkage=jira.key, label=jira.key, category='Happy Path',
+                            steps=[
+                                TestStep(1, 'Launch NBOP and search subscriber by MDN',
+                                         'Subscriber profile loaded'),
+                                TestStep(2, 'Perform %s operation via NBOP portal' % feature_short,
+                                         'Operation completed via NBOP'),
+                                TestStep(3, 'Verify %s was NOT involved — check Transaction History for absence of %s calls' % (sys_obj.name, sys_obj.name),
+                                         'NO %s outbound call found. Operation is NBOP-internal only.' % sys_obj.name),
+                            ])
+                    else:
+                        _tc = TestCase(
+                            sno=str(_next_contract_idx),
+                            summary='TC%03d_%s_Verify %s is NOT called during %s' % (
+                                _next_contract_idx, jira.key, sys_obj.name, feature_short),
+                            description='Verify that NO %s outbound call is made during %s. %s' % (
+                                sys_obj.name, feature_short, _reason),
+                            preconditions='1.\tMediation and PRR batch jobs running.\n2.\t%s accessible for verification.' % _verify_method
+                                if _contract.category in ('mediation', 'notification')
+                                else '1.\tPhone line in required state.\n2.\t%s accessible for verification.' % _verify_method,
+                            story_linkage=jira.key, label=jira.key, category='Happy Path',
+                            steps=[
+                                TestStep(1, 'Trigger %s operation with valid parameters' % feature_short,
+                                         'Operation accepted and processed'),
+                                TestStep(2, 'Check %s for %s outbound calls' % (_verify_method, sys_obj.name),
+                                         'NO %s outbound call found — confirmed not triggered' % sys_obj.name),
+                                TestStep(3, 'Verify operation completed successfully without %s' % sys_obj.name,
+                                         'Operation successful. %s not involved as per contract.' % sys_obj.name),
+                            ])
                     suite.test_cases.append(_tc)
                     _next_contract_idx += 1
                     log('[ENGINE]   CONTRACT: Added "MUST NOT CALL %s" assertion' % sys_obj.name)
@@ -241,20 +445,37 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print):
                 _neg_words = [w for w in _neg_key.split() if len(w) > 3]
                 _already_covered = all(w in _existing_summaries for w in _neg_words) if _neg_words else False
                 if not _already_covered:
-                    _tc = TestCase(
-                        sno=str(_next_contract_idx),
-                        summary='TC%03d_%s_Negative: %s' % (_next_contract_idx, jira.key, neg_desc[:80]),
-                        description='Contract-mandated negative: %s' % neg_desc,
-                        preconditions='1.\tPrepare test data for negative scenario.',
-                        story_linkage=jira.key, label=jira.key, category='Negative',
-                        steps=[
-                            TestStep(1, 'Prepare invalid/error condition: %s' % neg_desc[:60],
-                                     'Error condition prepared'),
-                            TestStep(2, 'Trigger %s operation' % feature_short,
-                                     'System rejects or handles gracefully'),
-                            TestStep(3, 'Verify no data corruption and appropriate error response',
-                                     'System state unchanged. Error logged.'),
-                        ])
+                    # For ui_portal features, use UI-appropriate negative steps
+                    if _fc.feature_type == 'ui_portal':
+                        _tc = TestCase(
+                            sno=str(_next_contract_idx),
+                            summary='TC%03d_%s_Negative: %s' % (_next_contract_idx, jira.key, neg_desc[:80]),
+                            description='Contract-mandated negative: %s' % neg_desc,
+                            preconditions='1.\tNBOP portal accessible.\n2.\tPrepare test data for negative scenario.',
+                            story_linkage=jira.key, label=jira.key, category='Negative',
+                            steps=[
+                                TestStep(1, 'Launch NBOP and search subscriber by MDN',
+                                         'Subscriber profile loaded'),
+                                TestStep(2, 'Attempt the invalid operation via NBOP: %s' % neg_desc[:60],
+                                         'NBOP displays appropriate error message or rejects the action'),
+                                TestStep(3, 'Verify subscriber profile unchanged — no data corruption',
+                                         'All fields show pre-operation values. No transaction recorded.'),
+                            ])
+                    else:
+                        _tc = TestCase(
+                            sno=str(_next_contract_idx),
+                            summary='TC%03d_%s_Negative: %s' % (_next_contract_idx, jira.key, neg_desc[:80]),
+                            description='Contract-mandated negative: %s' % neg_desc,
+                            preconditions='1.\tPrepare test data for negative scenario.',
+                            story_linkage=jira.key, label=jira.key, category='Negative',
+                            steps=[
+                                TestStep(1, 'Prepare invalid/error condition: %s' % neg_desc[:60],
+                                         'Error condition prepared'),
+                                TestStep(2, 'Trigger %s operation' % feature_short,
+                                         'System rejects or handles gracefully'),
+                                TestStep(3, 'Verify no data corruption and appropriate error response',
+                                         'System state unchanged. Error logged.'),
+                            ])
                     suite.test_cases.append(_tc)
                     _next_contract_idx += 1
                     log('[ENGINE]   CONTRACT: Added mandatory negative: %s' % neg_desc[:50])
@@ -282,113 +503,199 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print):
 
     if options.get('include_negative', True):
         # Skip generic API negatives for notification/CDR features — they get CDR-specific negatives from analyst
-        if _fc.is_notification:
-            log('[ENGINE] Step 5: Skipping generic negatives for notification/CDR feature')
+        # Skip for ui_portal — negatives come from generate_ui_scenarios via analyst KB
+        if _fc.is_notification or _fc.feature_type == 'ui_portal':
+            log('[ENGINE] Step 5: Skipping generic negatives for %s feature' % _fc.feature_type)
+            # V7: For BCD features, add BCD-specific negatives that the analyst may miss
+            if any(kw in feature_short.lower() for kw in ['change bcd', 'change dpfo', 'dpfo reset', 'bill cycle']):
+                _existing_neg = ' '.join(tc.summary.lower() for tc in suite.test_cases if tc.category == 'Negative')
+                _bcd_negatives = []
+                if 'same date' not in _existing_neg and 'no change' not in _existing_neg:
+                    _bcd_negatives.append(TestCase(
+                        sno='', summary='TC__%s_Negative: Validate Change BCD with same date (no change)' % jira.key,
+                        description='Select the same DPFO Reset Day that is already set. Verify no spurious transaction.',
+                        preconditions='1.\tSubscriber line should be Active with known DPFO date.',
+                        story_linkage=jira.key, label=jira.key, category='Negative',
+                        steps=[
+                            TestStep(1, 'Launch NBOP and search subscriber by MDN', 'Subscriber profile loaded'),
+                            TestStep(2, 'Navigate to Change DPFO Reset Day, note current value', 'Current DPFO value displayed'),
+                            TestStep(3, 'Select the SAME date from dropdown, click Submit', 'System handles gracefully'),
+                            TestStep(4, 'Verify no new transaction created in Transaction History', 'No spurious Change BCD transaction recorded'),
+                        ]))
+                if 'suspended' not in _existing_neg and 'hotline' not in _existing_neg:
+                    _bcd_negatives.append(TestCase(
+                        sno='', summary='TC__%s_Negative: Validate Change BCD rejects change for Suspended/Hotlined line' % jira.key,
+                        description='Attempt to change BCD date for a Suspended or Hotlined subscriber. Verify NBOP rejects or warns.',
+                        preconditions='1.\tSubscriber line is in Suspended or Hotlined status.',
+                        story_linkage=jira.key, label=jira.key, category='Negative',
+                        steps=[
+                            TestStep(1, 'Launch NBOP and search Suspended/Hotlined subscriber by MDN', 'Subscriber profile loaded showing Suspended/Hotlined status'),
+                            TestStep(2, 'Navigate to Change DPFO Reset Day', 'Screen loads or operation is blocked'),
+                            TestStep(3, 'Attempt to select new date and Submit', 'NBOP rejects or shows warning for non-Active line'),
+                            TestStep(4, 'Verify subscriber profile unchanged', 'No BCD change applied, no transaction recorded'),
+                        ]))
+                if _bcd_negatives:
+                    suite.test_cases.extend(_bcd_negatives)
+                    log('[ENGINE]   Added %d BCD-specific negative TCs' % len(_bcd_negatives))
         else:
             log('[ENGINE] Step 5: Generating negative scenarios...')
-            neg = _generate_negative_scenarios(suite, jira.key, log)
-            suite.test_cases.extend(neg)
-            log('[ENGINE]   Added %d negative TCs' % len(neg))
+            try:
+                neg = _generate_negative_scenarios(suite, jira.key, log)
+                suite.test_cases.extend(neg)
+                log('[ENGINE]   Added %d negative TCs' % len(neg))
+            except Exception as _neg_err:
+                log('[ENGINE]   WARNING: Negative scenario generation failed: %s — continuing' % str(_neg_err)[:100])
 
     log('[ENGINE] Step 6: Preparing for expansion...')
     log('[ENGINE]   Feature classification: %s (is_ui=%s)' % (_fc.feature_type, _fc.is_ui))
 
-    # Step 5a: Test Analyst Reasoning — think like a QA engineer
-    log('[ENGINE] Step 5a: Test Analyst reasoning...')
-    from .test_analyst import analyze_and_suggest
-    from .tc_templates import build_description, build_precondition, build_steps
-    analyst_suggestions = analyze_and_suggest(
-        feature_name=feature_short, feature_id=jira.key,
-        scope=chalk.scope if chalk else '', description=jira.description or '',
-        existing_scenarios=[tc.summary.lower() for tc in suite.test_cases],
-        log=log, ac_text=jira.acceptance_criteria or '',
-        channel=jira.channel or '', jira_summary=jira.summary or '')
-
-    if analyst_suggestions:
-        _next_idx = len(suite.test_cases) + 1
-        _analyst_cap = 15 if _fc.is_ui else 8
-        for sg in analyst_suggestions[:_analyst_cap]:
-            _cat = sg['category']
-            _title = sg['title']
-
-            # Build everything from templates — no cross-contamination
-            _desc = sg.get('description', build_description(_fc, feature_short, _title, _cat))
-            _precon = sg.get('precondition', '')
-            if not _precon:
-                _precon = build_precondition(_fc, feature_short, _cat, _title)
-            elif not _precon.startswith('1.'):
-                _precon = '1.\t%s' % _precon
-            _step_tuples = build_steps(_fc, feature_short, _title, _cat)
-            _steps = [TestStep(i+1, s, e) for i, (s, e) in enumerate(_step_tuples)]
-
-            tc = TestCase(
-                sno=str(_next_idx),
-                summary='TC%03d_%s_%s' % (_next_idx, jira.key, sg['title'][:90]),
-                description=_desc,
-                preconditions=_precon,
-                story_linkage=jira.key, label=jira.key, category=sg['category'],
-                steps=_steps)
-            suite.test_cases.append(tc)
-            _next_idx += 1
-        log('[ENGINE]   Added %d analyst-derived TCs' % len(analyst_suggestions[:_analyst_cap]))
-
-    # Step 5c: Mine Jira comments for additional scenarios
-    # SKIP only for PURE UI features — hybrid features need subtask/comment mining
+    # ════════════════════════════════════════════════════════════════
+    # For ui_portal features: ONLY run the test analyst (which uses
+    # generate_ui_scenarios from the KB). Skip ALL other generators.
+    # This matches the manual suite pattern: Chalk gives unique UI
+    # actions, KB gives negatives/edge cases, nothing else.
+    # ════════════════════════════════════════════════════════════════
     if _fc.feature_type == 'ui_portal':
-        log('[ENGINE] Step 5c: Skipping comment/subtask mining for pure UI feature')
-    else:
-        log('[ENGINE] Step 5c: Mining Jira comments and subtasks...')
-        comment_tcs = _mine_jira_comments(jira, suite, log)
-        if comment_tcs:
-            comment_tcs = _deduplicate_tcs(suite.test_cases, comment_tcs, log)
-            suite.test_cases.extend(comment_tcs)
+        log('[ENGINE] Step 5a: Test Analyst (UI KB only)...')
+        from .test_analyst import analyze_and_suggest
+        from .tc_templates import build_description, build_precondition, build_steps
+        try:
+            analyst_suggestions = analyze_and_suggest(
+                feature_name=feature_short, feature_id=jira.key,
+                scope=chalk.scope if chalk else '', description=jira.description or '',
+                existing_scenarios=[tc.summary.lower() for tc in suite.test_cases],
+                log=log, ac_text=jira.acceptance_criteria or '',
+                channel=jira.channel or '', jira_summary=jira.summary or '')
+        except Exception as _analyst_err:
+            log('[ENGINE]   WARNING: Test Analyst failed: %s — continuing without analyst TCs' % str(_analyst_err)[:100])
+            analyst_suggestions = []
 
-        # Step 5d: Mine Jira subtasks for testable items
+        if analyst_suggestions:
+            _next_idx = len(suite.test_cases) + 1
+            for sg in analyst_suggestions[:10]:
+                _cat = sg['category']
+                _title = sg['title']
+                _desc = sg.get('description', build_description(_fc, feature_short, _title, _cat))
+                _precon = sg.get('precondition', '')
+                if not _precon:
+                    _precon = build_precondition(_fc, feature_short, _cat, _title)
+                elif not _precon.startswith('1.'):
+                    _precon = '1.\t%s' % _precon
+                _step_tuples = build_steps(_fc, feature_short, _title, _cat)
+                _steps = [TestStep(i+1, s, e) for i, (s, e) in enumerate(_step_tuples)]
+                tc = TestCase(
+                    sno=str(_next_idx),
+                    summary='TC%03d_%s_%s' % (_next_idx, jira.key, sg['title'][:90]),
+                    description=_desc, preconditions=_precon,
+                    story_linkage=jira.key, label=jira.key, category=sg['category'],
+                    steps=_steps)
+                suite.test_cases.append(tc)
+                _next_idx += 1
+            log('[ENGINE]   Added %d analyst-derived TCs (UI KB)' % min(len(analyst_suggestions), 10))
+
+        log('[ENGINE] Step 5b-5d: Skipping enrichment/comments/subtasks for ui_portal')
+        # Jump straight to Step 6b (custom instructions) — skip everything else
+
+    else:
+        # ── Non-UI features: run the full pipeline ──
+        log('[ENGINE] Step 5a: Test Analyst reasoning...')
+        from .test_analyst import analyze_and_suggest
+        from .tc_templates import build_description, build_precondition, build_steps
+        try:
+            analyst_suggestions = analyze_and_suggest(
+                feature_name=feature_short, feature_id=jira.key,
+                scope=chalk.scope if chalk else '', description=jira.description or '',
+                existing_scenarios=[tc.summary.lower() for tc in suite.test_cases],
+                log=log, ac_text=jira.acceptance_criteria or '',
+                channel=jira.channel or '', jira_summary=jira.summary or '')
+        except Exception as _analyst_err:
+            log('[ENGINE]   WARNING: Test Analyst failed: %s — continuing without analyst TCs' % str(_analyst_err)[:100])
+            analyst_suggestions = []
+
+        if analyst_suggestions:
+            _next_idx = len(suite.test_cases) + 1
+            _analyst_cap = 15 if _fc.is_ui else 8
+            for sg in analyst_suggestions[:_analyst_cap]:
+                _cat = sg['category']
+                _title = sg['title']
+                _desc = sg.get('description', build_description(_fc, feature_short, _title, _cat))
+                _precon = sg.get('precondition', '')
+                if not _precon:
+                    _precon = build_precondition(_fc, feature_short, _cat, _title)
+                elif not _precon.startswith('1.'):
+                    _precon = '1.\t%s' % _precon
+                _step_tuples = build_steps(_fc, feature_short, _title, _cat)
+                _steps = [TestStep(i+1, s, e) for i, (s, e) in enumerate(_step_tuples)]
+                tc = TestCase(
+                    sno=str(_next_idx),
+                    summary='TC%03d_%s_%s' % (_next_idx, jira.key, sg['title'][:90]),
+                    description=_desc, preconditions=_precon,
+                    story_linkage=jira.key, label=jira.key, category=sg['category'],
+                    steps=_steps)
+                suite.test_cases.append(tc)
+                _next_idx += 1
+            log('[ENGINE]   Added %d analyst-derived TCs' % len(analyst_suggestions[:_analyst_cap]))
+
+        log('[ENGINE] Step 5c: Mining Jira comments and subtasks...')
+        try:
+            comment_tcs = _mine_jira_comments(jira, suite, log)
+            if comment_tcs:
+                _before_comment_dedup = len(comment_tcs)
+                comment_tcs = _deduplicate_tcs(suite.test_cases, comment_tcs, log)
+                log('[ENGINE]   Comment mining: %d found → %d after dedup' % (_before_comment_dedup, len(comment_tcs)))
+                suite.test_cases.extend(comment_tcs)
+        except Exception as _comment_err:
+            log('[ENGINE]   WARNING: Comment mining failed: %s — continuing' % str(_comment_err)[:100])
+
         log('[ENGINE] Step 5d: Mining Jira subtasks (%d subtasks found)...' % len(jira.subtasks))
         for st in jira.subtasks:
             log('[ENGINE]   Subtask: %s | %s | desc=%d chars' % (
                 st.get('key', '?'), st.get('summary', '?')[:50], len(st.get('description', ''))))
-        subtask_tcs = _mine_jira_subtasks(jira, suite, log)
-        if subtask_tcs:
-            # Split table-derived TCs (bypass dedup) from text-derived (dedup normally)
-            table_tcs = [tc for tc in subtask_tcs if hasattr(tc, '_from_table') and tc._from_table]
-            text_tcs = [tc for tc in subtask_tcs if tc not in table_tcs]
-            text_tcs = _deduplicate_tcs(suite.test_cases, text_tcs, log)
-            suite.test_cases.extend(table_tcs)
-            suite.test_cases.extend(text_tcs)
-            log('[ENGINE]   Added %d subtask TCs (%d table, %d text)' % (
-                len(table_tcs) + len(text_tcs), len(table_tcs), len(text_tcs)))
-        else:
-            log('[ENGINE]   No new TCs from subtasks')
+        try:
+            subtask_tcs = _mine_jira_subtasks(jira, suite, log)
+            if subtask_tcs:
+                table_tcs = [tc for tc in subtask_tcs if hasattr(tc, '_from_table') and tc._from_table]
+                text_tcs = [tc for tc in subtask_tcs if tc not in table_tcs]
+                _before_subtask_dedup = len(text_tcs)
+                text_tcs = _deduplicate_tcs(suite.test_cases, text_tcs, log)
+                log('[ENGINE]   Subtask mining: %d table + %d text (was %d before dedup)' % (
+                    len(table_tcs), len(text_tcs), _before_subtask_dedup))
+                suite.test_cases.extend(table_tcs)
+                suite.test_cases.extend(text_tcs)
+                log('[ENGINE]   Added %d subtask TCs (%d table, %d text)' % (
+                    len(table_tcs) + len(text_tcs), len(table_tcs), len(text_tcs)))
+            else:
+                log('[ENGINE]   No new TCs from subtasks')
+        except Exception as _subtask_err:
+            log('[ENGINE]   WARNING: Subtask mining failed: %s — continuing' % str(_subtask_err)[:100])
 
-    # Step 5b: Scenario Enrichment (universal gap filler)
-    # SKIP for pure UI features — KB scenarios from analyst are sufficient
-    # For notification features: skip GENERIC enrichment but ALLOW contract-driven enrichment
-    _skip_enrichment = _fc.feature_type == 'ui_portal'
-    # Notification features with an integration contract should still get enriched
-    if _fc.feature_type == 'notification' and not getattr(suite, '_contract', None):
-        _skip_enrichment = True
-    if _skip_enrichment:
-        log('[ENGINE] Step 5b: Skipping enrichment for %s feature' % _fc.feature_type)
-    else:
-        log('[ENGINE] Step 5b: Scenario enrichment...')
-        # Build rich context: feature title + TC summaries + Chalk scope + Jira description
-        _enrich_ctx = _scenario_context_from_suite(suite)
-        if chalk and chalk.scope:
-            _enrich_ctx += ' ' + chalk.scope
-        if jira.description:
-            _enrich_ctx += ' ' + jira.description[:500]
-        enriched = enrich_scenarios(suite.test_cases, jira.key, _enrich_ctx, log, feature_name=feature_short)
-        if enriched:
-            # Split mandatory negatives (bypass dedup) from optional (dedup normally)
-            mandatory = [tc for tc in enriched if hasattr(tc, '_mandatory') and tc._mandatory]
-            optional = [tc for tc in enriched if tc not in mandatory]
-            # Dedup only optional TCs
-            optional = _deduplicate_tcs(suite.test_cases, optional, log)
-            suite.test_cases.extend(mandatory)
-            suite.test_cases.extend(optional)
-            if mandatory:
-                log('[ENGINE]   Added %d mandatory + %d optional enrichment TCs' % (len(mandatory), len(optional)))
+        # Step 5b: Scenario Enrichment
+        _skip_enrichment = False
+        if _fc.feature_type == 'notification' and not getattr(suite, '_contract', None):
+            _skip_enrichment = True
+        if _skip_enrichment:
+            log('[ENGINE] Step 5b: Skipping enrichment for %s feature' % _fc.feature_type)
+        else:
+            log('[ENGINE] Step 5b: Scenario enrichment...')
+            try:
+                _enrich_ctx = _scenario_context_from_suite(suite)
+                if chalk and chalk.scope:
+                    _enrich_ctx += ' ' + chalk.scope
+                if jira.description:
+                    _enrich_ctx += ' ' + jira.description[:500]
+                enriched = enrich_scenarios(suite.test_cases, jira.key, _enrich_ctx, log, feature_name=feature_short)
+                if enriched:
+                    mandatory = [tc for tc in enriched if hasattr(tc, '_mandatory') and tc._mandatory]
+                    optional = [tc for tc in enriched if tc not in mandatory]
+                    _before_enrich_dedup = len(optional)
+                    optional = _deduplicate_tcs(suite.test_cases, optional, log)
+                    log('[ENGINE]   Enrichment: %d mandatory + %d optional (was %d before dedup)' % (
+                        len(mandatory), len(optional), _before_enrich_dedup))
+                    suite.test_cases.extend(mandatory)
+                    suite.test_cases.extend(optional)
+                    log('[ENGINE]   Added %d mandatory + %d optional enrichment TCs' % (len(mandatory), len(optional)))
+            except Exception as _enrich_err:
+                log('[ENGINE]   WARNING: Scenario enrichment failed: %s — continuing without enrichment' % str(_enrich_err)[:100])
 
     # Step 6b: Apply custom instruction extras
     if adjustments:
@@ -477,7 +784,9 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print):
         suite.data_sources.append('Attachment: %s (%d paragraphs, %d tables)' % (doc.filename, len(doc.paragraphs), len(doc.tables)))
 
     total_steps = sum(len(tc.steps) for tc in suite.test_cases)
+    log('[ENGINE] ═══════════════════════════════════════════════════')
     log('[ENGINE] [OK] Suite complete: %d TCs | %d steps' % (len(suite.test_cases), total_steps))
+    log('[ENGINE] ═══════════════════════════════════════════════════')
 
     # Step 8: Device Matrix Expansion (only for core/positive TCs)
     log('[ENGINE] Step 8: Device matrix expansion...')
@@ -501,25 +810,161 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print):
     # Only runs for features that have API TCs with matching NBOP menu paths
     if not _fc.is_notification or getattr(suite, '_contract', None):
         log('[ENGINE] Step 8b2: UI Verification Mirror...')
-        from .ui_mirror import generate_ui_mirror_tcs
-        ui_tcs = generate_ui_mirror_tcs(suite.test_cases, jira.key, feature_short, log)
-        if ui_tcs:
-            suite.test_cases.extend(ui_tcs)
-            log('[ENGINE]   Added %d UI verification mirror TCs' % len(ui_tcs))
+        try:
+            from .ui_mirror import generate_ui_mirror_tcs
+            ui_tcs = generate_ui_mirror_tcs(suite.test_cases, jira.key, feature_short, log)
+            if ui_tcs:
+                suite.test_cases.extend(ui_tcs)
+                log('[ENGINE]   Added %d UI verification mirror TCs' % len(ui_tcs))
+        except Exception as _mirror_err:
+            log('[ENGINE]   WARNING: UI mirror failed: %s — continuing' % str(_mirror_err)[:100])
     else:
         log('[ENGINE] Step 8b2: Skipping UI mirror for pure notification/CDR feature')
 
     # Step 8c: QUALITY GATE — every TC must pass through this
     log('[ENGINE] Step 8c: Quality gate — validating all TC names and descriptions...')
+    _before_qg = len(suite.test_cases)
     suite.test_cases = _quality_gate(suite.test_cases, feature_short, jira.key, log)
+    log('[ENGINE]   Quality gate: %d → %d TCs' % (_before_qg, len(suite.test_cases)))
 
     # Step 8d: HUMANIZE — make the suite feel human-written
     log('[ENGINE] Step 8d: Humanization pass...')
-    from .humanizer import humanize_suite
-    suite.test_cases = humanize_suite(suite.test_cases, log)
+    try:
+        from .humanizer import humanize_suite
+        suite.test_cases = humanize_suite(suite.test_cases, log)
+    except Exception as _human_err:
+        log('[ENGINE]   WARNING: Humanization failed: %s — continuing with raw TCs' % str(_human_err)[:100])
 
     # Step 9: Renumber after expansion
     log('[ENGINE] Step 9: Final renumbering...')
+
+    # ── PRE-RENUMBER: Remove wrong-feature TCs (global) ──
+    # TCs about Activate, Deactivate, Swap, Port-in etc. should NOT appear
+    # in a Change BCD feature (and vice versa). This catches Chalk scenario
+    # contamination that the per-source filters miss.
+    _feature_lower = feature_short.lower()
+    _wrong_feature_global = [
+        'activate result', 'deactivate result', 'activation result',
+        'deactivation result', 'swap result', 'port-in result', 'port in result',
+        'hotline result', 'suspend result', 'reconnect result',
+    ]
+    # Only filter if the feature name is specific enough
+    if len(_feature_lower) > 5:
+        _before_wf = len(suite.test_cases)
+        _filtered = []
+        for tc in suite.test_cases:
+            _tc_lower = tc.summary.lower()
+            _tc_core = re.sub(r'^tc\d+_[a-z]+-\d+[_ -]*', '', _tc_lower).strip()
+            _is_wrong = False
+            for _wfk in _wrong_feature_global:
+                if _wfk in _tc_core[:60] and _wfk.split()[0] not in _feature_lower:
+                    _is_wrong = True
+                    log('[ENGINE]   [REJECT] Wrong-feature TC: "%s"' % tc.summary[:70])
+                    break
+            if not _is_wrong:
+                _filtered.append(tc)
+        if len(_filtered) < _before_wf:
+            log('[ENGINE]   Removed %d wrong-feature TCs' % (_before_wf - len(_filtered)))
+            suite.test_cases = _filtered
+
+    # ── PRE-RENUMBER: Remove near-duplicate operation TCs ──
+    # When Chalk produces "Change BCD — Split 1" and the analyst produces
+    # "Validate Change BCD - Split 1 through NBOP", they're the same TC.
+    # Keep the one with more steps.
+    _before_opdup = len(suite.test_cases)
+    _seen_ops = {}  # normalized_op -> (index, step_count)
+    _to_remove = set()
+    for i, tc in enumerate(suite.test_cases):
+        _tc_core = re.sub(r'^tc\d+_[a-z]+-\d+[_ -]*', '', tc.summary.lower()).strip()
+        # Normalize: remove "validate", "through nbop", "via nbop", punctuation
+        _norm = re.sub(r'\b(validate|verify|through nbop|via nbop|in nbop)\b', '', _tc_core)
+        _norm = re.sub(r'[^a-z0-9 ]', '', _norm).strip()
+        _norm = re.sub(r'\s+', ' ', _norm).strip()
+        # Skip visibility TCs — they're intentionally different
+        if 'ui verify' in tc.summary.lower() or 'menu is visible' in tc.summary.lower():
+            continue
+        _step_count = len(tc.steps) if tc.steps else 0
+        if _norm in _seen_ops:
+            _prev_idx, _prev_steps = _seen_ops[_norm]
+            # Keep the one with more steps
+            if _step_count > _prev_steps:
+                _to_remove.add(_prev_idx)
+                _seen_ops[_norm] = (i, _step_count)
+            else:
+                _to_remove.add(i)
+            log('[ENGINE]   [DEDUP] Near-duplicate op: "%s" (keeping the one with more steps)' % _norm[:50])
+        else:
+            _seen_ops[_norm] = (i, _step_count)
+    if _to_remove:
+        suite.test_cases = [tc for i, tc in enumerate(suite.test_cases) if i not in _to_remove]
+        log('[ENGINE]   Removed %d near-duplicate operation TCs' % len(_to_remove))
+
+    # ── PRE-RENUMBER: Remove TCs that are subsets of steps in larger TCs ──
+    # Example: "Validate requestType=TMO" is already Step 8 of the full Change BCD TC.
+    # "DPFO Reset Day is displayed and un-editable" is already Step 5 of UI Verify TC.
+    # These single-concern TCs add no value when a comprehensive TC covers them.
+    _subset_keywords = [
+        # (keyword in small TC summary, keyword that must exist in a larger TC's steps)
+        ('requesttype', 'requesttype'),
+        ('request type', 'requesttype'),
+        ('tmo in the http header', 'requesttype'),
+        ('dpfo reset day is displayed', 'dpfo reset day'),
+        ('un-editable', 'read-only'),
+        ('uneditable', 'read-only'),
+        ('displayed and un', 'dpfo reset day'),
+    ]
+    _before_subset = len(suite.test_cases)
+    _all_step_text = {}  # tc_index -> combined step text
+    for i, tc in enumerate(suite.test_cases):
+        _all_step_text[i] = ' '.join(
+            (s.summary or '').lower() + ' ' + (s.expected or '').lower()
+            for s in tc.steps
+        )
+    _subset_remove = set()
+    for i, tc in enumerate(suite.test_cases):
+        _tc_lower = tc.summary.lower()
+        _tc_step_count = len(tc.steps) if tc.steps else 0
+        if _tc_step_count > 6:  # Don't remove large TCs
+            continue
+        for _sk_tc, _sk_step in _subset_keywords:
+            if _sk_tc in _tc_lower:
+                # Check if any LARGER TC has this as a step
+                for j, other_tc in enumerate(suite.test_cases):
+                    if i == j or j in _subset_remove:
+                        continue
+                    _other_steps = len(other_tc.steps) if other_tc.steps else 0
+                    if _other_steps > _tc_step_count and _sk_step in _all_step_text.get(j, ''):
+                        _subset_remove.add(i)
+                        log('[ENGINE]   [SUBSET] "%s" is covered by step in TC "%s"' % (
+                            tc.summary[:50], other_tc.summary[:50]))
+                        break
+                if i in _subset_remove:
+                    break
+    if _subset_remove:
+        suite.test_cases = [tc for i, tc in enumerate(suite.test_cases) if i not in _subset_remove]
+        log('[ENGINE]   Removed %d subset TCs (covered by steps in larger TCs)' % len(_subset_remove))
+
+    # ── PRE-RENUMBER: Sort UI visibility/menu check TCs to the top ──
+    # Rule: TCs that verify menu visibility or screen accessibility must come
+    # BEFORE execution TCs. This applies globally to all UI features.
+    # Pattern: "UI Verify:", "menu is visible", "accessible in NBOP", "screen loads"
+    _visibility_keywords = [
+        'ui verify:', 'menu is visible', 'menu visible and accessible',
+        'accessible in nbop', 'screen is accessible',
+        'navigation check', 'menu check',
+    ]
+    _visibility_tcs = []
+    _other_tcs = []
+    for tc in suite.test_cases:
+        _tc_lower = tc.summary.lower()
+        _is_visibility = any(kw in _tc_lower for kw in _visibility_keywords)
+        if _is_visibility:
+            _visibility_tcs.append(tc)
+        else:
+            _other_tcs.append(tc)
+    if _visibility_tcs:
+        suite.test_cases = _visibility_tcs + _other_tcs
+        log('[ENGINE]   Sorted %d UI visibility TC(s) to top of suite' % len(_visibility_tcs))
 
     # ── PRE-RENUMBER: Remove VZW/Verizon TCs from TMO-only features ──
     # All PI-53 features are TMO MVNO — remove any Verizon/VZW TCs
@@ -617,6 +1062,34 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print):
     log('[ENGINE] Step 11: Self-audit...')
     _self_audit(suite, chalk, jira, log)
 
+    # ════════════════════════════════════════════════════════════════
+    # Step 12: ui_portal final cleanup — replace any remaining API
+    # steps that leaked from AC mining, contract assertions, or
+    # supplementary TC generation.  This is the last safety net.
+    # ════════════════════════════════════════════════════════════════
+    if _fc.feature_type == 'ui_portal':
+        _api_leak_keywords = [
+            'oauth', 'century report', 'apollo_ne', 'apollo-ne', 'service grouping',
+            'trigger api', 'trigger activate', 'trigger change', 'trigger swap',
+            'trigger deactivat', 'trigger hotline', 'trigger remove',
+            'nsl accepts', 'nsl sends', 'outbound call', 'inbound call',
+            'downstream system', 'mig_device', 'mig_sim', 'mig_line', 'nbop mig',
+        ]
+        _cleaned_count = 0
+        for tc in suite.test_cases:
+            all_step_text = ' '.join((s.summary or '').lower() + ' ' + (s.expected or '').lower()
+                                     for s in tc.steps)
+            has_leak = any(kw in all_step_text for kw in _api_leak_keywords)
+            if has_leak:
+                # Replace this TC's steps with proper UI steps
+                from .step_templates import get_step_chain
+                _ctx = ('%s %s %s' % (jira.key, jira.channel or '', feature_short)).lower()
+                chain = get_step_chain(tc.summary, tc.description, _ctx, feature_type='ui_portal')
+                tc.steps = [TestStep(i, s, e) for i, (s, e) in enumerate(chain, 1)]
+                _cleaned_count += 1
+        if _cleaned_count:
+            log('[ENGINE]   UI cleanup: replaced API steps in %d TCs' % _cleaned_count)
+
     return suite
 
 
@@ -634,6 +1107,8 @@ def _extract_feature_name(summary, feature_id=''):
     # Matches: [NSL, NE, INTG]: or NSLNM, NENM, INTG: or [MED, INTG]: etc.
     t = re.sub(r'^\[?(?:[A-Z]{2,10})(?:\s*,\s*(?:[A-Z]{2,10}))*\]?\s*:?\s*', '', t)
     t = re.sub(r'^New\s+MVNO\s*[-:—]\s*', '', t, flags=re.IGNORECASE)
+    # Also strip "New MVNO -" anywhere in the string (not just prefix)
+    t = re.sub(r'New\s+MVNO\s*[-:—]\s*', '', t, flags=re.IGNORECASE)
     t = re.sub(r'^PI[-\s]?\d+\s*[-:—]\s*', '', t, flags=re.IGNORECASE)  # Strip PI-52 - prefix
     t = re.sub(r'^' + re.escape(feature_id) + r'[\s\-_:]*', '', t, flags=re.IGNORECASE)
     # Strip parenthetical device lists
@@ -643,6 +1118,9 @@ def _extract_feature_name(summary, feature_id=''):
     t = re.sub(r'\s+for\s+(?:a\s+)?subscriber.*$', '', t, flags=re.IGNORECASE)
     t = re.sub(r'\s+for\s+SMB\s+mobile.*$', '', t, flags=re.IGNORECASE)
     t = t.strip(' -–—:[]')
+    # Strip remaining stray punctuation (commas, semicolons, brackets, etc.)
+    t = re.sub(r'[\[\],;(){}!?@#$%^&*+=~`]', '', t)
+    t = re.sub(r'\s{2,}', ' ', t).strip()
     # Cap at 40 chars
     if len(t) > 40:
         t = t[:37].rsplit(' ', 1)[0] + '...'
@@ -834,7 +1312,7 @@ def _clean_ui_text(text):
     return result
 
 
-def _chalk_scenario_to_tc(sc, idx, feature_id, channel=''):
+def _chalk_scenario_to_tc(sc, idx, feature_id, channel='', feature_type=''):
     """Convert a Chalk scenario into a rich, checkpoint-quality TestCase."""
     # Pure UI: channel=NBOP with no API tags in the feature title
     # Hybrid features (NBOP + NSLNM/NENM) should NOT be cleaned
@@ -998,7 +1476,25 @@ def _chalk_scenario_to_tc(sc, idx, feature_id, channel=''):
         step_num += 1
 
     # Chalk-provided steps (Step 1:, Step 2:, etc.) — use THESE, don't add duplicates
-    if sc.steps:
+    # EXCEPTION: For ui_portal features, Chalk steps often contain API language
+    # (OAuth, Century Report, APOLLO_NE) that leaked from the original Jira/Chalk.
+    # In that case, SKIP Chalk steps and let get_step_chain() generate proper UI steps.
+    _skip_chalk_steps = False
+    if feature_type == 'ui_portal' and sc.steps:
+        # Check if Chalk steps contain API language that shouldn't be in a UI feature
+        _chalk_text = ' '.join(sc.steps).lower()
+        _has_api_language = any(kw in _chalk_text for kw in [
+            'oauth', 'century report', 'apollo_ne', 'apollo-ne', 'service grouping',
+            'trigger api', 'trigger activate', 'trigger change', 'trigger swap',
+            'trigger deactivat', 'trigger hotline', 'trigger remove',
+            'http 200', 'http 202', 'nsl accepts', 'nsl sends',
+            'outbound call', 'inbound call', 'downstream system',
+            'mig_device', 'mig_sim', 'mig_line', 'nbop mig',
+        ])
+        if _has_api_language:
+            _skip_chalk_steps = True
+
+    if sc.steps and not _skip_chalk_steps:
         for s in sc.steps:
             clean = re.sub(r'^Step\s*\d+\s*:\s*', '', s).strip()
             # Try to generate a meaningful expected result from the step text
@@ -1028,7 +1524,8 @@ def _chalk_scenario_to_tc(sc, idx, feature_id, channel=''):
 
     # Final Verify step with FULL validation as expected result
     # But ONLY if we already have other steps (don't make verify the only step)
-    if sc.validation and sc.validation != sc.title and len(steps) > 0:
+    # Skip for ui_portal features — UI steps already include verification
+    if sc.validation and sc.validation != sc.title and len(steps) > 0 and feature_type != 'ui_portal':
         verify_text = 'Verify PRR output:\n%s' % _format_validation_bullets(sc.validation)
         steps.append(TestStep(step_num, verify_text, sc.validation))
         step_num += 1
@@ -1054,6 +1551,11 @@ def _chalk_scenario_to_tc(sc, idx, feature_id, channel=''):
                                         for kw in ['cdr', 'prr', 'mediation', 'ild', 'roaming',
                                                     'country code', 'usage']):
             _ft = 'notification'
+        # Use the feature-level classification when available — this is the
+        # single source of truth from tc_templates.classify_feature().
+        # It ensures ui_portal features ALWAYS get UI step templates.
+        if feature_type and not _ft:
+            _ft = feature_type
         chain = get_step_chain(sc.title, sc.validation, _feature_ctx, feature_type=_ft)
         for i, (step_sum, step_exp) in enumerate(chain, 1):
             steps.append(TestStep(i, step_sum, step_exp))
@@ -1209,6 +1711,7 @@ def _scenario_context_from_suite(suite):
 def _clean_tc_title(raw_title, feature_id):
     """Clean a raw Chalk scenario title into a crisp TC summary.
     Strips all Chalk metadata: [NENM, NSLNM, INTG], New MVNO -, feature ID, etc.
+    Aggressively removes punctuation so scenario names are clean and readable.
     """
     import re as _re
     t = raw_title.strip()
@@ -1220,13 +1723,16 @@ def _clean_tc_title(raw_title, feature_id):
     t = _re.sub(r'https?://\S+', '', t)
     # Strip Jira ticket references in brackets [MWTGPROV-1234|...]
     t = _re.sub(r'\[[^\]]*\|[^\]]*\]', '', t)
-    # Strip semicolons
-    t = t.replace(';', '')
 
-    # Strip [NENM, NSLNM, NBOP, INTG] style tags — any uppercase 2-10 char tags
-    t = _re.sub(r'^\[?(?:[A-Z]{2,10})(?:\s*,\s*(?:[A-Z]{2,10}))*\]?\s*:?\s*', '', t)
+    # Strip [NENM, NSLNM, NBOP, INTG] style tags in brackets — any uppercase 2-10 char tags
+    t = _re.sub(r'\[(?:[A-Z]{2,10})(?:\s*,\s*(?:[A-Z]{2,10}))*\]', '', t)
+    # Strip bare tag lists at start: NSLNM, NENM, INTG:
+    t = _re.sub(r'^(?:[A-Z]{2,10})(?:\s*,\s*(?:[A-Z]{2,10}))*\s*:?\s*', '', t)
     # Also strip leftover partial tags
     t = _re.sub(r'^[a-z]?(?:[A-Z]{2,10})\]?\s*:?\s*', '', t)
+
+    # Strip trailing tag clusters: "activation INTG NBOP" → "activation"
+    t = _re.sub(r'\s+(?:[A-Z]{2,10})(?:\s+[A-Z]{2,10})*\s*$', '', t)
 
     # Strip "New MVNO -" or "New MVNO:" prefix
     t = _re.sub(r'^New\s+MVNO\s*[-:]\s*', '', t, flags=_re.IGNORECASE)
@@ -1234,28 +1740,78 @@ def _clean_tc_title(raw_title, feature_id):
     # Strip feature ID prefix
     t = _re.sub(r'^' + _re.escape(feature_id) + r'[\s\-_:]*', '', t, flags=_re.IGNORECASE).strip()
 
-    # Strip leading dashes, colons, brackets
-    t = t.strip(' -–—:•·[]')
+    # Strip ALL remaining brackets, commas, semicolons, and stray punctuation
+    t = _re.sub(r'[\[\],;(){}!?@#$%^&*+=~`"]', '', t)
 
-    # Replace hyphens between words with em dash
-    t = _re.sub(r'\s+-\s+', ' — ', t)
+    # Strip internal TMO_ / NBOP_ / NSL_ prefixes in underscored tokens
+    # e.g., "TMO_YK_Sync_Key_Info_UpdateSubscriber" → "Sync Key Info UpdateSubscriber"
+    # e.g., "TMO_NBOP_TT:YK_Sync" → "Sync"
+    t = _re.sub(r'\bTMO_(?:NBOP_)?(?:TT_?)?', '', t)
+    t = _re.sub(r'\bNBOP_', '', t)
+    t = _re.sub(r'\bNSL_', '', t)
 
-    # Strip parenthetical device/channel lists: (Phone/Tablet/Smartwatch), (ITMBO/NBOP), etc.
-    t = _re.sub(r'\s*\([^)]*(?:Phone|Tablet|Smartwatch|ITMBO|NBOP|eSIM|pSIM|4G|5G)[^)]*\)', '', t)
+    # Convert underscores to spaces (Chalk/Jira often uses underscored names)
+    t = t.replace('_', ' ')
+
+    # Replace colons with dash (e.g., "Sync Subscriber: Active to Deactive" → "Sync Subscriber - Active to Deactive")
+    t = _re.sub(r'\s*:\s*', ' - ', t)
+
+    # Replace slashes between words with "or" (e.g., "Phone/Tablet" → "Phone or Tablet")
+    t = _re.sub(r'(\w)/(\w)', r'\1 or \2', t)
+
+    # Strip leading dashes, dots, bullets
+    t = t.strip(' -–—•·')
+
+    # Replace hyphens between words with clean dash
+    t = _re.sub(r'\s+-\s+', ' - ', t)
+
+    # Strip parenthetical device/channel lists that survived earlier cleanup
+    t = _re.sub(r'\s*\(?(?:Phone|Tablet|Smartwatch|ITMBO|NBOP|eSIM|pSIM|4G|5G)(?:\s*(?:or|/|,)\s*(?:Phone|Tablet|Smartwatch|ITMBO|NBOP|eSIM|pSIM|4G|5G))*\)?', '', t)
 
     # Second pass: strip tags again (in case nested)
     t = _re.sub(r'^\[?(?:[A-Z]{2,10})(?:\s*,\s*(?:[A-Z]{2,10}))*\]?\s*:?\s*', '', t)
     t = _re.sub(r'^[a-z]?(?:[A-Z]{2,10})\]?\s*:?\s*', '', t)
     t = _re.sub(r'^New\s+MVNO\s*[-:—]\s*', '', t, flags=_re.IGNORECASE)
-    t = t.strip(' -–—:•·[]')
+    # Global strip: remove "New MVNO -" anywhere in the string (not just prefix)
+    t = _re.sub(r'New\s+MVNO\s*[-:—]\s*', '', t, flags=_re.IGNORECASE)
+    t = t.strip(' -–—•·')
 
-    # If too long (>250 chars), extract first sentence or truncate cleanly
-    if len(t) > 250:
-        sentences = _re.split(r'[.!]\s+', t)
-        if sentences and len(sentences[0]) <= 250:
-            t = sentences[0]
+    # Collapse multiple spaces and dashes
+    t = _re.sub(r'\s{2,}', ' ', t).strip()
+    t = _re.sub(r'(?:\s*-\s*){2,}', ' - ', t)
+
+    # Strip "UI Verify:" / "UI Verify -" prefix (keep the rest)
+    t = _re.sub(r'^UI\s+Verify\s*[-:]\s*', 'Verify ', t, flags=_re.IGNORECASE)
+
+    # Strip "Validate -" or "Verify -" (empty validate with just a dash)
+    t = _re.sub(r'^(Validate|Verify)\s+-\s+', r'\1 ', t)
+
+    # Strip "Negative:" / "Negative -" prefix but keep the word
+    t = _re.sub(r'^Negative\s*[-:]\s*', 'Negative - ', t, flags=_re.IGNORECASE)
+    # Avoid "Negative - Validate" → just "Negative - ..."
+    t = _re.sub(r'^Negative\s*-\s*Validate\s+', 'Negative - ', t, flags=_re.IGNORECASE)
+    t = _re.sub(r'^Negative\s*-\s*Verify\s+', 'Negative - ', t, flags=_re.IGNORECASE)
+
+    # If too long (>120 chars), find a clean break point
+    if len(t) > 120:
+        # Try to break at a natural boundary: comma-like pause, "ensuring", "when", "and"
+        _break_patterns = [
+            r'\s+ensuring\s+',
+            r'\s+so\s+that\s+',
+            r'\s+such\s+that\s+',
+            r'\s+which\s+',
+            r'\s+where\s+',
+            r'\s+and\s+the\s+system\s+',
+        ]
+        for _bp in _break_patterns:
+            _m = _re.search(_bp, t, flags=_re.IGNORECASE)
+            if _m and 30 < _m.start() <= 120:
+                t = t[:_m.start()].strip()
+                break
         else:
-            t = t[:247].rsplit(' ', 1)[0]
+            # No natural break — truncate at word boundary
+            if len(t) > 120:
+                t = t[:117].rsplit(' ', 1)[0]
 
     # Prefix with "Validate" if it doesn't start with an action verb
     t_low = t.lower()
@@ -1275,31 +1831,111 @@ def _clean_tc_title(raw_title, feature_id):
 
 
 def _deduplicate_tcs(existing_tcs, new_tcs, log=print):
-    """Point 7: Remove new TCs that have >70% keyword overlap with existing ones."""
+    """Remove new TCs that are duplicates of existing ones.
+
+    Three-pass dedup:
+      1. Normalized summary match
+      2. Keyword overlap (>70%)
+      3. Step-content overlap (>65%) with synonym normalization + subset detection
+    """
     def _keywords(tc):
         text = (tc.summary + ' ' + tc.description + ' ' +
                 ' '.join(s.summary for s in tc.steps)).lower()
         return set(re.findall(r'\b\w{4,}\b', text))
 
+    def _normalize_summary(summary):
+        s = re.sub(r'^TC\d+_[A-Z][A-Z0-9]+-\d+[_ -]*', '', summary).strip()
+        s = re.sub(r'\s+', ' ', s).lower().strip()
+        for prefix in ['negative: ', 'edge case: ', 'ui verify: ', 'validate ', 'verify ']:
+            if s.startswith(prefix):
+                s = s[len(prefix):]
+        return s
+
+    def _normalize_step(text):
+        s = re.sub(r'\s+', ' ', text).strip().lower()[:100]
+        s = s.replace('century report', 'transaction report')
+        s = s.replace('transaction records', 'transaction report')
+        s = s.replace('nsl db', 'subscriber data')
+        s = s.replace('nsl fetches', 'system fetches')
+        s = s.replace('nsl ', 'system ')
+        s = s.replace('system db', 'subscriber data')
+        s = s.replace('→', '-').replace('—', '-')
+        s = s.replace(' - ', ' ').replace('- ', ' ').replace(' -', ' ')
+        s = re.sub(r'^step\s*\d+[:\.\s]*', '', s)
+        return re.sub(r'\s+', ' ', s).strip()[:70]
+
+    def _step_sig(tc):
+        return frozenset(
+            _normalize_step(s.summary)
+            for s in (tc.steps or []) if s.summary and len(s.summary.strip()) > 5
+        )
+
     existing_kw_sets = [_keywords(tc) for tc in existing_tcs]
+    existing_norms = set(_normalize_summary(tc.summary) for tc in existing_tcs)
+    existing_step_sigs = [_step_sig(tc) for tc in existing_tcs]
+
     kept = []
+    kept_norms = set()
+    kept_step_sigs = []
+
     for ntc in new_tcs:
         ntc_kw = _keywords(ntc)
-        if not ntc_kw:
-            kept.append(ntc)
+        ntc_norm = _normalize_summary(ntc.summary)
+        ntc_steps = _step_sig(ntc)
+
+        # Pass 1: normalized summary match
+        if ntc_norm in existing_norms or ntc_norm in kept_norms:
+            log('[ENGINE]   Dedup: skipped "%s" (normalized match)' % ntc.summary[:50])
             continue
-        is_dup = False
-        for ekw in existing_kw_sets:
-            if not ekw:
+
+        # Pass 2: keyword overlap (>70%)
+        if ntc_kw:
+            is_dup = False
+            for ekw in existing_kw_sets:
+                if not ekw:
+                    continue
+                overlap = len(ntc_kw & ekw) / len(ntc_kw)
+                if overlap > 0.70:
+                    is_dup = True
+                    log('[ENGINE]   Dedup: skipped "%s" (%.0f%% keyword overlap)' % (ntc.summary[:50], overlap * 100))
+                    break
+            if is_dup:
                 continue
-            overlap = len(ntc_kw & ekw) / len(ntc_kw)
-            if overlap > 0.70:
-                is_dup = True
-                log('[ENGINE]   Dedup: skipped "%s" (%.0f%% overlap)' % (ntc.summary[:50], overlap * 100))
-                break
-        if not is_dup:
-            kept.append(ntc)
-            existing_kw_sets.append(ntc_kw)  # also check new TCs against each other
+
+        # Pass 3: step-content overlap (>65%) with synonym normalization
+        if len(ntc_steps) >= 3:
+            is_step_dup = False
+            for _esig in existing_step_sigs + kept_step_sigs:
+                if not _esig:
+                    continue
+                _step_overlap = len(ntc_steps & _esig) / max(len(ntc_steps), len(_esig), 1)
+                if _step_overlap > 0.65:
+                    is_step_dup = True
+                    log('[ENGINE]   Dedup: skipped "%s" (%.0f%% step overlap)' % (ntc.summary[:50], _step_overlap * 100))
+                    break
+            if is_step_dup:
+                continue
+
+        # Pass 4: subset detection — if this TC's steps are all inside a larger TC
+        if 2 <= len(ntc_steps) <= 5:
+            is_subset = False
+            for _esig in existing_step_sigs + kept_step_sigs:
+                if not _esig or len(_esig) <= len(ntc_steps):
+                    continue
+                _contained = len(ntc_steps & _esig)
+                if _contained >= len(ntc_steps) * 0.8:
+                    is_subset = True
+                    log('[ENGINE]   Dedup: skipped "%s" (subset of larger TC)' % ntc.summary[:50])
+                    break
+            if is_subset:
+                continue
+
+        kept.append(ntc)
+        existing_kw_sets.append(ntc_kw)
+        existing_norms.add(ntc_norm)
+        kept_norms.add(ntc_norm)
+        kept_step_sigs.append(ntc_steps)
+
     return kept
 
 
@@ -2640,6 +3276,10 @@ def _quality_gate(test_cases, feature_name, feature_id, log=print):
         # ── FIX: Also strip trailing dots from the FULL summary after prefix reassembly ──
         tc.summary = _prefix + _name_part
         tc.summary = tc.summary.rstrip('.;,!?:- ')
+
+        # ── FIX: Strip "New MVNO -" from ALL TC summaries globally ──
+        tc.summary = re.sub(r'New\s+MVNO\s*[-:—]\s*', '', tc.summary).strip()
+        tc.summary = re.sub(r'\s{2,}', ' ', tc.summary)
 
         # ── FIX: Normalize non-standard categories ──
         _cat_map = {

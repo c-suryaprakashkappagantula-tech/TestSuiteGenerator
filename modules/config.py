@@ -87,16 +87,23 @@ def _pi_to_iteration(pi_label):
     return '%d%s' % (num, suffix)
 
 def _clean_filename(text, max_len=80):
-    """Clean text for use in filename — preserves Chalk title structure.
-    Keeps [TAG, TAG] prefix and 'New MVNO -' for readability."""
+    """Clean text for use in filename — strips Chalk/Jira metadata for a crisp name.
+    Removes [TAG, TAG] prefix, 'New MVNO -', and all non-alphanumeric punctuation."""
     import re
     t = text.strip()
     # Strip leading dashes/spaces
     t = t.lstrip(' -')
+    # Strip [NSLNM, NBOP, INTG] style tag prefixes
+    t = re.sub(r'^\[?(?:[A-Z]{2,10})(?:\s*,\s*(?:[A-Z]{2,10}))*\]?\s*:?\s*', '', t)
+    # Strip "New MVNO -" or "New MVNO:" prefix
+    t = re.sub(r'^New\s+MVNO\s*[-:—]\s*', '', t, flags=re.IGNORECASE)
+    # Strip leftover brackets, commas, semicolons, and other punctuation
+    t = re.sub(r'[\[\],;(){}!?@#$%^&*+=~`]', '', t)
     # Replace characters that are invalid in filenames
     t = re.sub(r'[<>:"/\\|?*]', '', t)
-    # Replace multiple spaces with single space
-    t = re.sub(r'\s+', ' ', t)
+    # Collapse multiple spaces/dashes
+    t = re.sub(r'\s+', ' ', t).strip()
+    t = re.sub(r'-{2,}', '-', t)
     # Truncate if too long
     if len(t) > max_len:
         t = t[:max_len].rsplit(' ', 1)[0]

@@ -199,6 +199,24 @@ def generate_ui_mirror_tcs(test_cases, feature_id, feature_name, log=print):
             log('[UI-MIRROR] Pure CDR/mediation feature "%s" — skipping UI mirror' % feature_name)
             return []
 
+    # Skip read-only / inquiry / notification features — they don't modify subscriber data
+    # so there's nothing to verify in NBOP after the operation
+    _fname_lower = feature_name.lower()
+    _readonly_keywords = [
+        'inquiry', 'usage detail', 'usage inquiry', 'event status', 'login auth',
+        'biller line info', 'device lock status', 'sim lock', 'gsma device',
+        'blocklist history', 'retrieve device', 'get transaction status',
+        'retrigger transaction', 'data throttling', 'data usage notification',
+        'dpfo notification', 'usage file', 'kafka', 'bi kafka',
+        'update subscriber differential', 'error code', 'message mapping',
+        'nbop functionalities', 'sim-info', 'sim info', 'line history',
+        'order history', 'account summary', 'line summary', 'line inquiry',
+        'reset feature', 'manage account',
+    ]
+    if any(kw in _fname_lower for kw in _readonly_keywords):
+        log('[UI-MIRROR] Read-only/inquiry feature "%s" — skipping UI mirror' % feature_name)
+        return []
+
     # Collect all text from existing TCs to find operations
     existing_summaries = set()
     all_ops_text = ''

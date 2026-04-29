@@ -117,6 +117,28 @@ _FEATURE_TO_PAGE = {
     'line summary': 'Button: Line Summary(MNO)',
     'features': 'Button: Features',
     'qr code': 'Button: View QR CODE',
+    # ── PI-52/53 features — NBOP UI paths for the 12 ui_portal features ──
+    'change bcd': 'Manage Line → Change DPFO Reset Day',
+    'bill cycle': 'Manage Line → Change DPFO Reset Day',
+    'dpfo reset': 'Manage Line → Change DPFO Reset Day',
+    'reset day': 'Manage Line → Change DPFO Reset Day',
+    'reset feature': 'Manage Line → Change Features',
+    'retrieve device': 'Context: Line Information',
+    'device details': 'Context: Line Information',
+    'get transaction status': 'Context: Transaction History',
+    'transaction status': 'Context: Transaction History',
+    'retrigger transaction': 'Context: Transaction History',
+    'retrigger': 'Context: Transaction History',
+    'usage inquiry': 'Context: Mediation Details',
+    'inquiry usage': 'Context: Mediation Details',
+    'usage details': 'Context: Mediation Details',
+    'usage detail': 'Context: Mediation Details',
+    'wearable': 'Manage Line → Change Device and SIM',
+    'add wearable': 'Manage Line → Change Device and SIM',
+    'device id object': 'Context: Line Information',
+    'port-in': 'Tile: Validate Port-In Eligibility',
+    'port in': 'Tile: Validate Port-In Eligibility',
+    'new port': 'Tile: Validate Port-In Eligibility',
 }
 
 
@@ -324,11 +346,27 @@ def generate_ui_steps(feature_name: str, description: str = '',
         ]
 
     if intent == 'visibility':
+        # Feature-specific visibility checks
+        if any(kw in ctx for kw in ['change bcd', 'change dpfo', 'dpfo reset', 'bill cycle', 'reset day']):
+            return [
+                ('Launch NBOP and search subscriber by MDN', 'Subscriber profile loaded'),
+                ('Navigate to ≡ Menu → Manage Line', 'Manage Line submenu expands'),
+                ('Verify "Change DPFO Reset Day" menu item is visible and clickable',
+                 '"Change DPFO Reset Day" menu item is present, enabled, and clickable'),
+                ('Click "Change DPFO Reset Day"', 'Change DPFO Reset Day screen loads'),
+                ('Verify screen shows Current DPFO Reset Day value (read-only) and dropdown for new value',
+                 'Current DPFO Reset Day displayed, new value dropdown available with options 1-28'),
+            ]
+        # Generic visibility — use scenario title for specificity
+        import re as _re_vis
+        _target = _re_vis.sub(r'^(?:Verify|Validate|Check|UI Verify\s*[-:]?\s*)', '', scenario_title, flags=_re_vis.IGNORECASE).strip()
+        _target = _re_vis.sub(r'New\s+MVNO\s*[-:—]\s*', '', _target, flags=_re_vis.IGNORECASE).strip()
+        _target = _target[:80] if _target else 'the feature'
         return [
             ('Launch NBOP and search subscriber by MDN', 'Subscriber profile loaded'),
-            ('Navigate to the relevant screen/section as per scenario', 'Screen loads correctly'),
-            ('Verify the target element is visible and accessible: %s' % scenario_title[:80],
-             'Element is visible, correctly labeled, and interactive'),
+            ('Navigate to the menu for: %s' % _target[:70], 'Screen loads with expected fields'),
+            ('Verify %s is visible, correctly labeled, and accessible' % _target[:70],
+             'Element is present, enabled, and interactive'),
         ]
 
     if intent == 'data_verify':
@@ -367,7 +405,7 @@ def generate_ui_steps(feature_name: str, description: str = '',
         else:
             return [
                 ('Launch NBOP and navigate to %s' % nav_path, 'Screen loads'),
-                ('Enter invalid data as per scenario: %s' % scenario_title[:60], 'NBOP shows appropriate validation error message'),
+                ('Enter invalid data to trigger: %s' % scenario_title[:60], 'NBOP shows appropriate validation error message'),
                 ('Verify no data was changed or submitted', 'Subscriber profile unchanged, no operation executed'),
             ]
 
@@ -379,14 +417,7 @@ def generate_ui_steps(feature_name: str, description: str = '',
         ]
 
     if intent == 'edge_case':
-        if 'session' in sc or 'timeout' in sc:
-            return [
-                ('Launch NBOP, search subscriber, load profile', 'Profile loaded successfully'),
-                ('Wait for session to expire (or invalidate session cookie)', 'Session expires'),
-                ('Attempt to perform the operation', 'NBOP redirects to login page, no partial operation'),
-                ('Re-login and verify subscriber data unchanged', 'Profile shows same data as before session expiry'),
-            ]
-        elif 'duplicate' in sc or 'concurrent' in sc:
+        if 'duplicate' in sc or 'concurrent' in sc:
             return [
                 ('Launch NBOP, search subscriber, start the operation', 'Operation in progress'),
                 ('Immediately trigger the same operation again', 'Second request is rejected or queued'),
@@ -413,8 +444,67 @@ def generate_ui_steps(feature_name: str, description: str = '',
         steps.append(('Navigate to ≡ Menu → Manage Line → Change MDN, enter new MDN, confirm', 'MDN updated in Line Information section'))
     elif 'change sim' in ctx or 'change device' in ctx:
         steps.append(('Navigate to ≡ Menu → Manage Line → Change Device and SIM, enter new details, confirm', 'Device/SIM Information sections updated'))
-    elif 'change feature' in ctx:
+    elif 'change feature' in ctx or 'reset feature' in ctx:
         steps.append(('Click Features button, toggle the target feature, submit', 'Feature checkbox state updated'))
+    elif 'change bcd' in ctx or 'change dpfo' in ctx or 'dpfo reset' in ctx or 'bill cycle' in ctx or 'reset day' in ctx:
+        # Check if this is the wearable/paired device propagation scenario
+        _is_wearable_bcd = any(kw in sc for kw in ['wearable', 'paired', 'watch', 'host mdn', 'propagat'])
+        if _is_wearable_bcd:
+            steps.append(('Navigate to ≡ Menu → Manage Line → Change DPFO Reset Day', 'Change DPFO Reset Day screen loads'))
+            steps.append(('Verify Current DPFO Reset Day for Host MDN (read-only)', 'Current DPFO Reset Day value shown'))
+            steps.append(('Select new DPFO Reset Day value (1-28) from dropdown, click Submit', 'Change BCD request submitted for Host MDN'))
+            steps.append(('Verify NBOP Account Information shows new DPFO Reset Day for Host MDN',
+                           'Host MDN DPFO Reset Day updated to new value'))
+            steps.append(('Verify Watch symbol (⌚) is displayed next to Host MDN — confirms paired wearable exists',
+                           'Watch symbol visible next to Host MDN in subscriber profile'))
+            steps.append(('Click Person symbol (👤) on the left panel to expand account lines',
+                           'Account lines panel expands showing all associated lines'))
+            steps.append(('Scroll down to find the Watch device entry and click on it',
+                           'Watch device line is visible in the account lines list'))
+            steps.append(('Click on the blue MDN link for the Wearable/Watch line',
+                           'Wearable device subscriber profile loads'))
+            steps.append(('Verify Line Type = "Smart Watch" in the Wearable profile',
+                           'Line Type field shows "Smart Watch"'))
+            steps.append(('Verify Wearable device DPFO Reset Day matches the new BCD date set on Host MDN',
+                           'Wearable DPFO Reset Day = Host MDN DPFO Reset Day — BCD propagated correctly'))
+            steps.append(('Download Century Report for Wearable device — verify all features show new BCD date',
+                           'Century Report confirms every feature on Wearable has the updated BCD date'))
+            return steps
+        # Standard Change BCD flow
+        steps.append(('Navigate to ≡ Menu → Manage Line → Change DPFO Reset Day', 'Change DPFO Reset Day screen loads'))
+        steps.append(('Verify Current DPFO Reset Day is displayed (read-only)', 'Current DPFO Reset Day value shown (e.g., 23)'))
+        steps.append(('Select new DPFO Reset Day value (1-28) from dropdown, click Submit', 'Change BCD request submitted successfully'))
+        steps.append(('Verify NBOP Account Information section shows new DPFO Reset Day (e.g., changed from 23 to 8)',
+                       'DPFO Reset Day field in Account Information updated to new value'))
+        steps.append(('Capture TransactionId and download Century Report HTML — validate Change BCD transaction with new date',
+                       'Century Report shows Change BCD transaction with correct new DPFO Reset Day and timestamp'))
+        steps.append(('In Century Report, verify ALL features listed have the new BCD date — no feature should retain the old date',
+                       'Every feature entry in Century Report shows updated BCD date (e.g., all show 8, none show old 23)'))
+        steps.append(('Validate requestType = MNO in http header', 'Header contains requestType=MNO'))
+        steps.append(('Verify downstream updates complete (Syniverse, NSL DB, Mediation)',
+                       'Downstream systems updated with new BCD — Syniverse Update Subscriber shows bcd=new_date'))
+        steps.append(('Check Genesis Portal for updated BCD', 'Updated BCD visible in Genesis Portal'))
+        steps.append(('Check audit logs (Transaction History, Line History)',
+                       'Entry created in audit tables with correct timestamp'))
+        steps.append(('Verify DPFO/BCD events triggered', 'DPFO notification event triggered for new BCD date'))
+        return steps  # Return early — don't append generic verify/txn steps
+    elif 'remove hotline' in ctx or 'dehotline' in ctx:
+        steps.append(('Navigate to ≡ Menu → Manage Line → Change Line Status', 'Change Line Status screen opens'))
+        steps.append(('Select status "Active" to remove hotline, confirm', 'Remove Hotline request submitted, line status changes to Active'))
+    elif 'get transaction status' in ctx or 'transaction status' in ctx:
+        steps.append(('Navigate to ≡ Menu → Transaction History', 'Transaction History page loads'))
+        steps.append(('Search for the target transaction by ID or filter by date', 'Transaction entry found with status, type, and timestamp'))
+    elif 'retrigger' in ctx:
+        steps.append(('Navigate to ≡ Menu → Transaction History', 'Transaction History page loads'))
+        steps.append(('Locate the failed/pending transaction, click Retrigger', 'Retrigger request submitted, transaction re-processed'))
+    elif 'retrieve device' in ctx or 'device detail' in ctx:
+        steps.append(('Verify Device Information section on subscriber profile', 'Device Information shows IMEI, Make, Model, Equipment Type'))
+    elif 'usage inquiry' in ctx or 'inquiry usage' in ctx or 'usage detail' in ctx:
+        steps.append(('Navigate to ≡ Menu → Mediation Details → Usage tab', 'Usage details displayed with CDR records'))
+        steps.append(('Verify usage records show correct fields: Type, Duration, Timestamp', 'Usage data matches expected records'))
+    elif 'wearable' in ctx or 'device id' in ctx:
+        steps.append(('Navigate to ≡ Menu → Manage Line → Change Device and SIM', 'Change Device screen opens'))
+        steps.append(('Enter wearable device details (IMEI, device ID), submit', 'Wearable device associated with line'))
     elif 'sync' in ctx:
         steps.append(('Navigate to ≡ Menu → Sync Line → Sync with Network, confirm', 'Subscriber data refreshed from network'))
     elif 'reset' in ctx:
@@ -424,7 +514,11 @@ def generate_ui_steps(feature_name: str, description: str = '',
     elif 'mediation' in ctx:
         steps.append(('Navigate to ≡ Menu → Mediation Details, review Subscriber Summary tab', 'Mediation fields displayed: MDN, Line ID, IMEI, IMSI, Plan Group'))
     else:
-        steps.append(('Perform the operation as per scenario: %s' % scenario_title[:80], 'Operation completed successfully via NBOP'))
+        import re as _re_op
+        _op_name = _re_op.sub(r'^(?:Validate|Verify|Check)\s*', '', scenario_title, flags=_re_op.IGNORECASE).strip()
+        _op_name = _re_op.sub(r'New\s+MVNO\s*[-:—]\s*', '', _op_name, flags=_re_op.IGNORECASE).strip()
+        _op_name = _op_name[:70] if _op_name else 'the operation'
+        steps.append(('Perform %s via NBOP portal' % _op_name, 'Operation completed successfully'))
     steps.append(('Verify subscriber profile reflects the operation result', 'Affected fields show correct post-operation values'))
     steps.append(('Navigate to ≡ Menu → Transaction History, verify entry recorded', 'Transaction logged with correct timestamp and status'))
     return steps
@@ -487,6 +581,15 @@ def generate_ui_scenarios(feature_name: str, description: str = '') -> List[dict
     nav_path = get_navigation_path(feature_name, description)
     scenarios = []
 
+    # ── 0. UI Visibility — verify the menu item/screen is accessible ──
+    scenarios.append({
+        'title': 'UI Verify: %s menu is visible and accessible in NBOP.' % feature_name,
+        'description': 'Launch NBOP, navigate to the %s screen, verify it loads with all expected fields.' % feature_name,
+        'category': 'Happy Path',
+        'reasoning': 'Before testing the operation, confirm the UI entry point exists and is reachable.',
+        'precondition': 'Subscriber line should be Active.',
+    })
+
     # ── 1. Happy path — perform the operation via NBOP ──
     scenarios.append({
         'title': 'Validate %s through NBOP.' % feature_name,
@@ -496,26 +599,32 @@ def generate_ui_scenarios(feature_name: str, description: str = '') -> List[dict
         'precondition': 'Subscriber line should be Active.',
     })
 
-    # ── 2. Verify subscriber profile loads with correct data ──
-    scenarios.append({
-        'title': 'Validate subscriber profile displays correctly for %s.' % feature_name,
-        'description': 'Search subscriber by MDN in NBOP. Verify Account, Line, Device, SIM sections display correct data.',
-        'category': 'Happy Path',
-        'reasoning': 'Profile must load correctly before any operation.',
-        'precondition': 'Subscriber line should be Active.',
-    })
+    # ── 2. (Removed — subscriber profile display is always covered by the happy path TC) ──
 
     # ── 3. Verify Transaction History after operation ──
-    scenarios.append({
-        'title': 'Validate Transaction History after %s through NBOP.' % feature_name,
-        'description': 'After %s, navigate to Transaction History and verify entry is recorded.' % feature_name,
-        'category': 'Happy Path',
-        'reasoning': 'Every operation must be auditable.',
-        'precondition': '%s completed successfully.' % feature_name,
-    })
+    # Skip for features where the main operation TC (SC1) already includes
+    # Transaction History, Century Report, audit log, and Genesis verification
+    # (Change BCD, Swap MDN, Activation, Change SIM, etc. all have 10+ step templates)
+    _main_tc_has_full_verification = any(kw in ctx for kw in [
+        'change bcd', 'change dpfo', 'dpfo reset', 'bill cycle', 'reset day',
+        'swap mdn', 'swap device', 'activation', 'activate subscriber',
+        'change sim', 'change device', 'change rateplan', 'change rate plan',
+        'change feature', 'deactivat', 'hotline', 'remove hotline',
+        'port-in', 'port in', 'sync subscriber', 'network reset',
+        'reclaim mdn', 'change mdn', 'change line status',
+    ])
+    if not _main_tc_has_full_verification:
+        scenarios.append({
+            'title': 'Validate Transaction History after %s through NBOP.' % feature_name,
+            'description': 'After %s, navigate to Transaction History and verify entry is recorded.' % feature_name,
+            'category': 'Happy Path',
+            'reasoning': 'Every operation must be auditable.',
+            'precondition': '%s completed successfully.' % feature_name,
+        })
 
     # ── 4. Verify Line History after operation ──
-    if any(kw in ctx for kw in ['status', 'hotline', 'suspend', 'reconnect', 'activate', 'change']):
+    # Same logic — skip when main TC already covers it
+    if not _main_tc_has_full_verification and any(kw in ctx for kw in ['status', 'hotline', 'suspend', 'reconnect', 'activate', 'change']):
         scenarios.append({
             'title': 'Validate Line History after %s through NBOP.' % feature_name,
             'description': 'After %s, navigate to Line History and verify status change is recorded.' % feature_name,
@@ -524,58 +633,65 @@ def generate_ui_scenarios(feature_name: str, description: str = '') -> List[dict
             'precondition': '%s completed successfully.' % feature_name,
         })
 
-    # ── 5. Verify affected profile sections update ──
-    affected = []
-    if any(kw in ctx for kw in ['device', 'imei']): affected.append('Device Information')
-    if any(kw in ctx for kw in ['sim', 'iccid', 'esim']): affected.append('SIM Information')
-    if any(kw in ctx for kw in ['line', 'status', 'mdn', 'hotline', 'suspend']): affected.append('Line Information')
-    if any(kw in ctx for kw in ['account', 'dpfo']): affected.append('Account Information')
-    if any(kw in ctx for kw in ['feature', 'plan']): affected.append('Add-Ons')
-    for section in affected:
-        fields = PROFILE_SECTIONS.get(section, [])
+    # ── 5. (Removed — section-level verification is covered by the happy path steps) ──
+
+    # ── 5b. Wearable/Paired Device BCD propagation ──
+    # When changing BCD on a Host MDN, the new date must propagate to paired devices (watch/wearable)
+    _is_bcd_feature = any(kw in ctx for kw in ['change bcd', 'change dpfo', 'dpfo reset', 'bill cycle', 'reset day'])
+    if _is_bcd_feature:
         scenarios.append({
-            'title': 'Validate %s section updates after %s.' % (section, feature_name),
-            'description': 'After %s, verify %s fields: %s.' % (feature_name, section, ', '.join(fields[:5])),
+            'title': 'Validate %s propagates to Wearable/Paired device.' % feature_name,
+            'description': 'Change BCD date on Host MDN and verify the same new BCD date is reflected on the paired Wearable device (Watch/Tablet).',
             'category': 'Happy Path',
-            'reasoning': '%s must reflect the operation result.' % section,
-            'precondition': '%s completed successfully.' % feature_name,
+            'reasoning': 'BCD change on Host MDN must cascade to all paired/wearable devices sharing the same billing cycle.',
+            'precondition': 'Host MDN has an active paired Wearable device.',
         })
 
-    # ── 6. Negative — invalid MDN ──
-    scenarios.append({
-        'title': 'Negative: Validate %s rejects invalid MDN in NBOP.' % feature_name,
-        'description': 'Enter invalid MDN on %s screen. Verify error message displayed.' % feature_name,
-        'category': 'Negative',
-        'reasoning': 'UI must validate input and show clear error.',
-        'precondition': 'NBOP portal accessible.',
-    })
+    # ── 6-8. Negatives — feature-specific, NOT generic MDN validation ──
+    # Generic MDN search negatives (invalid MDN, empty, non-existent) are NBOP
+    # search validation — they apply to ALL features and don't need to be
+    # repeated per feature. Instead, generate negatives specific to the operation.
+    if _is_bcd_feature:
+        # BCD-specific negatives
+        scenarios.append({
+            'title': 'Negative: Validate %s rejects change for Deactivated line.' % feature_name,
+            'description': 'Attempt to change BCD date for a Deactivated subscriber. Verify NBOP rejects the operation.',
+            'category': 'Negative',
+            'reasoning': 'BCD change should only be allowed for Active lines.',
+            'precondition': 'Subscriber line is in Deactivated status.',
+        })
+        scenarios.append({
+            'title': 'Negative: Validate %s with same date (no change).' % feature_name,
+            'description': 'Select the same DPFO Reset Day that is already set. Verify system handles gracefully — no unnecessary transaction.',
+            'category': 'Negative',
+            'reasoning': 'Changing to the same value should not create a spurious transaction.',
+            'precondition': 'Subscriber line should be Active with known DPFO date.',
+        })
+        scenarios.append({
+            'title': 'Negative: Validate %s rejects change for Suspended/Hotlined line.' % feature_name,
+            'description': 'Attempt to change BCD date for a Suspended or Hotlined subscriber. Verify NBOP rejects or warns.',
+            'category': 'Negative',
+            'reasoning': 'BCD change behavior for non-Active lines must be validated.',
+            'precondition': 'Subscriber line is in Suspended or Hotlined status.',
+        })
+    else:
+        # Generic operation negatives for non-BCD features
+        scenarios.append({
+            'title': 'Negative: Validate %s rejects operation for Deactivated line.' % feature_name,
+            'description': 'Attempt %s on a Deactivated subscriber. Verify NBOP rejects the operation.' % feature_name,
+            'category': 'Negative',
+            'reasoning': 'Operations should validate line status before proceeding.',
+            'precondition': 'Subscriber line is in Deactivated status.',
+        })
+        scenarios.append({
+            'title': 'Negative: Validate %s handles invalid input in NBOP.' % feature_name,
+            'description': 'Enter invalid data on %s screen. Verify appropriate error message.' % feature_name,
+            'category': 'Negative',
+            'reasoning': 'UI must validate input and show clear error.',
+            'precondition': 'NBOP portal accessible, subscriber loaded.',
+        })
 
-    # ── 7. Negative — empty submission ──
-    scenarios.append({
-        'title': 'Negative: Validate %s rejects empty submission in NBOP.' % feature_name,
-        'description': 'Submit %s screen without entering required fields. Verify validation message.' % feature_name,
-        'category': 'Negative',
-        'reasoning': 'Empty submissions must be caught by UI validation.',
-        'precondition': 'NBOP portal accessible.',
-    })
-
-    # ── 8. Negative — non-existent subscriber ──
-    scenarios.append({
-        'title': 'Negative: Validate %s handles non-existent MDN in NBOP.' % feature_name,
-        'description': 'Search non-existent MDN on %s screen. Verify "not found" message.' % feature_name,
-        'category': 'Negative',
-        'reasoning': 'Non-existent subscribers must show clear error.',
-        'precondition': 'NBOP portal accessible.',
-    })
-
-    # ── 9. Edge case — session timeout ──
-    scenarios.append({
-        'title': 'Edge Case: Validate %s handles session timeout in NBOP.' % feature_name,
-        'description': 'Let NBOP session expire during %s. Verify redirect to login, no partial state.' % feature_name,
-        'category': 'Edge Case',
-        'reasoning': 'Session timeouts must not cause partial operations.',
-        'precondition': 'Subscriber profile loaded in NBOP.',
-    })
+    # ── 9. (Removed — session timeout TC not required for UI features) ──
 
     # ── 10. Edge case — browser refresh ──
     scenarios.append({
@@ -615,7 +731,7 @@ def generate_ui_scenarios(feature_name: str, description: str = '') -> List[dict
             'precondition': 'Subscriber line should be Active.',
         })
 
-    if 'feature' in ctx:
+    if 'change feature' in ctx or 'reset feature' in ctx or 'add feature' in ctx:
         scenarios.append({
             'title': 'Validate Features page shows all toggles with correct state.',
             'description': 'Click Features button. Verify all checkboxes/toggles display correctly.',

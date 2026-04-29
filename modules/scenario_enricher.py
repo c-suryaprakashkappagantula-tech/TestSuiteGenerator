@@ -74,11 +74,26 @@ def _neg(idx, fid, title, val, ctx):
             TestStep(4, 'Verify neither account is modified', 'Both accounts unchanged in DB'),
         ]
     elif 'rollback' in title_low:
+        # Feature-specific rollback steps
+        if 'swap' in title_low:
+            _restore = 'original ICCID/IMEI associations'
+        elif 'bcd' in title_low or 'dpfo' in title_low:
+            _restore = 'original BCD/DPFO reset day'
+        elif 'sync' in title_low or 'key info' in title_low:
+            _restore = 'original subscriber/account data'
+        elif 'port' in title_low:
+            _restore = 'original MDN and port status'
+        elif 'hotline' in title_low:
+            _restore = 'original line status'
+        else:
+            _restore = 'original subscriber state'
+        _op_name = re.sub(r'(?i)^.*?rollback\s*(?:failure\s*)?(?:for\s*)?(?:of\s*)?', '', title).strip()
+        _op_name = _op_name[:50] if _op_name else fname
         steps = [
-            TestStep(1, 'Trigger the operation and simulate failure during rollback phase', 'Rollback failure simulated'),
-            TestStep(2, 'Verify system detects inconsistent state', 'Inconsistency detected and logged'),
-            TestStep(3, 'Verify transaction marked for manual review', 'Manual review flag set'),
-            TestStep(4, 'Verify alert/notification sent to operations team', 'Operations team notified'),
+            TestStep(1, 'Trigger %s and simulate mid-operation failure' % _op_name[:50], 'Operation fails during processing'),
+            TestStep(2, 'Verify NSL detects failure and initiates rollback', 'Rollback triggered — inconsistency detected'),
+            TestStep(3, 'Verify %s are restored to pre-operation values' % _restore, '%s restored correctly' % _restore.capitalize()),
+            TestStep(4, 'Verify Transaction History shows rollback entry', 'Rollback logged with correct status and timestamp'),
         ]
     else:
         chain = get_step_chain(title, val, ctx)
