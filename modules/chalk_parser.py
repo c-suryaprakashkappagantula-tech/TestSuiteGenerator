@@ -319,17 +319,26 @@ def fetch_feature_from_pi(page, pi_url: str, feature_id: str, log=print) -> Chal
             data.feature_title = ln.strip()
             continue
         if feature_start >= 0 and i > feature_start + 2:
-            # Only treat as boundary if MWTGPROV-XXXX is at the START of the line
-            # (a new feature header), not embedded mid-sentence as a reference
+            # Only treat as boundary if a Jira key (e.g., MWTGPROV-XXXX, MOBIT2-XX) is at the START
+            # of the line (a new feature header), not embedded mid-sentence as a reference
             ln_stripped = ln.strip()
-            m = re.match(r'^(MWTGPROV-\d{3,5})\b', ln_stripped, re.IGNORECASE)
+            m = re.match(r'^([A-Z][A-Z0-9]+-\d+)\b', ln_stripped)
             if m and fid not in ln.upper():
                 feature_end = i
                 break
 
     if feature_start == -1:
         log(f'[CHALK] [WARN] Feature {feature_id} not found on this page')
-        return data
+        # SELF-HEAL: If the page was provided as a direct feature URL (manual mode),
+        # the entire page IS the feature content. Parse all lines as the feature section.
+        if len(lines) > 10:
+            log(f'[CHALK]   Self-heal: treating entire page ({len(lines)} lines) as feature content')
+            feature_start = 0
+            feature_end = len(lines)
+            feature_lines = lines
+            data.feature_title = feature_id
+        else:
+            return data
 
     feature_lines = lines[feature_start:feature_end]
 

@@ -728,8 +728,26 @@ _register(OperationContract(
 def resolve_operation(feature_name: str, description: str = '',
                       ac_text: str = '', scope: str = '') -> Optional[OperationContract]:
     """Resolve a feature to its operation contract by matching aliases.
-    Returns the BEST matching contract, or None if no match."""
+    Returns the BEST matching contract, or None if no match.
+    Requires a minimum score threshold to avoid false matches on generic words."""
     ctx = (feature_name + ' ' + description + ' ' + ac_text + ' ' + scope).lower()
+
+    # Features that should NEVER get a contract match (read-only / inquiry / notification)
+    _skip_keywords = [
+        'inquiry', 'usage detail', 'usage inquiry', 'event status', 'login auth',
+        'biller line info', 'device lock status', 'sim lock', 'gsma device',
+        'blocklist history', 'retrieve device detail', 'get transaction status',
+        'retrigger transaction', 'data throttling', 'data usage notification',
+        'dpfo notification', 'usage file processing', 'kafka', 'bi kafka',
+        'update subscriber differential', 'error code', 'message mapping',
+        'nbop functionalities', 'sim-info', 'sim info',
+        'validate mdn portability', 'mdn portability', 'port eligibility',
+        'reconnect eligibility', 'mhs data usage', 'data usage',
+        'usage will be handled', 'usage handled separately',
+    ]
+    _fname_lower = feature_name.lower()
+    if any(kw in _fname_lower for kw in _skip_keywords):
+        return None
 
     best_match = None
     best_score = 0
@@ -738,11 +756,15 @@ def resolve_operation(feature_name: str, description: str = '',
         score = 0
         for alias in op.aliases:
             if alias in ctx:
-                # Longer alias = more specific = higher score
                 score += len(alias)
         if score > best_score:
             best_score = score
             best_match = op
+
+    # Require minimum score — short/generic matches are unreliable
+    # A strong match needs at least 15 chars of alias overlap
+    if best_score < 15:
+        return None
 
     return best_match
 

@@ -187,6 +187,26 @@ def _step_fingerprint(tc) -> set:
     return set(re.findall(r'\b\w{4,}\b', text))
 
 
+def _normalized_step_set(tc) -> frozenset:
+    """Create a normalized step set for high-precision overlap detection.
+    Maps synonyms so 'Century Report' == 'transaction records', etc."""
+    result = set()
+    for s in tc.steps:
+        if not s.summary or len(s.summary.strip()) < 5:
+            continue
+        n = re.sub(r'\s+', ' ', s.summary).strip().lower()[:100]
+        n = n.replace('century report', 'transaction report')
+        n = n.replace('transaction records', 'transaction report')
+        n = n.replace('nsl db', 'subscriber data').replace('system db', 'subscriber data')
+        n = n.replace('nsl fetches', 'system fetches').replace('nsl ', 'system ')
+        n = n.replace('→', '-').replace('—', '-')
+        n = n.replace(' - ', ' ').replace('- ', ' ').replace(' -', ' ')
+        n = re.sub(r'^step\s*\d+[:\.\s]*', '', n)
+        n = re.sub(r'\s+', ' ', n).strip()[:70]
+        result.add(n)
+    return frozenset(result)
+
+
 def _title_similarity(title1, title2) -> float:
     """Jaccard similarity between two TC titles."""
     words1 = set(re.findall(r'\b\w{4,}\b', title1.lower()))
@@ -197,12 +217,19 @@ def _title_similarity(title1, title2) -> float:
 
 
 def _step_similarity(tc1, tc2) -> float:
-    """Jaccard similarity between two TCs based on step content."""
+    """Similarity between two TCs based on step content.
+    Uses MAX of keyword Jaccard and normalized step-set overlap."""
+    # Method 1: keyword Jaccard
     fp1 = _step_fingerprint(tc1)
     fp2 = _step_fingerprint(tc2)
-    if not fp1 or not fp2:
-        return 0.0
-    return len(fp1 & fp2) / len(fp1 | fp2)
+    kw_sim = len(fp1 & fp2) / len(fp1 | fp2) if (fp1 and fp2) else 0.0
+
+    # Method 2: normalized step-set overlap (catches synonym differences)
+    ns1 = _normalized_step_set(tc1)
+    ns2 = _normalized_step_set(tc2)
+    step_sim = len(ns1 & ns2) / max(len(ns1 | ns2), 1) if (ns1 and ns2) else 0.0
+
+    return max(kw_sim, step_sim)
 
 
 def dedup_and_merge(test_cases, log=print, threshold=0.85):
@@ -214,7 +241,7 @@ def dedup_and_merge(test_cases, log=print, threshold=0.85):
 
     # For smaller suites (<40 TCs), be more conservative — only merge near-duplicates
     if len(test_cases) < 40:
-        threshold = 0.92
+        threshold = 0.85
 
     merged_into = {}  # tc_index -> list of merged tc summaries
     to_remove = set()
@@ -237,7 +264,7 @@ def dedup_and_merge(test_cases, log=print, threshold=0.85):
                 if test_cases[i].category == test_cases[j].category:
                     # Also check title similarity — don't merge if titles describe different scenarios
                     title_sim = _title_similarity(test_cases[i].summary, test_cases[j].summary)
-                    if title_sim < 0.5:
+                    if title_sim < 0.3:
                         continue  # Different scenarios despite similar steps — keep both
                     if i not in merged_into:
                         merged_into[i] = []

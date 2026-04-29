@@ -121,14 +121,63 @@ class Pipeline:
 # ================================================================
 
 def block_jira_fetch(page, feature_id, log=print):
-    """Block 1: Fetch Jira issue with subtasks and attachments list."""
-    from .jira_fetcher import fetch_jira_issue, validate_jira_issue, download_attachments
-    from .database import save_jira
+    """Block 1: Fetch Jira issue — DB cache first, browser fallback.
 
+    V7: Checks the local DB cache first. If the Jira data is cached and
+    not stale (< 24h), uses it directly — NO browser needed.
+    Falls back to live Jira fetch via browser only when cache is missing or stale.
+    """
+    from .jira_fetcher import fetch_jira_issue, validate_jira_issue, download_attachments, JiraIssue, JiraAttachment
+    from .database import save_jira, load_jira, is_jira_stale
+    import json
+
+    # ── V7: Try DB cache first ──
+    if not is_jira_stale(feature_id):
+        cached = load_jira(feature_id)
+        if cached and cached.get('summary'):
+            log('[PIPELINE] ⚡ Jira DB cache hit for %s (skipping browser)' % feature_id)
+            # Reconstruct JiraIssue from cached dict
+            jira = JiraIssue(
+                key=cached.get('feature_id', feature_id),
+                summary=cached.get('summary', ''),
+                description=cached.get('description', ''),
+                status=cached.get('status', ''),
+                priority=cached.get('priority', ''),
+                assignee=cached.get('assignee', ''),
+                reporter=cached.get('reporter', ''),
+                labels=json.loads(cached.get('labels_json', '[]')),
+                acceptance_criteria=cached.get('ac_text', ''),
+                attachments=[JiraAttachment(filename=a.get('filename', ''), url=a.get('url', ''), size=a.get('size', 0))
+                             for a in json.loads(cached.get('attachments_json', '[]'))],
+                linked_issues=json.loads(cached.get('links_json', '[]')),
+                subtasks=json.loads(cached.get('subtasks_json', '[]')),
+                comments=json.loads(cached.get('comments_json', '[]')),
+                pi=cached.get('pi', ''),
+                channel=cached.get('channel', ''),
+                raw_json=json.loads(cached.get('raw_json', '{}')) if cached.get('raw_json') else {},
+            )
+            warnings = validate_jira_issue(jira, log=log)
+            log('[PIPELINE]   %s | %s | %d subtasks | %d comments | AC=%s' % (
+                jira.key, jira.summary[:50], len(jira.subtasks), len(jira.comments), bool(jira.acceptance_criteria)))
+
+            # Attachments: check if already downloaded locally
+            att_paths = []
+            from .config import ATTACHMENTS
+            for att in jira.attachments:
+                local = ATTACHMENTS / ('%s_%s' % (feature_id, att.filename))
+                if local.exists():
+                    att_paths.append(local)
+            if att_paths:
+                log('[PIPELINE]   %d attachments found locally (no download needed)' % len(att_paths))
+
+            return {'jira': jira, 'warnings': warnings, 'att_paths': att_paths}
+
+    # ── Fallback: live fetch via browser ──
+    log('[PIPELINE] Jira DB cache miss or stale for %s — fetching via browser' % feature_id)
     jira = fetch_jira_issue(page, feature_id, log=log)
     warnings = validate_jira_issue(jira, log=log)
 
-    # Save to DB for caching (Finding #3)
+    # Save to DB for caching
     try:
         save_jira(jira)
         log('[PIPELINE] Jira data saved to DB for %s' % feature_id)
