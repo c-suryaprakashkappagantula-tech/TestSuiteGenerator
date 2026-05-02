@@ -38,6 +38,10 @@ def classify_feature(feature_name: str, description: str = '', channel: str = ''
 
     result = FeatureClassification(feature_type='api_crud')
 
+    # ── CR/Bug fix detection — don't over-classify bug tickets ──
+    from .cr_detector import is_cr_or_bug as _is_cr_check
+    _is_cr_or_bug = _is_cr_check(jira_summary, '', description)
+
     # ── UI/Portal detection (highest priority) ──
     # Check if NBOP is the PRIMARY channel with NO API tags
     has_api_tags = any(kw in ctx for kw in ['nslnm', 'nenm', '[nsl', 'nsl,'])
@@ -48,6 +52,14 @@ def classify_feature(feature_name: str, description: str = '', channel: str = ''
         ('[nbop' in ctx.split('\n')[0] if ctx else False) or
         ('nbop' in ctx and any(kw in ctx for kw in ['screen', 'menu', 'navigation', 'display']))
     )
+    # OVERRIDE: For CR/bug fix tickets, "NBOP" in the title (e.g., "in NBOP not working")
+    # does NOT mean it's an NBOP UI feature — it describes WHERE the bug manifests.
+    # Only treat as nbop_primary if NBOP is the SOLE channel (not mixed like "ITMBO, NBOP").
+    if _is_cr_or_bug and nbop_primary:
+        _channel_upper = channel.strip().upper()
+        _nbop_is_sole_channel = _channel_upper == 'NBOP'
+        if not _nbop_is_sole_channel:
+            nbop_primary = False
     # OVERRIDE: When NBOP is listed FIRST in component tags [NBOP, ...],
     # it's the primary component — treat as pure UI regardless of other tags.
     # Also covers features with [NBOP, INTG], [NBOP, NSLNM, INTG], etc.

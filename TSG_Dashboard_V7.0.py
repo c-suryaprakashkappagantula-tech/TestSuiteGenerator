@@ -169,7 +169,7 @@ with _mode_col3:
             '<div style="padding:6px 14px;border-radius:8px;margin-top:4px;'
             'background:rgba(251,191,36,0.1);border:1px solid rgba(251,191,36,0.3);'
             'font-size:12px;color:#FBBF24;font-weight:600;">'
-            '🔗 Manual mode — provide Jira &amp; Chalk URLs directly</div>',
+            '🔗 Manual mode — provide Jira and/or Chalk URLs directly</div>',
             unsafe_allow_html=True)
     else:
         st.markdown(
@@ -214,8 +214,9 @@ with left:
 
         st.markdown(
             '<div style="color:#64748b;font-size:12px;margin-bottom:10px;">'
-            'Paste the Jira feature URL and the Chalk page URL containing the feature scope. '
-            'The generator will fetch data from these links directly.</div>',
+            'Provide at least one URL below. If only Jira is provided, the test suite will be '
+            'built from Jira data alone. If only Chalk is provided, Chalk scenarios will be used '
+            'without Jira metadata. Both URLs together give the best results.</div>',
             unsafe_allow_html=True)
 
         _manual_jira = st.text_input(
@@ -226,11 +227,12 @@ with left:
             help='Full Jira URL — feature ID will be extracted automatically')
 
         _manual_chalk = st.text_input(
-            '🔗 Chalk Page URL',
+            '🔗 Chalk Page URL (optional)',
             value=ss.get('manual_chalk_url', ''),
             placeholder='https://chalk.charter.com/spaces/MDA/pages/3281127794/PI-53',
             key='manual_chalk_input',
-            help='Chalk page URL containing the feature scope/scenarios')
+            help='Optional — Chalk page URL containing the feature scope/scenarios. '
+                 'If not provided, test suite will be built from Jira data only.')
 
         ss['manual_jira_url'] = _manual_jira
         ss['manual_chalk_url'] = _manual_chalk
@@ -243,6 +245,10 @@ with left:
             _jira_match = _re_manual.search(r'([A-Z][A-Z0-9]+-\d+)', _manual_jira.upper())
             if _jira_match:
                 _manual_fid = _jira_match.group(1)
+
+        # Determine what's missing for warning
+        _has_jira = bool(_manual_fid)
+        _has_chalk = bool(_manual_chalk and _manual_chalk.strip())
 
         # Validation badges
         _vc1, _vc2 = st.columns(2)
@@ -259,25 +265,57 @@ with left:
                     'background:rgba(251,113,133,0.08);border:1px solid rgba(251,113,133,0.2);'
                     'font-size:12px;color:#FB7185;">❌ Could not extract a Jira ID (e.g., PROJ-123) from URL</div>',
                     unsafe_allow_html=True)
+            else:
+                st.markdown(
+                    '<div style="padding:6px 12px;border-radius:8px;margin:4px 0;'
+                    'background:rgba(251,191,36,0.1);border:1px solid rgba(251,191,36,0.3);'
+                    'font-size:12px;color:#FBBF24;">⚠️ No Jira URL — Chalk-only mode</div>',
+                    unsafe_allow_html=True)
         with _vc2:
-            if _manual_chalk and 'chalk.charter.com' in _manual_chalk.lower():
+            if _has_chalk and 'chalk.charter.com' in _manual_chalk.lower():
                 st.markdown(
                     '<div style="padding:6px 12px;border-radius:8px;margin:4px 0;'
                     'background:rgba(52,211,153,0.08);border:1px solid rgba(52,211,153,0.2);'
                     'font-size:12px;color:#34D399;">✅ Chalk URL valid</div>',
                     unsafe_allow_html=True)
-            elif _manual_chalk:
+            elif _has_chalk:
                 st.markdown(
                     '<div style="padding:6px 12px;border-radius:8px;margin:4px 0;'
                     'background:rgba(251,191,36,0.1);border:1px solid rgba(251,191,36,0.3);'
                     'font-size:12px;color:#FBBF24;">⚠️ URL does not look like a Chalk page</div>',
                     unsafe_allow_html=True)
+            else:
+                st.markdown(
+                    '<div style="padding:6px 12px;border-radius:8px;margin:4px 0;'
+                    'background:rgba(251,191,36,0.1);border:1px solid rgba(251,191,36,0.3);'
+                    'font-size:12px;color:#FBBF24;">⚠️ No Chalk URL — Jira-only mode</div>',
+                    unsafe_allow_html=True)
+
+        # When no Jira URL but Chalk URL is provided, ask for a Feature ID
+        _manual_fid_override = ''
+        if _has_chalk and not _has_jira:
+            _manual_fid_override = st.text_input(
+                '🏷️ Feature ID (required when no Jira URL)',
+                value='', placeholder='e.g. MWTGPROV-4254',
+                key='manual_fid_override',
+                help='Enter the Jira feature ID manually since no Jira URL was provided.')
+
+        # Show missing-URL warning with continue option
+        if (_has_jira or _has_chalk) and not (_has_jira and _has_chalk):
+            _missing = 'Chalk URL' if not _has_chalk else 'Jira URL'
+            _impact = ('Test suite will be built from Jira description only (no Chalk scenarios).'
+                       if not _has_chalk else
+                       'Test suite will be built from Chalk scenarios only (no Jira metadata/AC).')
+            st.warning('⚠️ **%s not provided.** %s\n\nYou can still proceed — click Execute to continue.' % (_missing, _impact))
 
         st.markdown("</div>", unsafe_allow_html=True)
 
+        # Resolve final feature ID: Jira URL extraction > manual override
+        _final_fid = _manual_fid or _manual_fid_override.strip().upper()
+
         # Set variables for downstream compatibility
-        feature_id = _manual_fid
-        feature_ids = [_manual_fid] if _manual_fid else []
+        feature_id = _final_fid
+        feature_ids = [_final_fid] if _final_fid else []
         manual_mode = False
         batch_mode = False
         _sync_in_progress = False
@@ -859,7 +897,7 @@ with right:
             if ss.get('logs'):
                 _cli_text = '\n'.join(ss['logs'])
                 _log_filename = 'TSG_CLI_Log_%s_%s.txt' % (
-                    ss.get('selected_pi', 'Manual').replace(' ', '_'),
+                    (ss.get('selected_pi') or 'Manual').replace(' ', '_'),
                     datetime.now().strftime('%Y%m%d_%H%M%S'))
                 st.download_button(
                     '📋 Download CLI Log (%d lines)' % len(ss['logs']),
@@ -1194,11 +1232,13 @@ if run_btn:
         _features_to_run = [s.split(' - ')[0].strip().upper() for s in ss['_batch_default'] if s.strip()]
 
     if not _features_to_run:
-        st.error('Please enter a Feature ID.' if not _is_manual_mode else 'Please provide a valid Jira URL with a MWTGPROV-XXXX feature ID.')
+        st.error('Please enter a Feature ID.' if not _is_manual_mode else 'Please provide at least one URL (Jira or Chalk) to proceed.')
     elif not _is_manual_mode and not ss.get('selected_pi'):
         st.error('Please select a PI iteration first.')
-    elif _is_manual_mode and not ss.get('manual_chalk_url'):
-        st.error('Please provide a Chalk page URL.')
+    elif _is_manual_mode and not ss.get('manual_jira_url', '').strip() and not ss.get('manual_chalk_url', '').strip():
+        st.error('Please provide at least one URL — either Jira or Chalk — to generate a test suite.')
+    elif _is_manual_mode and not _features_to_run:
+        st.error('Please provide a Feature ID. Enter a Jira URL or type the Feature ID manually.')
     else:
         feature_id = _features_to_run[0]  # primary feature (for single mode compat)
         ss['logs'] = []
@@ -1242,28 +1282,47 @@ if run_btn:
                     _bp = '[%d/%d] ' % (_fi, _batch_count) if _batch_count > 1 else ''
 
                     # Block 1: Jira Fetch (with self-heal retry)
-                    logger.set('%sBlock 1: Fetching Jira %s...' % (_bp, feature_id))
-                    jira_result = pipe.run('Jira_%s' % feature_id,
-                        lambda fid=feature_id: block_jira_fetch(page, fid, log=logger))
-                    jira = jira_result['jira']
-                    att_paths = jira_result['att_paths'] if inc_attachments else []
-                    exit_items.append('%s%s: Jira fetched — %s' % (_bp, feature_id, jira.summary[:40]))
+                    _has_jira_url = bool(ss.get('manual_jira_url', '').strip()) if _is_manual_mode else True
+                    if _has_jira_url:
+                        logger.set('%sBlock 1: Fetching Jira %s...' % (_bp, feature_id))
+                        jira_result = pipe.run('Jira_%s' % feature_id,
+                            lambda fid=feature_id: block_jira_fetch(page, fid, log=logger))
+                        jira = jira_result['jira']
+                        att_paths = jira_result['att_paths'] if inc_attachments else []
+                        exit_items.append('%s%s: Jira fetched — %s' % (_bp, feature_id, jira.summary[:40]))
+                    else:
+                        # Chalk-only mode: create a minimal Jira stub
+                        from modules.jira_fetcher import JiraIssue
+                        logger.set('%sBlock 1: No Jira URL — using Chalk-only mode for %s' % (_bp, feature_id))
+                        print('[MANUAL] No Jira URL provided. Creating minimal Jira stub for %s.' % feature_id, flush=True)
+                        jira = JiraIssue(key=feature_id, summary='%s (Chalk-only)' % feature_id,
+                                         description='No Jira data — test suite built from Chalk scenarios only.',
+                                         channel=channel)
+                        att_paths = []
+                        exit_items.append('%s%s: Chalk-only mode (no Jira)' % (_bp, feature_id))
 
                     # Block 2 & 3: Chalk Data
                     if _is_manual_mode:
-                        # Manual mode: skip DB, go straight to live fetch using provided Chalk URL
-                        logger.set('%sBlock 2: Chalk live fetch from manual URL %s...' % (_bp, feature_id))
-                        _manual_chalk_url = ss.get('manual_chalk_url', '')
-                        chalk_live = pipe.run('ChalkLive_%s' % feature_id,
-                            lambda fid=feature_id, curl=_manual_chalk_url: block_chalk_live(
-                                page, fid, curl, 'Manual', [(ss.get('selected_pi', 'Manual'), curl)], log=logger))
-                        chalk = chalk_live['chalk']
+                        _manual_chalk_url = ss.get('manual_chalk_url', '').strip()
+                        if _manual_chalk_url:
+                            # Manual mode with Chalk URL: live fetch from provided URL
+                            logger.set('%sBlock 2: Chalk live fetch from manual URL %s...' % (_bp, feature_id))
+                            chalk_live = pipe.run('ChalkLive_%s' % feature_id,
+                                lambda fid=feature_id, curl=_manual_chalk_url: block_chalk_live(
+                                    page, fid, curl, 'Manual', [(ss.get('selected_pi') or 'Manual', curl)], log=logger))
+                            chalk = chalk_live['chalk']
+                        else:
+                            # Manual mode without Chalk URL: skip Chalk, build from Jira only
+                            from modules.chalk_parser import ChalkData
+                            logger.set('%sBlock 2: No Chalk URL provided — Jira-only mode %s' % (_bp, feature_id))
+                            print('[MANUAL] No Chalk URL provided. Test suite will be built from Jira data only.', flush=True)
+                            chalk = ChalkData(feature_id=feature_id)
                     else:
                         # PI Scope mode: DB first, live fallback
                         # Block 2: Chalk DB Lookup (with self-heal retry)
                         logger.set('%sBlock 2: Chalk DB lookup %s...' % (_bp, feature_id))
                         chalk_db = pipe.run('ChalkDB_%s' % feature_id,
-                            lambda fid=feature_id: block_chalk_db(fid, ss.get('selected_pi', ''), log=logger))
+                            lambda fid=feature_id: block_chalk_db(fid, ss.get('selected_pi') or '', log=logger))
                         chalk = chalk_db['chalk']
 
                         # Block 3: Chalk Live Fetch (only if DB missed, with self-heal retry)
@@ -1271,7 +1330,7 @@ if run_btn:
                             logger.set('%sBlock 3: Chalk live fetch %s...' % (_bp, feature_id))
                             chalk_live = pipe.run('ChalkLive_%s' % feature_id,
                                 lambda fid=feature_id: block_chalk_live(
-                                    page, fid, ss['selected_pi_url'], ss['selected_pi'], ss['pi_list'], log=logger))
+                                    page, fid, ss.get('selected_pi_url') or '', ss.get('selected_pi') or '', ss.get('pi_list') or [], log=logger))
                             chalk = chalk_live['chalk']
 
                     # Block 4: Document Parsing (with self-heal retry + V7 graceful fallback)

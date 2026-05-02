@@ -13,6 +13,7 @@ from .doc_parser import ParsedDoc
 from .step_templates import get_step_chain
 from .instruction_parser import parse_instructions, apply_adjustments
 from .scenario_enricher import enrich_scenarios
+from .cr_detector import is_cr_or_bug
 
 # Engine version — stored with each suite for rule versioning (Finding #5)
 ENGINE_VERSION = '4.0.1'
@@ -808,7 +809,11 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print):
     # Step 8b2: UI VERIFICATION MIRROR — add NBOP verification TCs for API operations
     # This is ADDITIVE — never modifies existing TCs, only appends new ones
     # Only runs for features that have API TCs with matching NBOP menu paths
-    if not _fc.is_notification or getattr(suite, '_contract', None):
+    # SKIP for CR/bug fix tickets — they should focus on the specific defect
+    _is_cr_or_bug = is_cr_or_bug(jira.summary, jira.issue_type, jira.description)
+    if _is_cr_or_bug:
+        log('[ENGINE] Step 8b2: Skipping UI mirror for CR/bug fix ticket (focus on defect)')
+    elif not _fc.is_notification or getattr(suite, '_contract', None):
         log('[ENGINE] Step 8b2: UI Verification Mirror...')
         try:
             from .ui_mirror import generate_ui_mirror_tcs
@@ -1050,6 +1055,107 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print):
         tc.sno = str(i)
         for j, step in enumerate(tc.steps, 1):
             step.step_num = j
+
+    # ════════════════════════════════════════════════════════════════
+    # Step 9b: CR/BUG FIX SCOPE FILTER
+    # For CR/bug fix tickets, the engine generates too many TCs because
+    # it treats them like full features. CRs have a narrow scope — keep
+    # only TCs directly relevant to the defect, capped at a reasonable count.
+    # ════════════════════════════════════════════════════════════════
+    _summary_lower = (jira.summary or '').lower()
+    _issue_type_lower = (jira.issue_type or '').lower()
+    _is_cr_or_bug = is_cr_or_bug(jira.summary, jira.issue_type, jira.description)
+    _CR_TC_CAP = 8  # Max TCs for a CR/bug fix
+
+    if _is_cr_or_bug and len(suite.test_cases) > _CR_TC_CAP:
+        log('[ENGINE] Step 9b: CR/Bug fix detected — filtering to defect scope...')
+        log('[ENGINE]   Before filter: %d TCs' % len(suite.test_cases))
+
+        # Build defect context from: AC, description, subtask summaries
+        _defect_ctx = (
+            (jira.acceptance_criteria or '') + ' ' +
+            (jira.description or '') + ' ' +
+            ' '.join(s.get('summary', '') + ' ' + s.get('description', '') for s in jira.subtasks)
+        ).lower()
+        # Extract key defect terms (words that appear in defect context but are specific)
+        _defect_words = set(re.findall(r'\b[a-z]{4,}\b', _defect_ctx))
+        _stop_words = {'that', 'this', 'with', 'from', 'have', 'should', 'must', 'when',
+                       'then', 'will', 'been', 'being', 'were', 'also', 'into', 'only',
+                       'feature', 'test', 'case', 'validate', 'verify', 'ensure', 'check',
+                       'system', 'shall', 'need', 'needs', 'already', 'above', 'below',
+                       'which', 'where', 'what', 'there', 'their', 'these', 'those',
+                       'after', 'before', 'during', 'between', 'through', 'about'}
+        _defect_words -= _stop_words
+
+        # Score each TC by relevance to defect context
+        _scored = []
+        for tc in suite.test_cases:
+            _tc_text = (
+                tc.summary.lower() + ' ' + tc.description.lower() + ' ' +
+                ' '.join((s.summary or '').lower() + ' ' + (s.expected or '').lower() for s in tc.steps)
+            )
+            _tc_words = set(re.findall(r'\b[a-z]{4,}\b', _tc_text))
+            _overlap = len(_tc_words & _defect_words)
+            # Bonus for category diversity
+            _cat_bonus = 0
+            if tc.category == 'Negative':
+                _cat_bonus = 2
+            elif tc.category in ('E2E', 'Edge Case'):
+                _cat_bonus = 1
+            elif tc.category == 'Regression':
+                _cat_bonus = 1
+            # Bonus for subtask-derived TCs (they're directly from the CR scope)
+            _subtask_bonus = 3 if any(s.get('key', '') in tc.summary for s in jira.subtasks) else 0
+            # Bonus for TCs that mention the specific defect keywords
+            _defect_bonus = 0
+            for kw in ['guaranteed delivery', 'guarente', 'not working', 'deactiv', 'retry',
+                        'error', 'failed', 'failure', 'invalid', 'rollback']:
+                if kw in _tc_text:
+                    _defect_bonus += 2
+            _score = _overlap + _cat_bonus + _subtask_bonus + _defect_bonus
+            _scored.append((_score, tc))
+
+        # Sort by score descending, keep top N
+        _scored.sort(key=lambda x: x[0], reverse=True)
+
+        # Ensure category diversity: at least 1 happy path, 1 negative, 1 E2E/regression
+        _kept = []
+        _cats_seen = set()
+        _must_have_cats = {'Happy Path', 'Negative'}
+        for _score, tc in _scored:
+            if len(_kept) >= _CR_TC_CAP:
+                break
+            if tc.category in _must_have_cats and tc.category not in _cats_seen:
+                _kept.append(tc)
+                _cats_seen.add(tc.category)
+            elif tc.category not in _must_have_cats and len(_kept) < _CR_TC_CAP:
+                _kept.append(tc)
+                _cats_seen.add(tc.category)
+            elif tc.category in _cats_seen and len(_kept) < _CR_TC_CAP:
+                _kept.append(tc)
+
+        # Fill remaining slots from top-scored TCs not yet included
+        _kept_set = set(id(tc) for tc in _kept)
+        for _score, tc in _scored:
+            if len(_kept) >= _CR_TC_CAP:
+                break
+            if id(tc) not in _kept_set:
+                _kept.append(tc)
+                _kept_set.add(id(tc))
+
+        suite.test_cases = _kept[:_CR_TC_CAP]
+        log('[ENGINE]   After CR filter: %d TCs (capped at %d)' % (len(suite.test_cases), _CR_TC_CAP))
+        suite.warnings.append('CR/Bug fix mode: TCs filtered to defect scope (max %d)' % _CR_TC_CAP)
+
+        # Re-number
+        for i, tc in enumerate(suite.test_cases, 1):
+            tc.sno = str(i)
+            for j, step in enumerate(tc.steps, 1):
+                step.step_num = j
+
+    elif _is_cr_or_bug:
+        log('[ENGINE] Step 9b: CR/Bug fix detected — %d TCs within cap (%d), no filtering needed' % (
+            len(suite.test_cases), _CR_TC_CAP))
 
     # Step 10: Auto-group TCs by pattern detection
     log('[ENGINE] Step 10: Auto-grouping test cases...')
@@ -2297,6 +2403,8 @@ def _build_from_jira_only(jira, feature_name=''):
       - API operations (Update, Cancel, Inquiry, etc.)
       - Channel-specific scenarios (ITMBO, NBOP)
       - Workflow steps and lifecycle flows
+    V4.1: CR/Bug fix mode — builds TCs from defect reproduction steps,
+      linked defect content, and AC instead of generic keyword mining.
     """
     fname = feature_name or jira.key
     # Sanitize: strip % to prevent string formatting crashes
@@ -2304,6 +2412,268 @@ def _build_from_jira_only(jira, feature_name=''):
     tcs = []
     idx = 1
 
+    # ── CR/BUG FIX DETECTION ──
+    _is_cr = is_cr_or_bug(jira.summary, jira.issue_type, jira.description)
+
+    if _is_cr:
+        # ── CR MODE: Build TCs from defect scope, not generic mining ──
+        # Sources: AC text, linked defect descriptions, subtask AC
+        _defect_text = ''
+        _repro_steps = []
+        _expected = ''
+        _actual = ''
+
+        # 1. Extract from AC
+        ac_text = re.sub(r'\{[^}]+\}', '', jira.acceptance_criteria or '')
+        ac_text = re.sub(r'\*', '', ac_text).strip()
+        _defect_text += ac_text + '\n'
+
+        # 2. Extract from linked defects (deep-fetched descriptions)
+        for li in jira.linked_issues:
+            li_desc = li.get('description', '') or ''
+            if li_desc:
+                _defect_text += li_desc + '\n'
+            li_ac = li.get('acceptance_criteria', '') or ''
+            if li_ac:
+                _defect_text += li_ac + '\n'
+            # Parse "Steps to Reproduce" from linked defect
+            _steps_match = re.findall(r'Step\s*\d+[:\s]*(.+?)(?=Step\s*\d+|Actual|Expected|$)',
+                                       li_desc, re.IGNORECASE | re.DOTALL)
+            if _steps_match:
+                _repro_steps = [s.strip() for s in _steps_match if s.strip()]
+            # Parse Actual/Expected
+            _actual_match = re.search(r'Actual[:\s]*(.+?)(?=Expected|$)', li_desc, re.IGNORECASE | re.DOTALL)
+            if _actual_match:
+                _actual = _actual_match.group(1).strip()
+            _expected_match = re.search(r'Expected[:\s]*(.+?)$', li_desc, re.IGNORECASE | re.DOTALL)
+            if _expected_match:
+                _expected = _expected_match.group(1).strip()
+
+        # 3. Extract from subtask AC
+        for st in jira.subtasks:
+            st_ac = st.get('acceptance_criteria', '') or ''
+            if st_ac:
+                _defect_text += re.sub(r'\{[^}]+\}', '', st_ac) + '\n'
+            # Also check subtask description for repro steps
+            st_desc = st.get('description', '') or ''
+            if st_desc and not _repro_steps:
+                _steps_match = re.findall(r'Step\s*\d+[:\s]*(.+?)(?=Step\s*\d+|Actual|Expected|$)',
+                                           st_desc, re.IGNORECASE | re.DOTALL)
+                if _steps_match:
+                    _repro_steps = [s.strip() for s in _steps_match if s.strip()]
+            # Parse Post-Conditions as expected behavior
+            _post_match = re.search(r'Post.?Conditions[:\s]*(.+?)(?=Assumptions|Dependencies|Reason|$)',
+                                     st_desc, re.IGNORECASE | re.DOTALL)
+            if _post_match and not _expected:
+                _expected = re.sub(r'\{[^}]+\}', '', _post_match.group(1)).strip()
+                _expected = re.sub(r'\*', '', _expected).strip()
+
+        # Also parse AC text for repro steps if linked defect didn't have them
+        if not _repro_steps:
+            _ac_steps = re.findall(r'Step\s*\d+[:\s]*(.+?)(?=Step\s*\d+|Actual|Expected|$)',
+                                    ac_text, re.IGNORECASE | re.DOTALL)
+            if _ac_steps:
+                _repro_steps = [s.strip() for s in _ac_steps if s.strip()]
+
+        # Parse AC for actual/expected if not found yet
+        if not _actual:
+            _ac_actual = re.search(r'(?:shows error|got failed|error\s*[-–:]\s*)(.+?)(?:\.|$)',
+                                    ac_text, re.IGNORECASE)
+            if _ac_actual:
+                _actual = _ac_actual.group(0).strip()
+        if not _expected:
+            _ac_expected = re.search(r'(?:should be|must be|expected)(.+?)(?:\.|$)',
+                                      ac_text, re.IGNORECASE)
+            if _ac_expected:
+                _expected = _ac_expected.group(0).strip()
+
+        # ── BUILD CR TCs from actual defect data ──
+
+        # Clean up all extracted text
+        def _clean(t):
+            t = re.sub(r'\{[^}]+\}', '', t or '')
+            t = re.sub(r'\*+', '', t)
+            t = re.sub(r'\xa0', ' ', t)
+            t = re.sub(r'\r\n', '\n', t)
+            return t.strip()
+
+        # ── Extract preconditions from subtask Pre-Conditions section ──
+        _preconditions = []
+        for st in jira.subtasks:
+            st_desc = _clean(st.get('description', ''))
+            _pre_match = re.search(r'Pre.?Conditions[:\s]*(.+?)(?=Post.?Conditions|Assumptions|Dependencies|User Story|\*|$)',
+                                    st_desc, re.IGNORECASE | re.DOTALL)
+            if _pre_match:
+                _pre_text = _pre_match.group(1).strip()
+                if _pre_text and len(_pre_text) > 5:
+                    _preconditions.append(_pre_text)
+
+        # ── Extract the defect scenario from AC ──
+        _ac_clean = _clean(jira.acceptance_criteria or '')
+        # Parse: "When a MDN is de-active in TMO, running a Deactivate API, shows error..."
+        _scenario_match = re.search(r'(When\s+.+?(?:shows error|got failed|error|not working)[^.]*\.)',
+                                     _ac_clean, re.IGNORECASE | re.DOTALL)
+        _defect_scenario = _scenario_match.group(1).strip() if _scenario_match else ''
+
+        # Parse: "MDN should be Deactivated..." (expected after fix)
+        _fix_expected = ''
+        _exp_match = re.search(r'(MDN should\s+.+?)(?:\.|$)', _ac_clean, re.IGNORECASE)
+        if _exp_match:
+            _fix_expected = _exp_match.group(1).strip()
+        if not _fix_expected:
+            # Try subtask AC
+            for st in jira.subtasks:
+                st_ac = _clean(st.get('acceptance_criteria', ''))
+                if st_ac and len(st_ac) > 20:
+                    _fix_expected = st_ac
+                    break
+
+        # Parse the actual error message
+        _error_msg = ''
+        _err_match = re.search(r'"([^"]+)"', jira.acceptance_criteria or '')
+        if _err_match:
+            _error_msg = _err_match.group(1)
+
+        # ── Extract post-conditions from subtask ──
+        _post_conditions = ''
+        for st in jira.subtasks:
+            st_desc = _clean(st.get('description', ''))
+            _post_match = re.search(r'Post.?Conditions[:\s]*(.+?)(?=Assumptions|Dependencies|Reason|\*\*|\n\n\n|$)',
+                                     st_desc, re.IGNORECASE | re.DOTALL)
+            if _post_match:
+                _post_conditions = _post_match.group(1).strip()
+
+        # ── Build precondition text ──
+        _precond_text = ''
+        if _preconditions:
+            _precond_text = '\n'.join('%d.\t%s' % (i+1, p) for i, p in enumerate(_preconditions))
+        # Add defect-specific preconditions from the scenario
+        if 'de-active in tmo' in _ac_clean.lower() or 'deactive' in _ac_clean.lower():
+            _extra_pre = []
+            if 'de-active in tmo' in _ac_clean.lower() or 'deactivated in tmo' in _ac_clean.lower():
+                _extra_pre.append('MDN must be De-Active (inactive) in TMO')
+            if 'active in nbop' in _ac_clean.lower() or 'active in nsl' in _ac_clean.lower() or 'still shows' in _ac_clean.lower():
+                _extra_pre.append('MDN must be Active in NBOP/NSL DB')
+            if not _extra_pre:
+                _extra_pre.append('MDN is De-Active in TMO but Active in NBOP/NSL DB')
+            _start = len(_preconditions) + 1
+            _precond_text += ('\n' if _precond_text else '') + '\n'.join(
+                '%d.\t%s' % (i + _start, p) for i, p in enumerate(_extra_pre))
+
+        # ── TC1: Reproduce defect & verify fix ──
+        _tc1_steps = []
+        if _repro_steps:
+            for ri, rs in enumerate(_repro_steps, 1):
+                _tc1_steps.append(TestStep(ri, rs, 'Step completed successfully'))
+        else:
+            # Build steps from the defect scenario in AC
+            _step_num = 1
+            if 'de-active in tmo' in _ac_clean.lower():
+                _tc1_steps.append(TestStep(_step_num,
+                    'Verify MDN is De-Active (inactive) in TMO',
+                    'MDN status confirmed as inactive/de-active in TMO'))
+                _step_num += 1
+            if 'active in nbop' in _ac_clean.lower() or 'still shows' in _ac_clean.lower():
+                _tc1_steps.append(TestStep(_step_num,
+                    'Verify MDN is Active in NBOP/NSL DB',
+                    'MDN status confirmed as Active in NBOP/NSL DB'))
+                _step_num += 1
+            _tc1_steps.append(TestStep(_step_num,
+                'Run the Deactivate API for the MDN',
+                'Deactivate API request sent to NSL'))
+            _step_num += 1
+            if _error_msg:
+                _tc1_steps.append(TestStep(_step_num,
+                    'Verify the old error "%s" does NOT occur' % _error_msg,
+                    'No error. NSL returns guaranteed delivery response.'))
+                _step_num += 1
+            _tc1_steps.append(TestStep(_step_num,
+                'Verify MDN is now Deactivated in NBOP',
+                _fix_expected or 'MDN status updated to De-Active in NBOP'))
+            _step_num += 1
+            if _post_conditions:
+                _tc1_steps.append(TestStep(_step_num,
+                    'Verify post-condition: %s' % _post_conditions[:120],
+                    'NSL returned guaranteed response and updated line status'))
+                _step_num += 1
+
+        tcs.append(TestCase(
+            sno=str(idx),
+            summary='TC%03d_%s_Verify CR fix: %s' % (idx, jira.key, fname[:60]),
+            description='Reproduce the defect scenario and verify the fix. '
+                        'Defect: %s. '
+                        'Expected after fix: %s' % (
+                            _defect_scenario[:120] if _defect_scenario else (_error_msg or 'Error reported'),
+                            _fix_expected[:120] if _fix_expected else 'Defect resolved'),
+            preconditions=_precond_text or '1.\tMDN is De-Active in TMO\n2.\tMDN is Active in NBOP/NSL DB\n3.\tDeactivate API is available',
+            steps=_tc1_steps,
+            story_linkage=jira.key, label=jira.key, category='Happy Path',
+        ))
+        idx += 1
+
+        # ── TC2: Verify old error no longer occurs ──
+        if _error_msg:
+            tcs.append(TestCase(
+                sno=str(idx),
+                summary='TC%03d_%s_Negative: Verify old error "%s" no longer occurs' % (idx, jira.key, _error_msg[:40]),
+                description='Confirm the previously reported error ("%s") no longer occurs after the fix.' % _error_msg,
+                preconditions=_precond_text or '1.\tMDN is De-Active in TMO\n2.\tMDN is Active in NBOP/NSL DB',
+                steps=[
+                    TestStep(1, 'Set up the exact defect scenario: MDN de-active in TMO, active in NBOP/NSL',
+                             'Defect preconditions established'),
+                    TestStep(2, 'Run the Deactivate API for the MDN',
+                             'API request sent'),
+                    TestStep(3, 'Verify the error "%s" does NOT appear in the response' % _error_msg,
+                             'No error. NSL returns success/guaranteed delivery response.'),
+                    TestStep(4, 'Verify MDN status is updated to De-Active in NBOP after the operation',
+                             'MDN is De-Active in NBOP — line status correctly updated'),
+                ],
+                story_linkage=jira.key, label=jira.key, category='Negative',
+            ))
+            idx += 1
+
+        # ── TC3: Verify MDN status after guaranteed delivery (re-verify after delay) ──
+        tcs.append(TestCase(
+            sno=str(idx),
+            summary='TC%03d_%s_Verify MDN status persists after guaranteed delivery' % (idx, jira.key),
+            description='After the GD fix, verify MDN stays De-Active in NBOP even after a delay '
+                        '(previously it showed Active after 1 hour).',
+            preconditions=_precond_text or '1.\tMDN is De-Active in TMO\n2.\tDeactivate API has been run',
+            steps=[
+                TestStep(1, 'Run the Deactivate API for MDN that is de-active in TMO',
+                         'Deactivate API returns guaranteed delivery response'),
+                TestStep(2, 'Verify MDN is De-Active in NBOP immediately after API call',
+                         'MDN status is De-Active in NBOP'),
+                TestStep(3, 'Wait and re-verify MDN status in NBOP (previously showed Active after 1 hour)',
+                         'MDN status remains De-Active in NBOP — not reverted to Active'),
+            ],
+            story_linkage=jira.key, label=jira.key, category='Happy Path',
+        ))
+        idx += 1
+
+        # ── TC4: Regression — normal deactivation still works ──
+        tcs.append(TestCase(
+            sno=str(idx),
+            summary='TC%03d_%s_Regression: Normal Deactivation flow unaffected by CR fix' % (idx, jira.key),
+            description='Ensure the GD fix does not break normal deactivation (MDN active in both TMO and NBOP).',
+            preconditions='1.\tMDN is Active in both TMO and NBOP/NSL DB\n2.\tDeactivate API is available',
+            steps=[
+                TestStep(1, 'Verify MDN is Active in both TMO and NBOP/NSL DB',
+                         'MDN confirmed Active in both systems'),
+                TestStep(2, 'Run the Deactivate API for the MDN',
+                         'Deactivate API completes successfully — no error'),
+                TestStep(3, 'Verify MDN is De-Active in both TMO and NBOP',
+                         'MDN status updated to De-Active in both systems'),
+                TestStep(4, 'Verify no guaranteed delivery mechanism triggered (normal flow)',
+                         'Normal deactivation path used — no GD retry needed'),
+            ],
+            story_linkage=jira.key, label=jira.key, category='Regression',
+        ))
+        idx += 1
+
+        return tcs
+
+    # ── NORMAL MODE (non-CR): Generic keyword mining ──
     # Combine all text sources for mining
     all_text = ''
     if jira.description:

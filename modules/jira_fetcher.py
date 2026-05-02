@@ -126,6 +126,37 @@ def fetch_jira_issue(page, issue_key: str, log=print) -> JiraIssue:
                     'direction': lnk.get('type', {}).get(direction.replace('Issue', ''), ''),
                     'key': i['key'], 'summary': i['fields']['summary']})
 
+    # Deep-fetch linked issue descriptions (critical for CR/bug fix tickets
+    # where the linked defect contains reproduction steps and expected behavior)
+    if issue.linked_issues:
+        log(f'[JIRA] 🔍 Deep-fetching {len(issue.linked_issues)} linked issue descriptions...')
+        for li_idx, li in enumerate(issue.linked_issues, 1):
+            try:
+                log(f'[JIRA]   [{li_idx}/{len(issue.linked_issues)}] Fetching {li["key"]}...')
+                li_result = page.evaluate('''async (url) => {
+                    const r = await fetch(url, {
+                        credentials: 'include',
+                        headers: {'Accept': 'application/json'}
+                    });
+                    if (!r.ok) return null;
+                    return await r.json();
+                }''', f'{page.url.split("/browse")[0]}/rest/api/2/issue/{li["key"]}')
+                if li_result and li_result.get('fields'):
+                    lf = li_result['fields']
+                    li['description'] = lf.get('description', '') or ''
+                    li['status'] = (lf.get('status') or {}).get('name', '')
+                    li['issue_type'] = (lf.get('issuetype') or {}).get('name', '')
+                    # Extract AC from linked issue
+                    for fkey, val in sorted(lf.items()):
+                        if fkey.startswith('customfield_') and isinstance(val, str) and len(val) > 30:
+                            if any(kw in val.lower() for kw in ['acceptance', 'criteria', 'expected', 'actual']):
+                                li['acceptance_criteria'] = val
+                                break
+                    desc_len = len(li.get('description', ''))
+                    log(f'[JIRA]    {li["key"]}: desc={desc_len} chars | type={li.get("issue_type", "?")}')
+            except Exception as e:
+                log(f'[JIRA]    {li["key"]}: failed to fetch ({e})')
+
     # Subtasks
     for s in f.get('subtasks', []):
         issue.subtasks.append({'key': s.get('key', ''),
