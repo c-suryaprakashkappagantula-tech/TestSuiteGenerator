@@ -2359,12 +2359,8 @@ def _mine_jira_subtasks(jira, suite, log=print):
                 description='To validate %s. Source: subtask %s.' % (clean.rstrip('.'), key),
                 preconditions='1.\tRefer to subtask %s for details\n2.\tActive TMO subscriber line' % key,
                 story_linkage=jira.key, label=jira.key, category=category,
-                steps=[
-                    TestStep(1, 'Set up preconditions per %s' % key, 'Preconditions met'),
-                    TestStep(2, 'Execute: %s' % clean.rstrip('.')[:120], '%s completes' % feature_short),
-                    TestStep(3, 'Verify %s outcome matches expected' % feature_short, 'Expected behavior confirmed'),
-                    TestStep(4, 'Verify no regression on related %s flows' % feature_short, 'No regression'),
-                ]))
+                steps=_build_subtask_steps(clean, feature_short, key, category, jira.key),
+            ))
             next_idx += 1
             existing_text += ' ' + clean.lower()
             log('[ENGINE]   Subtask TC from %s: %s' % (key, clean[:60]))
@@ -2389,6 +2385,86 @@ def _format_validation_bullets(validation):
         if p and len(p) > 5:
             bullets.append('- %s' % p)
     return '\n'.join(bullets) if bullets else validation
+
+
+def _build_subtask_steps(scenario_text, feature_short, subtask_key, category, jira_key):
+    """Build proper test steps for a subtask-derived TC.
+    
+    Instead of dumping raw subtask text as a step, this analyzes the scenario
+    and generates actionable steps using the step_templates module.
+    """
+    steps = []
+    text_lower = scenario_text.lower()
+    
+    # Try to get proper steps from step_templates
+    try:
+        from .step_templates import get_step_chain
+        ctx = ('%s %s %s' % (jira_key, feature_short, scenario_text)).lower()
+        chain = get_step_chain(scenario_text, '', ctx)
+        if chain and len(chain) >= 2:
+            return [TestStep(i + 1, s, e) for i, (s, e) in enumerate(chain)]
+    except Exception:
+        pass
+    
+    # Fallback: build steps based on category and keywords
+    if category == 'Negative':
+        # Negative scenario — set up error condition, trigger, verify rejection
+        error_desc = scenario_text[:80] if len(scenario_text) > 10 else 'error condition'
+        steps = [
+            TestStep(1, 'Set up the error/failure condition: %s' % error_desc,
+                     'Error condition established'),
+            TestStep(2, 'Trigger %s API with the error condition' % feature_short,
+                     'API request sent'),
+            TestStep(3, 'Verify system rejects with appropriate error code and message',
+                     'Error response received with descriptive message'),
+            TestStep(4, 'Verify no data corruption — line state and DB unchanged',
+                     'System state unchanged after rejection'),
+        ]
+    elif 'rollback' in text_lower:
+        steps = [
+            TestStep(1, 'Trigger %s operation that will fail mid-process' % feature_short,
+                     'Operation initiated'),
+            TestStep(2, 'Verify the operation fails at the expected point',
+                     'Failure detected'),
+            TestStep(3, 'Verify rollback restores original state for both lines',
+                     'Original IMEI, ICCID, MDN associations restored'),
+            TestStep(4, 'Verify Century Report logs the rollback transaction',
+                     'Rollback transaction visible in Century Report'),
+        ]
+    elif 'callback' in text_lower or 'async' in text_lower:
+        steps = [
+            TestStep(1, 'Trigger %s operation' % feature_short,
+                     'Operation initiated, async processing started'),
+            TestStep(2, 'Verify async callback is received by the requesting system',
+                     'Callback received with correct transaction details'),
+            TestStep(3, 'Verify callback status and error handling',
+                     'Callback contains correct status code and message'),
+        ]
+    elif 'syniverse' in text_lower or 'imsi' in text_lower:
+        steps = [
+            TestStep(1, 'Trigger %s operation with valid parameters' % feature_short,
+                     'Operation completes successfully'),
+            TestStep(2, 'Verify Syniverse outbound call in Century Report',
+                     'Syniverse call logged with correct IMSI/MDN'),
+            TestStep(3, 'Verify Syniverse responds with success',
+                     'Syniverse acknowledgement received'),
+            TestStep(4, 'Verify NBOP Line Summary reflects updated IMSI',
+                     'IMSI updated correctly in NBOP'),
+        ]
+    else:
+        # Generic happy path with proper steps
+        steps = [
+            TestStep(1, 'Trigger %s API with valid parameters' % feature_short,
+                     'API accepts request with HTTP 200/202'),
+            TestStep(2, 'Verify NSL processes the request successfully',
+                     'NSL returns SUCC00 response code'),
+            TestStep(3, 'Download Century Report and verify transaction logged',
+                     'Transaction visible in Century Report with correct status'),
+            TestStep(4, 'Verify NBOP reflects correct state after operation',
+                     'Subscriber profile updated correctly'),
+        ]
+    
+    return steps
 
 
 # ================================================================
