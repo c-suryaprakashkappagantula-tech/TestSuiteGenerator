@@ -1626,7 +1626,7 @@ def _extract_dimensions_from_parsed_docs(
         tr = create_traceability('Attachment', test_steps[0]['source'],
                                  'Test steps: %s' % steps_text[:200])
         scenarios.append(ExtractedScenario(
-            title='Evidence: %s' % steps_text[:100],
+            title='Verify Data Details and Historical Usage screens (TMO)',
             validation=steps_text,
             category='Happy Path',
             source=tr,
