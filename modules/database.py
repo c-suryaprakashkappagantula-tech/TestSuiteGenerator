@@ -180,6 +180,44 @@ def init_db():
             created_at      TEXT DEFAULT (datetime('now','localtime'))
         );
         CREATE INDEX IF NOT EXISTS idx_audit_type ON tsg_audit_log(event_type);
+
+        -- V8.0: Dimension cache per feature
+        CREATE TABLE IF NOT EXISTS dimension_cache (
+            feature_id      TEXT NOT NULL,
+            pi_label        TEXT NOT NULL,
+            dimension_name  TEXT NOT NULL,
+            dimension_values TEXT NOT NULL,
+            source_type     TEXT NOT NULL,
+            source_id       TEXT NOT NULL,
+            last_fetched    TEXT DEFAULT (datetime('now','localtime')),
+            PRIMARY KEY (feature_id, pi_label, dimension_name)
+        );
+
+        -- V8.0: Traceability records per generation
+        CREATE TABLE IF NOT EXISTS traceability_log (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            suite_id        INTEGER NOT NULL,
+            tc_sno          TEXT NOT NULL,
+            source_type     TEXT NOT NULL,
+            source_id       TEXT NOT NULL,
+            extracted_text  TEXT NOT NULL,
+            confidence      REAL DEFAULT 1.0,
+            FOREIGN KEY (suite_id) REFERENCES test_suites(suite_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_trace_suite ON traceability_log(suite_id);
+
+        -- V8.0: Data inventory per generation
+        CREATE TABLE IF NOT EXISTS data_inventory_log (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            suite_id        INTEGER NOT NULL,
+            source_name     TEXT NOT NULL,
+            source_type     TEXT NOT NULL,
+            items_extracted INTEGER DEFAULT 0,
+            status          TEXT NOT NULL,
+            cache_hit       INTEGER DEFAULT 0,
+            FOREIGN KEY (suite_id) REFERENCES test_suites(suite_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_inventory_suite ON data_inventory_log(suite_id);
     ''')
     c.commit()
     c.close()
@@ -492,9 +530,21 @@ init_db()
 
 def save_test_suite(suite, file_path='') -> int:
     """Save a complete test suite (suite + TCs + steps) to DB.
+    Truncates old suites for the same feature_id first.
     Returns the suite_id for reference."""
     c = _conn()
     try:
+        # ── Delete old suites for this feature (keep DB fresh) ──
+        old_suites = c.execute(
+            'SELECT suite_id FROM test_suites WHERE feature_id = ?',
+            (suite.feature_id,)).fetchall()
+        for old in old_suites:
+            old_id = old['suite_id']
+            # Delete steps → TCs → suite (cascade)
+            c.execute('DELETE FROM test_steps WHERE tc_id IN (SELECT tc_id FROM test_cases WHERE suite_id = ?)', (old_id,))
+            c.execute('DELETE FROM test_cases WHERE suite_id = ?', (old_id,))
+            c.execute('DELETE FROM test_suites WHERE suite_id = ?', (old_id,))
+
         cur = c.execute('''
             INSERT INTO test_suites (feature_id, feature_title, pi, strategy, tc_count, step_count,
                                      scope, acceptance_criteria, data_sources, warnings, file_path, engine_version)
@@ -874,3 +924,98 @@ def get_audit_log(event_type: str = None, severity: str = None, limit: int = 100
     rows = c.execute(query, params).fetchall()
     c.close()
     return [dict(r) for r in rows]
+
+
+# ================================================================
+# V8.0 DATA-FIRST ENGINE — DIMENSION CACHE & TRACEABILITY
+# ================================================================
+
+
+def save_dimension_cache(feature_id: str, pi_label: str, dimensions: List[Dict]):
+    """Save extracted dimensions to cache for a feature.
+
+    Each dimension dict should have: name, values (list), source_type, source_id.
+    """
+    c = _conn()
+    for dim in dimensions:
+        c.execute('''
+            INSERT OR REPLACE INTO dimension_cache
+            (feature_id, pi_label, dimension_name, dimension_values, source_type, source_id, last_fetched)
+            VALUES (?, ?, ?, ?, ?, ?, datetime('now','localtime'))
+        ''', (
+            feature_id, pi_label,
+            dim.get('name', ''),
+            json.dumps(dim.get('values', [])),
+            dim.get('source_type', ''),
+            dim.get('source_id', ''),
+        ))
+    c.commit()
+    c.close()
+
+
+def load_dimension_cache(feature_id: str, pi_label: str) -> List[Dict]:
+    """Load cached dimensions for a feature. Returns list of dimension dicts."""
+    c = _conn()
+    rows = c.execute('''
+        SELECT dimension_name, dimension_values, source_type, source_id, last_fetched
+        FROM dimension_cache
+        WHERE feature_id = ? AND pi_label = ?
+    ''', (feature_id, pi_label)).fetchall()
+    c.close()
+
+    results = []
+    for row in rows:
+        d = dict(row)
+        d['values'] = json.loads(d.get('dimension_values', '[]'))
+        d['name'] = d.get('dimension_name', '')
+        results.append(d)
+    return results
+
+
+def save_traceability_log(suite_id: int, test_cases: List):
+    """Bulk insert traceability records for a generated suite.
+
+    Each test case should have a .traceability attribute with
+    source_type, source_id, extracted_text, confidence.
+    """
+    c = _conn()
+    for tc in test_cases:
+        tr = getattr(tc, 'traceability', None)
+        if tr and tr.source_type and tr.source_id:
+            c.execute('''
+                INSERT INTO traceability_log
+                (suite_id, tc_sno, source_type, source_id, extracted_text, confidence)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (
+                suite_id,
+                getattr(tc, 'sno', ''),
+                tr.source_type,
+                tr.source_id,
+                tr.extracted_text[:500] if tr.extracted_text else '',
+                tr.confidence if hasattr(tr, 'confidence') else 1.0,
+            ))
+    c.commit()
+    c.close()
+
+
+def save_data_inventory_log(suite_id: int, data_inventory):
+    """Save data inventory entries for a generated suite.
+
+    data_inventory should have a .sources attribute (list of DataSourceEntry).
+    """
+    c = _conn()
+    for source in (data_inventory.sources if hasattr(data_inventory, 'sources') else []):
+        c.execute('''
+            INSERT INTO data_inventory_log
+            (suite_id, source_name, source_type, items_extracted, status, cache_hit)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (
+            suite_id,
+            getattr(source, 'source_name', ''),
+            getattr(source, 'source_type', ''),
+            getattr(source, 'items_extracted', 0),
+            getattr(source, 'status', ''),
+            1 if getattr(source, 'cache_hit', False) else 0,
+        ))
+    c.commit()
+    c.close()

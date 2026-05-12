@@ -1,7 +1,7 @@
 """
 excel_generator.py — Generate production-ready Excel test suite.
 Matches the exact format of TESTPLAN MWTGPROV-3976 sample.
-3 sheets: Summary, Test Cases (merged+styled), Traceability.
+Sheets: Test Cases (1st — required for QMetry upload), Summary, Traceability, Combinations.
 """
 import shutil
 from pathlib import Path
@@ -69,9 +69,20 @@ def generate_excel(suite: TestSuite, log=print) -> Path:
         log('[EXCEL] Building Combinations sheet...')
         _build_combinations_sheet(wb, suite)
 
+    # ── Sheet 5 (V8.0): Data Sources summary ──
+    if hasattr(suite, 'data_inventory') and suite.data_inventory and hasattr(suite.data_inventory, 'sources') and suite.data_inventory.sources:
+        log('[EXCEL] Building Data Sources sheet (V8.0)...')
+        _build_data_sources_sheet(wb, suite)
+
     # Remove default empty sheet if exists
     if 'Sheet' in wb.sheetnames:
         del wb['Sheet']
+
+    # ── Reorder sheets: Test Cases FIRST (QMetry checks 1st sheet headers) ──
+    tc_sheet_name = 'Test Cases'
+    if tc_sheet_name in wb.sheetnames:
+        tc_idx = wb.sheetnames.index(tc_sheet_name)
+        wb.move_sheet(tc_sheet_name, offset=-tc_idx)  # move to position 0
 
     # Save
     out = output_path(suite.feature_id, pi=suite.pi, title=suite.feature_title)
@@ -544,3 +555,67 @@ def _build_combinations_sheet(wb, suite: TestSuite):
         ws.cell(row=ri, column=6).alignment = _center
         ws.cell(row=ri, column=7, value=combo.get('key', '')).border = _bdr
         ws.cell(row=ri, column=7).alignment = _center
+
+
+def _build_data_sources_sheet(wb, suite):
+    """Build V8.0 Data Sources summary sheet listing all sources consulted."""
+    ws = wb.create_sheet('Data Sources')
+    ws.freeze_panes = 'A4'
+    ws.column_dimensions['A'].width = 25
+    ws.column_dimensions['B'].width = 15
+    ws.column_dimensions['C'].width = 15
+    ws.column_dimensions['D'].width = 12
+    ws.column_dimensions['E'].width = 12
+    ws.column_dimensions['F'].width = 40
+
+    # Title
+    ws.merge_cells('A1:F1')
+    ws.cell(row=1, column=1, value='DATA SOURCES INVENTORY - %s (V8.0)' % suite.feature_id)
+    ws.cell(row=1, column=1).font = Font(name='Calibri', bold=True, size=14, color=NAVY)
+    ws.cell(row=1, column=1).alignment = Alignment(horizontal='center', vertical='center')
+
+    # Summary row
+    total_items = suite.data_inventory.total_testable_items if suite.data_inventory else 0
+    ws.merge_cells('A2:F2')
+    ws.cell(row=2, column=1, value='Total Testable Items: %d | Engine: %s' % (
+        total_items, getattr(suite, 'engine_version', '8.0.0')))
+    ws.cell(row=2, column=1).font = Font(name='Calibri', italic=True, size=10)
+
+    # Headers
+    headers = ['Source Name', 'Source Type', 'Items Extracted', 'Status', 'Cache Hit', 'Details']
+    for ci, h in enumerate(headers, 1):
+        c = ws.cell(row=3, column=ci, value=h)
+        c.font = _hf
+        c.fill = _hfill
+        c.alignment = _center
+        c.border = _bdr
+
+    # Data rows
+    r = 4
+    for source in (suite.data_inventory.sources if suite.data_inventory else []):
+        ws.cell(row=r, column=1, value=getattr(source, 'source_name', '')).border = _bdr
+        ws.cell(row=r, column=2, value=getattr(source, 'source_type', '')).border = _bdr
+        ws.cell(row=r, column=2).alignment = _center
+        ws.cell(row=r, column=3, value=getattr(source, 'items_extracted', 0)).border = _bdr
+        ws.cell(row=r, column=3).alignment = _center
+        ws.cell(row=r, column=4, value=getattr(source, 'status', '')).border = _bdr
+        ws.cell(row=r, column=4).alignment = _center
+        # Color-code status
+        status = getattr(source, 'status', '')
+        if status == 'success':
+            ws.cell(row=r, column=4).fill = PatternFill(start_color='C6EFCE', end_color='C6EFCE', fill_type='solid')
+        elif status in ('empty', 'failed'):
+            ws.cell(row=r, column=4).fill = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
+        ws.cell(row=r, column=5, value='Yes' if getattr(source, 'cache_hit', False) else 'No').border = _bdr
+        ws.cell(row=r, column=5).alignment = _center
+        details = ', '.join(getattr(source, 'items_detail', [])[:3])
+        ws.cell(row=r, column=6, value=details[:100]).border = _bdr
+        r += 1
+
+    # Warnings section
+    if suite.data_inventory and suite.data_inventory.warnings:
+        r += 1
+        ws.cell(row=r, column=1, value='Warnings:').font = Font(name='Calibri', bold=True, color='FF0000')
+        for warning in suite.data_inventory.warnings:
+            r += 1
+            ws.cell(row=r, column=1, value='⚠️ ' + warning)

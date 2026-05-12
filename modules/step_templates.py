@@ -6,6 +6,25 @@ and actual test cases from sample files.
 import re
 
 
+def _sanitize_val(validation, title):
+    """When Chalk validation is identical to the title (copy-paste issue),
+    return None so callers use a context-specific expected result instead."""
+    if not validation:
+        return None
+    v = validation.strip()
+    t = (title or '').strip()
+    if v == t:
+        return None
+    # Also catch near-identical (title is prefix of validation or vice versa)
+    if len(v) > 50 and len(t) > 50:
+        # Normalize whitespace for comparison
+        v_norm = re.sub(r'\s+', ' ', v).lower()
+        t_norm = re.sub(r'\s+', ' ', t).lower()
+        if v_norm == t_norm:
+            return None
+    return v
+
+
 def get_step_chain(sc_title, sc_validation, feature_context, feature_type=''):
     """Return list of (step_summary, expected_result) tuples based on scenario type.
 
@@ -261,7 +280,7 @@ def _swap_mdn_steps(title, validation, t):
     """Swap MDN: Real pipeline from V6 + sample TC.
     PSIM (SM): triggers Syniverse Deregister + Register (company ID 14619 for TMO)
     ESIM (EM/AM): triggers Syniverse Change IMSI only — no Deregister/Register"""
-    val = validation or title
+    val = _sanitize_val(validation, title) or 'Swap MDN operation completed. NBOP and TMO Portal reflect swapped MDNs'
     is_esim = 'esim' in t or 'em' in t or 'am' in t
     is_psim = 'psim' in t or 'sm' in t or 'pm' in t
 
@@ -335,7 +354,7 @@ def _swap_mdn_steps(title, validation, t):
 
 def _activation_steps(title, validation, t):
     """Activation: V6 pipeline - 7 steps with Comprehensive + NBOP MIG + Syniverse."""
-    val = validation or title
+    val = _sanitize_val(validation, title) or 'Activation completed. Subscriber line active in TMO and NBOP'
     steps = [
         ('Step 1: Validate Device IMEI via API',
          'Device validated. Equipment type and compatibility confirmed'),
@@ -365,7 +384,7 @@ def _activation_steps(title, validation, t):
 
 def _change_sim_steps(title, validation, t):
     """Change SIM: V6 pipeline - 4 steps + NE Portal + Validate SG."""
-    val = validation or title
+    val = _sanitize_val(validation, title) or 'Change SIM completed. New ICCID reflected in NBOP and TMO Portal'
     return [
         ('Step 1: Obtain OAuth Token',
          'OAuth token generated successfully'),
@@ -386,7 +405,7 @@ def _change_sim_steps(title, validation, t):
 
 def _change_bcd_steps(title, validation, t):
     """Change BCD: V7 pipeline + sample 3948 (11 steps)."""
-    val = validation or title
+    val = _sanitize_val(validation, title) or 'Change BCD completed. Updated billing details reflected in NBOP'
     return [
         ('Step 1: Obtain OAuth Token',
          'OAuth token generated successfully'),
@@ -415,7 +434,7 @@ def _change_bcd_steps(title, validation, t):
 
 def _change_rateplan_steps(title, validation, t):
     """Change Rateplan: V6 pipeline - 4 steps + NE Portal + Validate."""
-    val = validation or title
+    val = _sanitize_val(validation, title) or 'Rate plan change completed. New plan reflected in NBOP and TMO'
     return [
         ('Step 1: Obtain OAuth Token',
          'OAuth token generated successfully'),
@@ -436,7 +455,7 @@ def _change_rateplan_steps(title, validation, t):
 
 def _change_feature_steps(title, validation, t):
     """Change Feature: V6 pipeline - 3 steps + NE Portal."""
-    val = validation or title
+    val = _sanitize_val(validation, title) or 'Feature change completed. Updated features reflected in NBOP'
     return [
         ('Step 1: Obtain OAuth Token',
          'OAuth token generated successfully'),
@@ -455,7 +474,7 @@ def _change_feature_steps(title, validation, t):
 
 def _deactivation_steps(title, validation, t):
     """Deactivation: V6 pipeline."""
-    val = validation or title
+    val = _sanitize_val(validation, title) or 'Deactivation completed. Line status Deactive in NBOP and TMO'
     return [
         ('Step 1: Trigger Deactivation API with MDN, Line ID, and agent details',
          'NSL accepts deactivation request with 200 OK'),
@@ -478,7 +497,7 @@ def _deactivation_steps(title, validation, t):
 
 def _hotline_steps(title, validation, t):
     """Hotline: Explicit dual assertion — what happens AND what does NOT happen."""
-    val = validation or title
+    val = _sanitize_val(validation, title) or 'Hotline applied. Line status Hotlined in NBOP. Syniverse NOT called'
     return [
         ('Step 1: Trigger Hotline API (transactionType=SH) with MDN and Line ID',
          'NSL accepts Hotline request with 200 OK'),
@@ -500,7 +519,7 @@ def _hotline_steps(title, validation, t):
 
 def _remove_hotline_steps(title, validation, t):
     """Remove Hotline: Explicit dual assertion — what happens AND what does NOT happen."""
-    val = validation or title
+    val = _sanitize_val(validation, title) or 'Hotline removed. Line status Active in NBOP. Syniverse NOT called'
     return [
         ('Step 1: Trigger Remove Hotline API with MDN and Line ID',
          'NSL accepts Remove Hotline request with 200 OK'),
@@ -522,7 +541,7 @@ def _remove_hotline_steps(title, validation, t):
 
 def _syniverse_integration_steps(title, validation, t):
     """Syniverse integration: CreateSubscriber, RemoveSubscriber, SwapIMSI flows."""
-    val = validation or title
+    val = _sanitize_val(validation, title) or 'Syniverse integration completed. Subscriber state updated correctly'
     # Determine which Syniverse operation
     if 'createsubscriber' in t or 'create subscriber' in t or ('activat' in t and 'syniverse' in t):
         return [
@@ -598,7 +617,7 @@ def _syniverse_integration_steps(title, validation, t):
 def _sync_subscriber_steps(title, validation, t):
     """Sync Subscriber: YL/YD/YM/YP/PL state change flows.
     Based on Chalk matrix for MWTGPROV-4009."""
-    val = validation or title
+    val = _sanitize_val(validation, title) or 'Sync completed. NBOP reflects updated subscriber state'
     t_low = t.lower()
 
     # Determine the state change direction and Syniverse action
@@ -795,7 +814,7 @@ def _sync_subscriber_steps(title, validation, t):
 def _sync_key_info_steps(title, validation, t):
     """Sync Key Info (YK): account key data sync — externalAccountNumber, MBO, NE, EMM, CM.
     Based on manual QMetry test patterns for MWTGPROV-4019."""
-    val = validation or title
+    val = _sanitize_val(validation, title) or 'Sync Key Info completed. Account data consistent across systems'
     t_low = t.lower()
 
     # Negative: error scenarios (ERR20, ERR162, ERR165, etc.)
@@ -920,7 +939,7 @@ def _is_ui_sync(t, ctx=''):
 
 def _ui_sync_subscriber_steps(title, validation, t=''):
     """UI-based Sync Subscriber — trigger via NBOP portal, verify Transaction History + Century Report."""
-    val = validation or title
+    val = _sanitize_val(validation, title) or 'Sync completed via NBOP. Transaction History and Century Report verified'
 
     # Determine expected Syniverse behavior from title
     _expects_syniverse = any(kw in t for kw in [
@@ -969,7 +988,7 @@ def _ui_sync_subscriber_steps(title, validation, t=''):
 
 def _network_reset_steps(title, validation, t=''):
     """API-based Network Reset — trigger via API, verify Century Report + NBOP."""
-    val = validation or title
+    val = _sanitize_val(validation, title) or 'Network Reset completed. Line restored to default state in NBOP'
     return [
         ('Step 1: Trigger Network Reset API with valid parameters (MDN, OSP Account Number, PIN)',
          'NSL accepts Network Reset request with 200 OK. Transaction ID generated'),
@@ -988,7 +1007,7 @@ def _network_reset_steps(title, validation, t=''):
 
 def _ui_network_reset_steps(title, validation, t=''):
     """UI-based Network Reset — trigger via NBOP portal, verify Transaction History + Century Report."""
-    val = validation or title
+    val = _sanitize_val(validation, title) or 'Network Reset completed via NBOP. Transaction History verified'
     return [
         ('Step 1: Trigger Network Reset via NBOP UI (≡ Menu → Reset Line → Network → Click Reset)',
          'Network Reset triggered successfully via NBOP portal — confirmation displayed'),
@@ -1005,7 +1024,7 @@ def _ui_network_reset_steps(title, validation, t=''):
 
 def _report_steps(title, validation):
     """Report validation: from sample 4085."""
-    val = validation or title
+    val = _sanitize_val(validation, title) or 'Report generated with correct data. All fields validated'
     return [
         ("Generate/obtain previous day's report file; decompress and open",
          'Report file generated and accessible'),
@@ -1018,7 +1037,7 @@ def _inquiry_steps(title, validation, t):
     """Inquiry/Query: Read-only operations that retrieve and return data.
     Used for Order Inquiry, Line Inquiry, Usage Inquiry, Sim-Info, Device Details, etc.
     Steps focus on request parameters, response payload validation, and NBOP display."""
-    val = validation or title
+    val = _sanitize_val(validation, title) or 'Inquiry completed. NBOP displays correct query results'
     t_low = t.lower()
 
     # Determine inquiry type for specific steps
@@ -1060,6 +1079,45 @@ def _inquiry_steps(title, validation, t):
             ('Step 3: Verify NBOP Line Information section matches API response',
              val),
         ]
+    elif 'retrieve device' in t_low or 'retrieve-device' in t_low:
+        # Retrieve Device (GET/POST) — MVNO-aware with TMO/VZW differentiation
+        is_get = 'get' in t_low
+        is_post = 'post' in t_low
+        is_tmo = 'tmo' in t_low or 'mvno' in t_low
+        is_negative = 'negative' in t_low or 'invalid' in t_low or 'error' in t_low
+        method = 'GET' if is_get else ('POST' if is_post else 'GET/POST')
+
+        if is_negative:
+            return [
+                ('Step 1: Trigger retrieve-device %s API with invalid/missing parameters (e.g., invalid IMEI, missing RequestType header)' % method,
+                 'NSL rejects request with appropriate HTTP error code (400/404) and descriptive error message'),
+                ('Step 2: Validate error response payload contains: errorCode, errorMessage, transactionId',
+                 'Error response is well-formed with specific error code identifying the failure reason'),
+                ('Step 3: Verify no partial data returned and no DB state change',
+                 'System state unchanged. No device record created or modified.'),
+            ]
+        elif is_tmo:
+            return [
+                ('Step 1: Trigger retrieve-device %s API with valid IMEI/ICCID and RequestType=TMO in header' % method,
+                 'NSL accepts request and routes to TMO/Apollo-NE. HTTP 200 returned with device details'),
+                ('Step 2: Validate response payload contains: IMEI, make, model, deviceType, equipmentType for TMO subscriber',
+                 'All device fields present. Response payload structure same as VZW but data reflects TMO subscriber device'),
+                ('Step 3: Validate RequestType=TMO is correctly passed in messageHeader to downstream NE',
+                 'NE receives RequestType=TMO. Correct TMO device data fetched from TMO network'),
+                ('Step 4: Verify NBOP Network Inquiry screen displays TMO device details when TMO radio button selected',
+                 val or 'TMO device information displayed correctly on Network Inquiry screen'),
+            ]
+        else:
+            return [
+                ('Step 1: Trigger retrieve-device %s API with valid IMEI or ICCID' % method,
+                 'NSL accepts request and returns HTTP 200 with device information payload'),
+                ('Step 2: Validate response payload contains: IMEI, make, model, deviceType, equipmentType, lockStatus',
+                 'All device fields present and match subscriber profile in NSL DB'),
+                ('Step 3: Validate RequestType header differentiates VZW vs TMO subscriber routing',
+                 'RequestType=VZW routes to VZW NE; RequestType=TMO routes to TMO/Apollo-NE. Same response structure for both'),
+                ('Step 4: Verify NBOP Network Inquiry screen displays device details correctly',
+                 val or 'Device information displayed correctly on Network Inquiry screen'),
+            ]
     elif 'device' in t_low and ('detail' in t_low or 'lock' in t_low):
         return [
             ('Step 1: Trigger Device Details/Lock Status API with valid IMEI or MDN',
@@ -1103,7 +1161,7 @@ def _inquiry_steps(title, validation, t):
 
 def _notification_steps(title, validation):
     """Notification: from V6 DPFO/KAFKA flow."""
-    val = validation or title
+    val = _sanitize_val(validation, title) or 'Notification processed. All downstream systems updated'
     return [
         ('Trigger the notification event from TMO',
          'Notification event received by NSL'),
@@ -1120,7 +1178,7 @@ def _kafka_event_steps(title, validation):
     """Kafka/BI Event: Verified via Century Report → EVENT_MESSAGES table.
     Used for features like MWTGPROV-4195 (BI Kafka updates with TMO Indicator).
     The Kafka payload = EVENT_MESSAGES rows with networkProvider field."""
-    val = validation or title
+    val = _sanitize_val(validation, title) or 'KAFKA event published. EVENT_MESSAGES table updated with correct payload'
     return [
         ('Step 1: Trigger the API operation (activate/change/reconnect) with valid parameters',
          'NSL processes the operation successfully with 200 OK. Transaction ID generated'),
@@ -1143,7 +1201,7 @@ def _kafka_event_steps(title, validation):
 
 def _ui_flow_steps(title, validation):
     """UI flow: NBOP portal-driven test steps using real UI knowledge base."""
-    val = validation or title
+    val = _sanitize_val(validation, title) or 'UI operation completed. NBOP displays correct results'
     # Try to use the NBOP UI knowledge base for real menu paths and field names
     try:
         from .nbop_ui_knowledge import generate_ui_steps, is_available
@@ -1174,7 +1232,7 @@ def _ui_flow_steps(title, validation):
 
 def _ui_negative_steps(title, validation):
     """UI negative flow: error handling via NBOP portal using real UI knowledge base."""
-    val = validation or title
+    val = _sanitize_val(validation, title) or 'NBOP displays appropriate error message. No data modified'
     try:
         from .nbop_ui_knowledge import generate_ui_negative_steps, is_available
         if is_available():
@@ -1202,7 +1260,7 @@ def _ui_negative_steps(title, validation):
 
 def _api_flow_steps(title, validation):
     """API flow: from samples 4109, 4110."""
-    val = validation or title
+    val = _sanitize_val(validation, title) or 'API operation completed. All backend calls verified in Century Report'
     import re as _re_api
     _action = _re_api.sub(r'^(?:Validate|Verify|Check|Ensure|Step\s*\d+\s*[-:]?\s*)', '', title, flags=_re_api.IGNORECASE).strip()
     _action = _re_api.sub(r'New\s+MVNO\s*[-:—]\s*', '', _action, flags=_re_api.IGNORECASE).strip()
@@ -1223,7 +1281,7 @@ def _api_flow_steps(title, validation):
 
 def _negative_steps(title, validation, t):
     """Negative: specific error handling based on error type."""
-    val = validation or title
+    val = _sanitize_val(validation, title) or 'Error handled correctly. No data corruption. Appropriate error returned'
     # Extract a short action name from the title for step specificity
     import re as _re
     _action = _re.sub(r'^(?:Negative|Verify|Validate|Check|Ensure)\s*[-:]\s*', '', title, flags=_re.IGNORECASE).strip()
@@ -1254,7 +1312,7 @@ def _negative_steps(title, validation, t):
 
 def _rollback_steps(title, validation, t):
     """Rollback: feature-specific restore verification."""
-    val = validation or title
+    val = _sanitize_val(validation, title) or 'Rollback completed. Original state restored. No partial changes committed'
     import re as _re_rb
     _action = _re_rb.sub(r'^(?:Validate|Verify|Negative\s*[-:]?\s*)', '', title, flags=_re_rb.IGNORECASE).strip()
     _action = _re_rb.sub(r'New\s+MVNO\s*[-:—]\s*', '', _action, flags=_re_rb.IGNORECASE).strip()
@@ -1297,7 +1355,7 @@ def _rollback_steps(title, validation, t):
 def _default_workflow_steps(title, validation):
     """Default: follows standard NSL workflow pattern from V6.
     Enhanced with contract-aware system assertions."""
-    val = validation or title
+    val = _sanitize_val(validation, title) or 'Operation completed. All systems updated per integration contract'
 
     # Try to consult the integration contract for system-specific steps
     try:

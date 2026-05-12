@@ -106,10 +106,25 @@ def classify_feature(feature_name: str, description: str = '', channel: str = ''
         return result
 
     # ── Notification / CDR / Mediation detection ──
-    if any(kw in ctx for kw in ['notification', 'kafka', 'dpfo', 'suppress', 'usage event',
-                                 'cdr', 'mediation', 'prr', 'ild', 'international roaming',
-                                 'country code', 'country translation', 'usage metering',
-                                 'tariff_plan', 'usage file']):
+    # IMPORTANT: Only classify as notification if the feature is PRIMARILY about
+    # notifications/CDR/mediation. A mention of "kafka" or "notification" in AC
+    # (e.g., "update BI KAFKA topic") is a side-effect, not the primary feature type.
+    # Require MULTIPLE notification keywords or CDR-specific terms.
+    _notif_keywords = ['dpfo', 'suppress', 'usage event',
+                       'cdr', 'mediation', 'prr', 'ild', 'international roaming',
+                       'country code', 'country translation', 'usage metering',
+                       'tariff_plan', 'usage file']
+    _notif_weak = ['notification', 'kafka']  # Only count if combined with other signals
+    _notif_strong_count = sum(1 for kw in _notif_keywords if kw in ctx)
+    _notif_weak_count = sum(1 for kw in _notif_weak if kw in ctx)
+    # Strong signal: any CDR/mediation/ILD keyword → notification
+    # Weak signal: only "notification" or "kafka" → NOT notification (it's a side-effect)
+    if _notif_strong_count > 0:
+        result.feature_type = 'notification'
+        result.is_notification = True
+        return result
+    # If ONLY weak signals AND the feature name itself is about notifications
+    if _notif_weak_count > 0 and any(kw in feature_name.lower() for kw in ['notification', 'kafka', 'dpfo', 'event']):
         result.feature_type = 'notification'
         result.is_notification = True
         return result

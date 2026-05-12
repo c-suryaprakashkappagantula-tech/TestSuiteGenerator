@@ -664,6 +664,140 @@ def _lifecycle_thinking(fname, lifecycle, ctx, existing):
                 'category': 'Negative',
                 'reasoning': 'Cannot hotline a line that is already hotlined.',
             })
+
+        # ── Remove Hotline (reverse operation) ──
+        if 'remove hotline api' not in existing and 'remove hotline succeeds' not in existing:
+            s.append({
+                'title': 'Verify Remove Hotline succeeds for Hotlined MDN.',
+                'description': 'Trigger Remove Hotline API for an MDN currently in Hotlined status. '
+                               'Verify Hotline SLO is removed, line returns to Active status, '
+                               'TMO is notified, and Syniverse is NOT called.',
+                'category': 'Happy Path',
+                'reasoning': 'Remove Hotline is the reverse operation — must be tested explicitly.',
+                'precondition': '1.\tMDN must be in Hotlined status.\n2.\tTMO network accessible.',
+                'steps': [
+                    ('Trigger Remove Hotline API with Hotlined MDN and Line ID',
+                     'API accepts request successfully'),
+                    ('Verify system sends Remove Hotline request to TMO',
+                     'TMO acknowledges removal'),
+                    ('Verify Hotline SLO is removed from subscriber profile',
+                     'SLO no longer present in Line table'),
+                    ('Verify line status returns to Active',
+                     'Line status = Active in subscriber profile'),
+                    ('Verify Syniverse is NOT called',
+                     'No Syniverse outbound call in Century Report'),
+                ],
+            })
+
+        # ── Negative: Hotline on Deactivated MDN ──
+        if 'deactivat' not in existing:
+            s.append({
+                'title': 'Negative: Verify %s rejected when MDN is Deactivated.' % fname,
+                'description': 'Trigger %s for an MDN in Deactivated status. '
+                               'System must reject — cannot hotline a deactivated line.' % fname,
+                'category': 'Negative',
+                'reasoning': 'Deactivated lines cannot have Hotline applied. System must validate line state.',
+                'precondition': '1.\tMDN must be in Deactivated status.\n2.\tPrepare deactivated test MDN.',
+                'steps': [
+                    ('Identify a Deactivated MDN from test data pool',
+                     'Deactivated MDN available'),
+                    ('Trigger %s API with the Deactivated MDN' % fname,
+                     'API rejects request'),
+                    ('Verify HTTP 400/422 with error: line not in valid state for Hotline',
+                     'Error response received with appropriate code'),
+                    ('Verify no changes to subscriber profile',
+                     'Line status remains Deactivated, no SLO added'),
+                ],
+            })
+
+        # ── Negative: Hotline on Suspended MDN ──
+        if 'suspend' not in existing or 'suspended' not in existing:
+            s.append({
+                'title': 'Negative: Verify %s rejected when MDN is Suspended.' % fname,
+                'description': 'Trigger %s for an MDN in Suspended status. '
+                               'System must reject — cannot hotline a suspended line.' % fname,
+                'category': 'Negative',
+                'reasoning': 'Suspended lines cannot have Hotline applied. Suspend takes priority over Hotline.',
+                'precondition': '1.\tMDN must be in Suspended status.\n2.\tPrepare suspended test MDN.',
+                'steps': [
+                    ('Identify a Suspended MDN from test data pool',
+                     'Suspended MDN available'),
+                    ('Trigger %s API with the Suspended MDN' % fname,
+                     'API rejects request'),
+                    ('Verify error response: line not in valid state for Hotline',
+                     'Error response with appropriate code'),
+                    ('Verify no changes to subscriber profile',
+                     'Line status remains Suspended'),
+                ],
+            })
+
+        # ── Tablet device variant ──
+        if 'tablet' not in existing:
+            s.append({
+                'title': 'Verify %s succeeds for Tablet device line.' % fname,
+                'description': 'Trigger %s for a Tablet line (not Phone). '
+                               'Verify operation completes with same flow as Phone.' % fname,
+                'category': 'Happy Path',
+                'reasoning': 'Feature title mentions Phone/Tablet/Smartwatch — Tablet must be tested explicitly.',
+                'precondition': '1.\tActive Tablet line available.\n2.\tTablet MDN in Active status.',
+                'steps': [
+                    ('Trigger %s API with Tablet MDN and Line ID' % fname,
+                     'API accepts request'),
+                    ('Verify Hotline SLO added to Tablet subscriber profile',
+                     'SLO present in Line table for Tablet line'),
+                    ('Verify TMO notified of Tablet line Hotline',
+                     'TMO acknowledges Hotline for Tablet'),
+                    ('Verify Syniverse NOT called',
+                     'No Syniverse outbound call'),
+                ],
+            })
+
+        # ── Paired Smartwatch cascade ──
+        if 'smartwatch' not in existing and 'paired' not in existing and 'wearable' not in existing:
+            s.append({
+                'title': 'Verify paired Smartwatch is also Hotlined when host MDN is Hotlined.',
+                'description': 'Trigger %s on a host/primary MDN that has a paired Smartwatch line. '
+                               'Verify the paired Smartwatch line is ALSO placed in Hotlined status '
+                               'as a cascading effect.' % fname,
+                'category': 'Happy Path',
+                'reasoning': 'When host MDN is hotlined, paired wearable must also be hotlined. '
+                             'This is a cascading state change.',
+                'precondition': '1.\tHost MDN with paired Smartwatch line.\n2.\tBoth lines in Active status.',
+                'steps': [
+                    ('Identify host MDN with active paired Smartwatch',
+                     'Host + Smartwatch pair confirmed'),
+                    ('Trigger %s API on the host/primary MDN' % fname,
+                     'API accepts request for host MDN'),
+                    ('Verify host MDN is now in Hotlined status',
+                     'Host line status = Hotlined'),
+                    ('Verify paired Smartwatch line is ALSO in Hotlined status',
+                     'Smartwatch line status = Hotlined (cascaded)'),
+                    ('Verify both lines have Hotline SLO added',
+                     'SLO present on both host and smartwatch profiles'),
+                ],
+            })
+
+        # ── Cross-operation: Deactivate a Hotlined MDN ──
+        if 'deactivat' not in existing or 'hotlined' not in existing:
+            s.append({
+                'title': 'Verify Deactivation succeeds on Hotlined MDN and removes Hotline SLO.',
+                'description': 'Trigger Deactivation API on an MDN currently in Hotlined status. '
+                               'Verify deactivation completes and Hotline SLO is removed as side-effect.',
+                'category': 'Edge Case',
+                'reasoning': 'Deactivation should override Hotline — the SLO must be cleaned up.',
+                'precondition': '1.\tMDN must be in Hotlined status.\n2.\tDeactivation API accessible.',
+                'steps': [
+                    ('Identify MDN in Hotlined status',
+                     'Hotlined MDN available'),
+                    ('Trigger Deactivation API on the Hotlined MDN',
+                     'Deactivation accepted'),
+                    ('Verify line status changes to Deactivated',
+                     'Line status = Deactivated'),
+                    ('Verify Hotline SLO is removed from profile',
+                     'No Hotline SLO in subscriber profile'),
+                ],
+            })
+
         if 'suspend after' not in existing and 'suspend' not in existing:
             s.append({
                 'title': 'Verify Suspend succeeds on a Hotlined MDN after %s.' % fname,
@@ -672,7 +806,8 @@ def _lifecycle_thinking(fname, lifecycle, ctx, existing):
                 'category': 'Edge Case',
                 'reasoning': 'Hotline → Suspend is a real lifecycle transition.',
             })
-        # FINE-TUNE: Explicit "no Syniverse call" assertion for Hotline
+
+        # Syniverse NOT called assertion
         if 'syniverse' not in existing and 'no syniverse' not in existing:
             s.append({
                 'title': 'Verify Syniverse is NOT called during %s operation.' % fname,
@@ -684,7 +819,8 @@ def _lifecycle_thinking(fname, lifecycle, ctx, existing):
                              'This is a critical negative assertion — Hotline is an internal state change only.',
                 'precondition': '1.\tPhone line should be active.\n2.\tSyniverse monitoring/logs accessible.',
             })
-        # FINE-TUNE: Verify ITMBO and EMM notification for Hotline
+
+        # ITMBO and EMM notification
         if 'itmbo' not in existing and 'emm' not in existing:
             s.append({
                 'title': 'Verify ITMBO and EMM are notified during %s.' % fname,
@@ -838,19 +974,9 @@ def _syniverse_integration_thinking(fname, ctx, existing):
                                 '2.\tSyniverse endpoint accessible.',
             })
 
-    # RemoveSubscriber for Deactivation flows
-    if any(kw in ctx for kw in ['deactivat', 'disconnect']):
-        if 'removesubscriber' not in existing and 'remove subscriber' not in existing:
-            s.append({
-                'title': 'Verify Syniverse RemoveSubscriber is triggered during %s.' % fname,
-                'description': 'Trigger %s for an active subscriber. Verify NSL sends '
-                               'Syniverse RemoveSubscriber outbound call. '
-                               'Verify subscriber removed from Syniverse system.' % fname,
-                'category': 'Happy Path',
-                'reasoning': 'Manual suite explicitly validates RemoveSubscriber for deactivation.',
-                'precondition': '1.\tPhone line should be active with Syniverse subscriber.\n'
-                                '2.\tSyniverse endpoint accessible.',
-            })
+    # RemoveSubscriber for Deactivation flows — REMOVED
+    # Deactivation does NOT call Syniverse. No RemoveSubscriber triggered.
+    # (Previously incorrectly generated Syniverse steps for deactivation flows)
 
     # SwapIMSI for Change SIM/Device flows (YD transactions)
     if any(kw in ctx for kw in ['change sim', 'change iccid', 'swap', 'iccid change']):

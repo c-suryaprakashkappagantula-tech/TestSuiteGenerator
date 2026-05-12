@@ -44,7 +44,7 @@ from modules.llm_engine import (LLMClient, create_llm_from_env,
                                  PROVIDER_OPENAI, PROVIDER_AZURE, PROVIDER_BEDROCK,
                                  PROVIDER_OLLAMA, PROVIDER_NONE, DEFAULT_MODELS)
 from modules.llm_reviewer import review_suite_gaps, improve_steps, parse_custom_instructions_llm
-from modules.pipeline import Pipeline, PipelineError, block_jira_fetch, block_chalk_db, block_chalk_live, block_parse_docs, block_build_suite, block_generate_output
+from modules.pipeline import Pipeline, PipelineError, block_jira_fetch, block_chalk_db, block_chalk_live, block_parse_docs, block_build_suite, block_generate_output, block_deep_mine
 from modules.database import (init_db, save_pi_pages, load_pi_pages, save_features,
                                load_features, load_all_features, get_features_count,
                                save_jira, load_jira, is_jira_stale, save_chalk, load_chalk,
@@ -618,6 +618,17 @@ with left:
     strategy = 'Smart Suite (Recommended)'
     if use_full:
         strategy = 'Full Matrix'
+
+    # ── Engine Version Toggle (V7 Template vs V8 Data-First) ──
+    engine_version = st.radio(
+        'Engine Version',
+        options=['V7.0 (Template)', 'V8.0 (Data-First)'],
+        index=0,
+        horizontal=True,
+        key='engine_version_toggle',
+        help='V7.0: Template-based generation | V8.0: Data-driven with traceability',
+    )
+    _engine_v = '8' if 'V8' in engine_version else '7'
 
     # Default values — Smart Suite includes both channels
     channel = ['ITMBO', 'NBOP']
@@ -1345,6 +1356,24 @@ if run_btn:
                             print('[V7] WARNING: Document parsing failed: %s — continuing with empty docs' % str(_doc_err)[:100], flush=True)
                             parsed_docs = []
 
+                    # Block 4b: Deep Mine (crawl Chalk URLs, mine subtasks, find related features)
+                    print('', flush=True)
+                    print('[V7] ═══════════════════════════════════════════════════', flush=True)
+                    print('[V7] Block 4b: Deep Mining all data sources for %s' % feature_id, flush=True)
+                    print('[V7] ═══════════════════════════════════════════════════', flush=True)
+                    logger.set('%sBlock 4b: Deep mining %s...' % (_bp, feature_id))
+                    deep_mine_result = None
+                    try:
+                        dm_result = pipe.run('DeepMine_%s' % feature_id,
+                            lambda: block_deep_mine(jira, chalk, page=page, log=logger))
+                        deep_mine_result = dm_result['deep_mine_result']
+                        print('[V7] Deep mine: %d API specs, %d subtask mines, %d testable items' % (
+                            len(deep_mine_result.api_specs), len(deep_mine_result.subtask_mines),
+                            len(deep_mine_result.all_testable_items)), flush=True)
+                    except Exception as _dm_err:
+                        print('[V7] WARNING: Deep mine failed: %s — continuing without deep data' % str(_dm_err)[:100], flush=True)
+                        deep_mine_result = None
+
                     # Block 5: Test Engine (with self-heal retry + V7 structured logging)
                     print('', flush=True)
                     print('[V7] ═══════════════════════════════════════════════════', flush=True)
@@ -1358,12 +1387,29 @@ if run_btn:
                         'include_negative': inc_negative, 'include_e2e': inc_e2e,
                         'include_edge': inc_edge, 'include_attachments': inc_attachments,
                         'strategy': strategy, 'custom_instructions': custom_instructions,
+                        'engine_version': _engine_v,
                     }
-                    engine_result = pipe.run('Engine_%s' % feature_id,
-                        lambda: block_build_suite(jira, chalk, parsed_docs, options, log=logger))
+                    if _engine_v == '8':
+                        from modules.pipeline import block_build_suite_v8
+                        engine_result = pipe.run('Engine_V8_%s' % feature_id,
+                            lambda: block_build_suite_v8(jira, chalk, parsed_docs, options, deep_mine_result=deep_mine_result, log=logger))
+                    else:
+                        engine_result = pipe.run('Engine_%s' % feature_id,
+                            lambda: block_build_suite(jira, chalk, parsed_docs, options, log=logger, deep_mine_result=deep_mine_result))
                     suite = engine_result['suite']
                     total_steps = engine_result['total_steps']
                     print('[V7] Engine complete: %d TCs, %d steps' % (len(suite.test_cases), total_steps), flush=True)
+
+                    # V8.0: Display data sources summary and warnings
+                    if _engine_v == '8' and hasattr(suite, 'data_inventory') and suite.data_inventory:
+                        inv = suite.data_inventory
+                        print('[V8] Data sources: %d | Testable items: %d' % (
+                            len(inv.sources), inv.total_testable_items), flush=True)
+                        if inv.warnings:
+                            for w in inv.warnings:
+                                print('[V8] WARNING: %s' % w, flush=True)
+                        if not suite.test_cases:
+                            print('[V8] ⚠️ Zero testable items — no TCs generated. Check warnings.', flush=True)
 
                     # Block 6: Excel + DB Save (with self-heal retry + V7 structured logging)
                     print('[V7] ═══════════════════════════════════════════════════', flush=True)

@@ -73,7 +73,7 @@ class TestSuite:
 # MAIN ENTRY
 # ================================================================
 
-def build_test_suite(jira, chalk, parsed_docs, options, log=print):
+def build_test_suite(jira, chalk, parsed_docs, options, log=print, deep_mine_result=None):
     # Validate Jira data before proceeding (Finding #3 & #4)
     log('[ENGINE] Validating Jira data...')
     jira_warnings = validate_jira_issue(jira, log)
@@ -94,7 +94,7 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print):
         feature_id=jira.key, feature_title=jira.summary,
         channel=options.get('channel', jira.channel),
         devices=options.get('devices', ['Mobile']),
-        networks=options.get('networks', ['4G', '5G']),
+        networks=options.get('networks', ['5G']),
         sim_types=options.get('sim_types', ['eSIM', 'pSIM']),
         pi=jira.pi, jira_status=jira.status, jira_priority=jira.priority,
         jira_assignee=jira.assignee, jira_reporter=jira.reporter,
@@ -176,6 +176,7 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print):
             _before_dedup = len(suite.test_cases)
             _seen_norms = set()
             _seen_step_sigs = []  # list of step_signature_sets
+            _seen_summaries = []  # list of normalized summaries for title comparison
             _deduped = []
 
             def _normalize_step(text):
@@ -204,6 +205,30 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print):
                     for s in (tc.steps or []) if s.summary and len(s.summary.strip()) > 5
                 )
 
+            def _title_keywords(summary):
+                """Extract meaningful keywords from TC summary for title comparison."""
+                s = re.sub(r'^TC\d+_[A-Z][A-Z0-9]+-\d+[_ -]*', '', summary).strip().lower()
+                # Remove common prefixes
+                for pfx in ['verify ', 'validate ', 'negative: ', 'edge case: ']:
+                    if s.startswith(pfx):
+                        s = s[len(pfx):]
+                return set(re.findall(r'\b\w{4,}\b', s))
+
+            def _titles_are_distinct(norm, existing_summaries):
+                """Check if this TC's title is meaningfully different from all existing TCs.
+                Returns True if the title describes a distinct scenario."""
+                new_kw = _title_keywords(norm)
+                if not new_kw:
+                    return False
+                for existing_norm in existing_summaries:
+                    existing_kw = _title_keywords(existing_norm)
+                    if not existing_kw:
+                        continue
+                    overlap = len(new_kw & existing_kw) / max(len(new_kw), len(existing_kw), 1)
+                    if overlap > 0.70:
+                        return False  # Title is too similar to an existing TC
+                return True  # Title is distinct from all existing TCs
+
             for tc in suite.test_cases:
                 _norm = re.sub(r'^TC\d+_[A-Z][A-Z0-9]+-\d+[_ -]*', '', tc.summary).strip()
                 _norm = re.sub(r'\s+', ' ', _norm).lower().strip()
@@ -225,6 +250,9 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print):
                     log('[ENGINE]     ↳ Kept: steps differ from existing TC with same summary')
 
                 # Pass 2: step-content overlap (>65%) — catches near-identical TCs
+                # BUT: if the titles are clearly different scenarios, KEEP the TC.
+                # This prevents collapsing distinct Chalk scenarios that got the same
+                # template steps because they had 0 original Chalk steps.
                 _is_step_dup = False
                 if len(_tc_steps) >= 3:
                     for _existing_sig in _seen_step_sigs:
@@ -233,12 +261,17 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print):
                         _overlap = len(_tc_steps & _existing_sig) / max(len(_tc_steps), len(_existing_sig), 1)
                         if _overlap > 0.65:
                             _is_step_dup = True
-                            log('[ENGINE]   [DEDUP] Chalk duplicate (%.0f%% step overlap): "%s"' % (_overlap * 100, tc.summary[:50]))
                             break
                 if _is_step_dup:
-                    continue
+                    # Title guard: if the title is clearly a different scenario, keep it
+                    if _titles_are_distinct(_norm, _seen_summaries):
+                        log('[ENGINE]     ↳ Kept despite step overlap: title describes distinct scenario: "%s"' % tc.summary[:60])
+                    else:
+                        log('[ENGINE]   [DEDUP] Chalk duplicate (%.0f%% step overlap): "%s"' % (_overlap * 100, tc.summary[:50]))
+                        continue
 
                 # Pass 3: subset detection — if this TC's steps are a subset of an existing TC
+                # Same title guard applies
                 if len(_tc_steps) >= 2 and len(_tc_steps) <= 5:
                     _is_subset = False
                     for _existing_sig in _seen_step_sigs:
@@ -248,15 +281,19 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print):
                         _contained = len(_tc_steps & _existing_sig)
                         if _contained >= len(_tc_steps) * 0.8:
                             _is_subset = True
-                            log('[ENGINE]   [DEDUP] Chalk subset (%d/%d steps in larger TC): "%s"' % (
-                                _contained, len(_tc_steps), tc.summary[:50]))
                             break
                     if _is_subset:
-                        continue
+                        if _titles_are_distinct(_norm, _seen_summaries):
+                            log('[ENGINE]     ↳ Kept despite subset: title describes distinct scenario: "%s"' % tc.summary[:60])
+                        else:
+                            log('[ENGINE]   [DEDUP] Chalk subset (%d/%d steps in larger TC): "%s"' % (
+                                _contained, len(_tc_steps), tc.summary[:50]))
+                            continue
 
                 _deduped.append(tc)
                 _seen_norms.add(_norm)
                 _seen_step_sigs.append(_tc_steps)
+                _seen_summaries.append(_norm)
 
             suite.test_cases = _deduped
             _removed = _before_dedup - len(suite.test_cases)
@@ -312,6 +349,26 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print):
         log('[ENGINE]   [WARN] No Chalk scenarios -- building from Jira description')
         suite.test_cases = _build_from_jira_only(jira, feature_short)
         suite.warnings.append('No Chalk data available -- TCs built from Jira description only')
+
+    # ════════════════════════════════════════════════════════════════
+    # Step 3b: DEEP MINE INTEGRATION — use crawled API specs, subtask
+    # data, and related Chalk scenarios to enrich the test suite.
+    # This is the exhaustive data gathering that ensures no info is missed.
+    # ════════════════════════════════════════════════════════════════
+    if deep_mine_result and (deep_mine_result.api_specs or deep_mine_result.related_chalk_scenarios or deep_mine_result.subtask_mines):
+        log('[ENGINE] Step 3b: Integrating deep-mined data...')
+        _deep_mine_tcs = _build_from_deep_mine(deep_mine_result, jira, feature_short, log)
+        if _deep_mine_tcs:
+            # Deduplicate against existing TCs
+            _deep_mine_tcs = _deduplicate_tcs(suite.test_cases, _deep_mine_tcs, log)
+            if _deep_mine_tcs:
+                suite.test_cases.extend(_deep_mine_tcs)
+                log('[ENGINE]   Added %d TCs from deep mine data' % len(_deep_mine_tcs))
+                suite.data_sources.extend(deep_mine_result.data_sources_used)
+        # Flag: deep mine provided specific data — suppress generic generators later
+        suite._has_deep_mine = True
+    else:
+        suite._has_deep_mine = False
 
     log('[ENGINE] Step 4: Cross-checking with attachments...')
     if parsed_docs and options.get('include_attachments', True):
@@ -505,8 +562,12 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print):
     if options.get('include_negative', True):
         # Skip generic API negatives for notification/CDR features — they get CDR-specific negatives from analyst
         # Skip for ui_portal — negatives come from generate_ui_scenarios via analyst KB
-        if _fc.is_notification or _fc.feature_type == 'ui_portal':
-            log('[ENGINE] Step 5: Skipping generic negatives for %s feature' % _fc.feature_type)
+        # Skip when deep mine provided specific data — negatives must come from Jira/Chalk
+        if _fc.is_notification or _fc.feature_type == 'ui_portal' or getattr(suite, '_has_deep_mine', False):
+            if getattr(suite, '_has_deep_mine', False):
+                log('[ENGINE] Step 5: Skipping generic negatives — deep mine provided specific data')
+            else:
+                log('[ENGINE] Step 5: Skipping generic negatives for %s feature' % _fc.feature_type)
             # V7: For BCD features, add BCD-specific negatives that the analyst may miss
             if any(kw in feature_short.lower() for kw in ['change bcd', 'change dpfo', 'dpfo reset', 'bill cycle']):
                 _existing_neg = ' '.join(tc.summary.lower() for tc in suite.test_cases if tc.category == 'Negative')
@@ -599,21 +660,33 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print):
 
     else:
         # ── Non-UI features: run the full pipeline ──
-        log('[ENGINE] Step 5a: Test Analyst reasoning...')
-        from .test_analyst import analyze_and_suggest
-        from .tc_templates import build_description, build_precondition, build_steps
-        try:
-            analyst_suggestions = analyze_and_suggest(
-                feature_name=feature_short, feature_id=jira.key,
-                scope=chalk.scope if chalk else '', description=jira.description or '',
-                existing_scenarios=[tc.summary.lower() for tc in suite.test_cases],
-                log=log, ac_text=jira.acceptance_criteria or '',
-                channel=jira.channel or '', jira_summary=jira.summary or '')
-        except Exception as _analyst_err:
-            log('[ENGINE]   WARNING: Test Analyst failed: %s — continuing without analyst TCs' % str(_analyst_err)[:100])
+        # GATE: If deep mine provided specific data from Jira/Chalk sources,
+        # SKIP generic analyst reasoning — only use data-backed TCs.
+        # Generic "QA thinking" (duplicate request, timeout, rollback) is NOT acceptable
+        # unless it's explicitly mentioned in the Jira/Chalk/subtask data.
+        _skip_generic_analyst = getattr(suite, '_has_deep_mine', False)
+
+        if _skip_generic_analyst:
+            log('[ENGINE] Step 5a: SKIPPING generic analyst — deep mine provided specific data')
+            log('[ENGINE]   Principle: Every TC must trace back to Jira/Chalk/subtask data')
             analyst_suggestions = []
+        else:
+            log('[ENGINE] Step 5a: Test Analyst reasoning...')
+            from .test_analyst import analyze_and_suggest
+            from .tc_templates import build_description, build_precondition, build_steps
+            try:
+                analyst_suggestions = analyze_and_suggest(
+                    feature_name=feature_short, feature_id=jira.key,
+                    scope=chalk.scope if chalk else '', description=jira.description or '',
+                    existing_scenarios=[tc.summary.lower() for tc in suite.test_cases],
+                    log=log, ac_text=jira.acceptance_criteria or '',
+                    channel=jira.channel or '', jira_summary=jira.summary or '')
+            except Exception as _analyst_err:
+                log('[ENGINE]   WARNING: Test Analyst failed: %s — continuing without analyst TCs' % str(_analyst_err)[:100])
+                analyst_suggestions = []
 
         if analyst_suggestions:
+            from .tc_templates import build_description, build_precondition, build_steps
             _next_idx = len(suite.test_cases) + 1
             _analyst_cap = 15 if _fc.is_ui else 8
             for sg in analyst_suggestions[:_analyst_cap]:
@@ -674,6 +747,12 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print):
         _skip_enrichment = False
         if _fc.feature_type == 'notification' and not getattr(suite, '_contract', None):
             _skip_enrichment = True
+        # GATE: If deep mine provided specific data, skip generic enrichment
+        # (Hotlined MDN, Suspended MDN, etc. are NOT relevant for inquiry features
+        # unless explicitly mentioned in Jira/Chalk data)
+        if getattr(suite, '_has_deep_mine', False):
+            _skip_enrichment = True
+            log('[ENGINE] Step 5b: Skipping generic enrichment — deep mine provided specific data')
         if _skip_enrichment:
             log('[ENGINE] Step 5b: Skipping enrichment for %s feature' % _fc.feature_type)
         else:
@@ -831,6 +910,87 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print):
     _before_qg = len(suite.test_cases)
     suite.test_cases = _quality_gate(suite.test_cases, feature_short, jira.key, log)
     log('[ENGINE]   Quality gate: %d → %d TCs' % (_before_qg, len(suite.test_cases)))
+
+    # Step 8c2: LIFECYCLE FILTER — remove unwanted TCs for lifecycle features
+    # For Hotline/Suspend/Deactivate features, remove:
+    #   - DB consistency checks (not needed for demo/manual testing)
+    #   - Rollback/cancel reversal TCs (too technical, not in manual suites)
+    #   - Linked defect TCs that don't match the feature
+    #   - Comment-based TCs that are just notes
+    _lifecycle = None
+    _fl = feature_short.lower()
+    if any(kw in _fl for kw in ['hotline', 'enable hotline']):
+        _lifecycle = 'hotline'
+    elif any(kw in _fl for kw in ['suspend']):
+        _lifecycle = 'suspend'
+    elif any(kw in _fl for kw in ['deactivat']):
+        _lifecycle = 'deactivation'
+
+    if _lifecycle:
+        _before_lf = len(suite.test_cases)
+        _lifecycle_filtered = []
+        _suppress_keywords = [
+            'db state', 'nsl db', 'db consistent',
+            'rollback', 'rolls back', 'cancel reversal', 'cancel/reversal',
+            'duplicate request',
+            'api response payload',
+            'apollo_ne http', 'apollo ne http',
+            'audit-history invariant', 'audit trail',
+            'invalid data or schema errors',
+            # Irrelevant operations for hotline feature
+            'activation should be success',
+            'activation should succeed',
+            'activations are failing',
+        ]
+
+        # Also detect and remove duplicate happy path TCs
+        # (e.g., "Enable Hotline for Active" and "Validate Enable Hotline happy path" are the same)
+        _seen_happy_path = False
+
+        for tc in suite.test_cases:
+            _tc_lower = (tc.summary + ' ' + tc.description).lower()
+            # Suppress garbage patterns
+            _is_garbage = False
+            for kw in _suppress_keywords:
+                if kw in _tc_lower:
+                    _is_garbage = True
+                    log('[ENGINE]   [LIFECYCLE-FILTER] Removed: "%s" (matched: %s)' % (tc.summary[:50], kw))
+                    break
+            # Suppress comment-based TCs
+            if not _is_garbage and 'comment:' in _tc_lower:
+                _is_garbage = True
+                log('[ENGINE]   [LIFECYCLE-FILTER] Removed comment TC: "%s"' % tc.summary[:50])
+            # Suppress linked defect TCs that don't mention the feature operation
+            if not _is_garbage and 'activations are failing' in _tc_lower and _lifecycle == 'hotline':
+                _is_garbage = True
+                log('[ENGINE]   [LIFECYCLE-FILTER] Removed irrelevant defect TC: "%s"' % tc.summary[:50])
+            # Suppress Jira metadata noise (iteration/progression references)
+            if not _is_garbage and ('intg uat progression' in _tc_lower or 'ft 53 intg' in _tc_lower):
+                _is_garbage = True
+                log('[ENGINE]   [LIFECYCLE-FILTER] Removed metadata noise TC: "%s"' % tc.summary[:50])
+            # Suppress TCs with broken/unclear names (raw Jira text that leaked through)
+            if not _is_garbage and _lifecycle == 'hotline':
+                # "Line is Deactivated with Hotline SLO activation should remove" — unclear
+                if 'slo activation should remove' in _tc_lower:
+                    _is_garbage = True
+                    log('[ENGINE]   [LIFECYCLE-FILTER] Removed unclear TC: "%s"' % tc.summary[:50])
+            # Suppress duplicate happy path (generic "Validate X happy path" when specific one exists)
+            if not _is_garbage and tc.category == 'Happy Path':
+                _is_generic_happy = 'happy path' in _tc_lower or 'validate enable' in _tc_lower[:60]
+                _is_specific_happy = 'for line status' in _tc_lower or 'for active' in _tc_lower
+                if _is_specific_happy:
+                    _seen_happy_path = True
+                elif _is_generic_happy and _seen_happy_path:
+                    _is_garbage = True
+                    log('[ENGINE]   [LIFECYCLE-FILTER] Removed duplicate happy path: "%s"' % tc.summary[:50])
+
+            if not _is_garbage:
+                _lifecycle_filtered.append(tc)
+
+        suite.test_cases = _lifecycle_filtered
+        _removed_lf = _before_lf - len(suite.test_cases)
+        if _removed_lf:
+            log('[ENGINE]   Lifecycle filter: removed %d unwanted TCs (%d remaining)' % (_removed_lf, len(suite.test_cases)))
 
     # Step 8d: HUMANIZE — make the suite feel human-written
     log('[ENGINE] Step 8d: Humanization pass...')
@@ -1034,7 +1194,7 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print):
         for tmo_st, nsl_st, syn_action in _ui_combos:
             _check = f'nbop.*tmo.*{tmo_st.lower()}.*nsl.*{nsl_st.lower()}'
             if not re.search(_check, _existing_text):
-                from TestSuiteGenerator.modules.step_templates import _ui_sync_subscriber_steps
+                from .step_templates import _ui_sync_subscriber_steps
                 _title = f'UI: Sync Subscriber via NBOP (TMO={tmo_st}, NSL={nsl_st}, Syniverse={syn_action})'
                 _steps_data = _ui_sync_subscriber_steps(_title, '', _title.lower())
                 _steps = [TestStep(i+1, s, e) for i, (s, e) in enumerate(_steps_data)]
@@ -2759,10 +2919,241 @@ def _build_from_jira_only(jira, feature_name=''):
     for st in jira.subtasks:
         all_text += '\n' + st.get('summary', '')
         all_text += '\n' + st.get('description', '')
+        all_text += '\n' + st.get('acceptance_criteria', '')
     for c in jira.comments[:5]:
         all_text += '\n' + c.get('body', '')
     all_text = re.sub(r'\[([^]]+)\]', r'\1', all_text)
     all_text = re.sub(r'\*([^*]+)\*', r'\1', all_text)
+
+    # ── RETRIEVE DEVICE / INQUIRY MVNO SPECIALIZATION ──
+    # When the feature is a "retrieve device" or similar inquiry API with MVNO/TMO scope,
+    # mine the subtask AC for specific testable behaviors instead of relying on generic mining.
+    _fname_low = fname.lower()
+    _is_retrieve_device = any(kw in _fname_low for kw in ['retrieve device', 'retrieve-device'])
+    _is_mvno_inquiry = _is_retrieve_device or (
+        any(kw in _fname_low for kw in ['inquiry', 'retrieve', 'get device']) and
+        any(kw in all_text.lower() for kw in ['mvno', 'requesttype', 'request type', 'mno_tmo']))
+
+    if _is_mvno_inquiry:
+        # Deep-mine subtask AC for specific testable scenarios
+        _subtask_ac_items = []
+        _has_get = 'get' in all_text.lower() and ('retrieve-device' in all_text.lower() or 'retrieve device' in all_text.lower())
+        _has_post = 'post' in all_text.lower() and ('retrieve-device' in all_text.lower() or 'retrieve device' in all_text.lower())
+        _has_permission = 'permission' in all_text.lower() or 'mno_tmo' in all_text.lower()
+        _has_request_type = 'requesttype' in all_text.lower() or 'request type' in all_text.lower()
+        _has_nbop_ui = any('nbop' in st.get('summary', '').lower() for st in jira.subtasks)
+        _has_message_header = 'messageheader' in all_text.lower() or 'message header' in all_text.lower()
+
+        # Extract specific AC items from subtasks
+        for st in jira.subtasks:
+            st_ac = st.get('acceptance_criteria', '') or ''
+            st_ac = re.sub(r'\{[^}]+\}', '', st_ac)
+            st_ac = re.sub(r'\*', '', st_ac)
+            # Parse numbered items (# item)
+            items = re.findall(r'#\s*(.+?)(?=#|\n\n|$)', st_ac, re.DOTALL)
+            for item in items:
+                item = item.strip()
+                if len(item) > 15:
+                    _subtask_ac_items.append(item)
+
+        # Build specific TCs from the mined data
+        # TC1: Retrieve Device GET - Happy Path (TMO subscriber)
+        if _has_get:
+            tcs.append(TestCase(
+                sno=str(idx),
+                summary='TC%03d_%s_Verify retrieve-device GET returns TMO device details with RequestType=TMO.' % (idx, jira.key),
+                description='Trigger retrieve-device GET API with valid IMEI/ICCID for a TMO subscriber. '
+                            'RequestType=TMO must be sent in the header. '
+                            'Verify response contains device details (IMEI, make, model, equipmentType) for the TMO subscriber.',
+                preconditions='1.\tActive TMO subscriber line with known IMEI/ICCID\n'
+                              '2.\tCorresponding NE API is available and integrated\n'
+                              '3.\tRequestType=TMO supported in environment',
+                story_linkage=jira.key, label=jira.key, category='Happy Path',
+                steps=[
+                    TestStep(1, 'Trigger retrieve-device GET API with valid IMEI and RequestType=TMO in header',
+                             'NSL accepts request and routes to TMO NE. HTTP 200 returned'),
+                    TestStep(2, 'Validate response payload contains: IMEI, make, model, deviceType, equipmentType',
+                             'All device fields present with correct TMO subscriber device data'),
+                    TestStep(3, 'Validate RequestType=TMO is correctly passed in messageHeader to downstream NE',
+                             'NE receives RequestType=TMO. TMO device data fetched correctly'),
+                    TestStep(4, 'Verify response payload structure is same as VZW retrieve-device GET',
+                             'Same response schema for both VZW and TMO — only data values differ'),
+                ]))
+            idx += 1
+
+        # TC2: Retrieve Device POST - Happy Path (TMO subscriber)
+        if _has_post or 'post' in fname.lower():
+            tcs.append(TestCase(
+                sno=str(idx),
+                summary='TC%03d_%s_Verify retrieve-device POST returns TMO device details with RequestType=TMO.' % (idx, jira.key),
+                description='Trigger retrieve-device POST API with valid ICCID for a TMO subscriber. '
+                            'RequestType=TMO must be sent in the header/body. '
+                            'Verify response contains device details for the TMO subscriber.',
+                preconditions='1.\tActive TMO subscriber line with known ICCID\n'
+                              '2.\tCorresponding NE API is available and integrated\n'
+                              '3.\tRequestType=TMO supported in environment',
+                story_linkage=jira.key, label=jira.key, category='Happy Path',
+                steps=[
+                    TestStep(1, 'Trigger retrieve-device POST API with valid ICCID and RequestType=TMO in header & body',
+                             'NSL accepts request and routes to TMO NE. HTTP 200 returned'),
+                    TestStep(2, 'Validate response payload contains: IMEI, make, model, deviceType, equipmentType',
+                             'All device fields present with correct TMO subscriber device data'),
+                    TestStep(3, 'Validate RequestType=TMO is correctly passed to downstream NE',
+                             'NE receives RequestType=TMO. TMO device data fetched correctly'),
+                    TestStep(4, 'Verify response payload structure is same as VZW retrieve-device POST',
+                             'Same response schema for both VZW and TMO — only data values differ'),
+                ]))
+            idx += 1
+
+        # TC3: VZW subscriber still works (co-existence)
+        tcs.append(TestCase(
+            sno=str(idx),
+            summary='TC%03d_%s_Verify retrieve-device still works for VZW subscriber (co-existence).' % (idx, jira.key),
+            description='Verify existing VZW retrieve-device flow is unaffected by MVNO changes. '
+                        'RequestType=VZW (or default) must return VZW device details as before.',
+            preconditions='1.\tActive VZW subscriber line with known IMEI/ICCID\n'
+                          '2.\tNE API available\n'
+                          '3.\tNo RequestType or RequestType=VZW in header',
+            story_linkage=jira.key, label=jira.key, category='Regression',
+            steps=[
+                TestStep(1, 'Trigger retrieve-device API with valid IMEI for VZW subscriber (no RequestType or RequestType=VZW)',
+                         'NSL accepts request and routes to VZW NE. HTTP 200 returned'),
+                TestStep(2, 'Validate response contains VZW device details: IMEI, make, model, deviceType',
+                         'VZW device data returned correctly — no impact from MVNO changes'),
+                TestStep(3, 'Verify response structure and fields are unchanged from pre-MVNO behavior',
+                         'Response schema identical to previous release. No regression.'),
+            ]))
+        idx += 1
+
+        # TC4: NBOP UI - Permission toggle (MNO_TMO)
+        if _has_permission and _has_nbop_ui:
+            tcs.append(TestCase(
+                sno=str(idx),
+                summary='TC%03d_%s_Verify NBOP Network Inquiry shows MNO radio buttons when MNO_TMO permission is ON.' % (idx, jira.key),
+                description='When CS access to MNO_TMO permission is ON, NBOP Network Inquiry screen must display '
+                            'MNO radio button options (Verizon, TMO) with Verizon as default.',
+                preconditions='1.\tNBOP portal accessible\n'
+                              '2.\tCS MNO_TMO permission is ON for the agent\n'
+                              '3.\tActive TMO subscriber available',
+                story_linkage=jira.key, label=jira.key, category='Happy Path',
+                steps=[
+                    TestStep(1, 'Login to NBOP with agent that has MNO_TMO permission ON in CS',
+                             'NBOP login successful'),
+                    TestStep(2, 'Navigate to Network Inquiry screen',
+                             'Network Inquiry screen loads with MNO radio button options visible'),
+                    TestStep(3, 'Verify Verizon and TMO radio buttons are displayed with Verizon as default',
+                             'Both radio buttons present. Verizon is pre-selected as default'),
+                    TestStep(4, 'Select TMO radio button and search by IMEI/ICCID',
+                             'API request sent with RequestType=TMO in header. TMO device details displayed'),
+                ]))
+            idx += 1
+
+            tcs.append(TestCase(
+                sno=str(idx),
+                summary='TC%03d_%s_Verify NBOP Network Inquiry hides MNO options when MNO_TMO permission is OFF.' % (idx, jira.key),
+                description='When CS access to MNO_TMO permission is OFF, NBOP Network Inquiry screen must display '
+                            'the current screen WITHOUT MNO radio button options.',
+                preconditions='1.\tNBOP portal accessible\n'
+                              '2.\tCS MNO_TMO permission is OFF for the agent\n'
+                              '3.\tActive subscriber available',
+                story_linkage=jira.key, label=jira.key, category='Happy Path',
+                steps=[
+                    TestStep(1, 'Login to NBOP with agent that has MNO_TMO permission OFF in CS',
+                             'NBOP login successful'),
+                    TestStep(2, 'Navigate to Network Inquiry screen',
+                             'Network Inquiry screen loads — current layout without MNO radio buttons'),
+                    TestStep(3, 'Verify NO MNO radio button options (Verizon/TMO) are displayed',
+                             'MNO radio buttons are NOT visible. Screen shows standard VZW-only inquiry'),
+                    TestStep(4, 'Search by IMEI/ICCID — verify standard VZW behavior',
+                             'Standard VZW retrieve-device flow executes. No RequestType header sent.'),
+                ]))
+            idx += 1
+
+        # TC5: Negative - Invalid IMEI/ICCID
+        tcs.append(TestCase(
+            sno=str(idx),
+            summary='TC%03d_%s_Negative: Verify retrieve-device rejects invalid IMEI for TMO subscriber.' % (idx, jira.key),
+            description='Trigger retrieve-device API with invalid IMEI (non-existent, wrong format) for TMO. '
+                        'Verify appropriate error response returned.',
+            preconditions='1.\tRequestType=TMO in header\n'
+                          '2.\tInvalid IMEI prepared (non-existent in TMO network)',
+            story_linkage=jira.key, label=jira.key, category='Negative',
+            steps=[
+                TestStep(1, 'Trigger retrieve-device API with invalid/non-existent IMEI and RequestType=TMO',
+                         'NSL sends request to TMO NE'),
+                TestStep(2, 'Verify NE returns device-not-found or validation error',
+                         'Error response received from NE with appropriate error code'),
+                TestStep(3, 'Verify NSL returns proper error response to caller (HTTP 404 or 400)',
+                         'Error response contains errorCode, errorMessage. No partial data returned.'),
+            ]))
+        idx += 1
+
+        # TC6: Negative - Missing RequestType header for TMO
+        if _has_request_type:
+            tcs.append(TestCase(
+                sno=str(idx),
+                summary='TC%03d_%s_Negative: Verify retrieve-device handles missing RequestType header gracefully.' % (idx, jira.key),
+                description='Trigger retrieve-device API without RequestType header. '
+                            'Verify system defaults to VZW behavior or returns appropriate error.',
+                preconditions='1.\tNo RequestType header in request\n'
+                              '2.\tValid IMEI/ICCID provided',
+                story_linkage=jira.key, label=jira.key, category='Negative',
+                steps=[
+                    TestStep(1, 'Trigger retrieve-device API with valid IMEI but NO RequestType header',
+                             'NSL receives request without network identifier'),
+                    TestStep(2, 'Verify system behavior — defaults to VZW or returns error',
+                             'System either defaults to VZW retrieve-device flow OR returns clear error indicating missing RequestType'),
+                    TestStep(3, 'Verify no ambiguous routing — request does not go to wrong NE',
+                             'No cross-network data leakage. Request handled deterministically.'),
+                ]))
+            idx += 1
+
+        # TC7: Device types coverage (Phones, Tablets, Wearables)
+        if any(kw in all_text.lower() for kw in ['phone', 'tablet', 'wearable']):
+            for device_type in ['Phone', 'Tablet', 'Wearable']:
+                if device_type.lower() in all_text.lower() or device_type.lower() + 's' in all_text.lower():
+                    tcs.append(TestCase(
+                        sno=str(idx),
+                        summary='TC%03d_%s_Verify retrieve-device returns correct details for TMO %s device.' % (idx, jira.key, device_type),
+                        description='Trigger retrieve-device API for a TMO subscriber with a %s device. '
+                                    'Verify device details (make, model, equipmentType) are correct for %s.' % (device_type, device_type),
+                        preconditions='1.\tActive TMO subscriber with %s device type\n'
+                                      '2.\tRequestType=TMO in header\n'
+                                      '3.\tIMEI for %s device available' % (device_type, device_type),
+                        story_linkage=jira.key, label=jira.key, category='Happy Path',
+                        steps=[
+                            TestStep(1, 'Trigger retrieve-device API with IMEI of TMO %s and RequestType=TMO' % device_type,
+                                     'NSL accepts request. HTTP 200 returned'),
+                            TestStep(2, 'Validate response contains correct equipmentType=%s' % device_type,
+                                     'equipmentType field correctly identifies device as %s' % device_type),
+                            TestStep(3, 'Validate make, model fields match the %s device in TMO network' % device_type,
+                                     'Device details accurate for %s type' % device_type),
+                        ]))
+                    idx += 1
+
+        # TC8: messageHeader validation
+        if _has_message_header:
+            tcs.append(TestCase(
+                sno=str(idx),
+                summary='TC%03d_%s_Verify messageHeader value is correctly set for TMO retrieve-device.' % (idx, jira.key),
+                description='Verify the messageHeader value in the API request is correctly populated '
+                            'when RequestType=TMO is selected.',
+                preconditions='1.\tRequestType=TMO in header\n'
+                              '2.\tValid IMEI/ICCID for TMO subscriber',
+                story_linkage=jira.key, label=jira.key, category='Happy Path',
+                steps=[
+                    TestStep(1, 'Trigger retrieve-device API with RequestType=TMO',
+                             'Request sent to NSL'),
+                    TestStep(2, 'Capture outbound request to NE — verify messageHeader value',
+                             'messageHeader contains correct value per TMO specification'),
+                    TestStep(3, 'Verify NE processes request with correct messageHeader',
+                             'NE returns TMO device data. messageHeader accepted.'),
+                ]))
+            idx += 1
+
+        # If we generated specific TCs, return them (skip generic mining)
+        if tcs:
+            return tcs
 
     # ── Mine 1: Transaction types (CP, CE, PU, PD, PC, etc.) ──
     trans_types = _extract_transaction_types(all_text, fname)
@@ -2914,6 +3305,238 @@ def _build_from_jira_only(jira, feature_name=''):
             ])
         tcs.append(tc)
     return tcs
+
+
+# ================================================================
+# DEEP MINE → TEST CASE BUILDER
+# ================================================================
+
+def _build_from_deep_mine(deep_mine_result, jira, feature_short, log=print):
+    """Build test cases from deep-mined data (API specs, subtask mines, related Chalk).
+    This is the bridge between the deep_miner output and the test engine."""
+    tcs = []
+    idx = 900  # Start at 900 to avoid conflicts with other TC numbering
+
+    # ── From API Specs (crawled Chalk pages) ──
+    for spec in deep_mine_result.api_specs:
+        if not spec.api_name:
+            continue
+
+        log('[ENGINE]   [DEEP] Processing API spec: %s %s' % (spec.http_method, spec.api_name))
+
+        # TC from each scenario found on the Chalk page
+        for scenario in spec.scenarios:
+            title = scenario.get('title', '')
+            validation = scenario.get('validation', '')
+            if not title or len(title) < 10:
+                continue
+
+            tc = TestCase(
+                sno=str(idx),
+                summary='TC%03d_%s_%s' % (idx, jira.key, title[:80]),
+                description='[From Chalk API spec: %s] %s' % (spec.api_name, validation[:200] if validation else title),
+                preconditions='1.\tAPI endpoint available: %s\n2.\tValid test data prepared\n3.\t%s' % (
+                    spec.endpoint or spec.api_name,
+                    'RequestType header configured' if 'RequestType' in spec.headers else 'Standard headers'),
+                story_linkage=jira.key, label=jira.key, category='Happy Path',
+                steps=_build_steps_from_api_spec(spec, title, validation))
+            tcs.append(tc)
+            idx += 1
+
+        # TC from error codes
+        for err in spec.error_codes:
+            code = err.get('code', '')
+            msg = err.get('message', '')
+            condition = err.get('condition', '')
+            if not code:
+                continue
+
+            tc = TestCase(
+                sno=str(idx),
+                summary='TC%03d_%s_Negative: Verify %s returns %s when %s' % (
+                    idx, jira.key, spec.api_name, code, condition[:40] if condition else 'invalid input'),
+                description='[From Chalk API spec] Trigger %s %s with condition: %s. '
+                            'Expected error: %s — %s' % (spec.http_method, spec.api_name, condition, code, msg),
+                preconditions='1.\tPrepare invalid/error condition: %s\n2.\tAPI endpoint available' % (condition or 'invalid input'),
+                story_linkage=jira.key, label=jira.key, category='Negative',
+                steps=[
+                    TestStep(1, 'Prepare error condition: %s' % (condition[:80] if condition else 'invalid parameters'),
+                             'Error condition established'),
+                    TestStep(2, 'Trigger %s %s API' % (spec.http_method, spec.api_name),
+                             'API returns error response'),
+                    TestStep(3, 'Verify error code %s with message: %s' % (code, msg[:60]),
+                             'Error code %s returned with correct message' % code),
+                    TestStep(4, 'Verify no data corruption — system state unchanged',
+                             'No partial updates. DB state clean.'),
+                ])
+            tcs.append(tc)
+            idx += 1
+
+        # TC from validation rules (if not already covered by scenarios)
+        existing_text = ' '.join(tc.summary.lower() for tc in tcs)
+        for rule in spec.validation_rules[:10]:  # Cap at 10 rules
+            rule_words = set(re.findall(r'\b\w{5,}\b', rule.lower()))
+            overlap = sum(1 for w in rule_words if w in existing_text) / max(len(rule_words), 1)
+            if overlap < 0.5 and len(rule) > 20:
+                tc = TestCase(
+                    sno=str(idx),
+                    summary='TC%03d_%s_Verify: %s' % (idx, jira.key, rule[:70]),
+                    description='[From Chalk API spec: %s] Validate business rule: %s' % (spec.api_name, rule),
+                    preconditions='1.\tAPI endpoint available\n2.\tTest data prepared per rule',
+                    story_linkage=jira.key, label=jira.key, category='Happy Path',
+                    steps=[
+                        TestStep(1, 'Set up test data to validate rule: %s' % rule[:80],
+                                 'Test data prepared'),
+                        TestStep(2, 'Trigger %s %s API with prepared data' % (spec.http_method, spec.api_name),
+                                 'API processes request'),
+                        TestStep(3, 'Verify rule is enforced: %s' % rule[:80],
+                                 'Business rule validated successfully'),
+                    ])
+                tcs.append(tc)
+                idx += 1
+
+    # ── From Related Chalk Scenarios (same feature in other PIs) ──
+    # STRICT: Only include scenarios whose title/validation directly mentions
+    # the feature's core API. "Fetch Line Details" or "Login Auth" are NOT
+    # "Retrieve Device" scenarios even if they come from a related feature.
+    if deep_mine_result.related_chalk_scenarios:
+        existing_text = ' '.join(tc.summary.lower() for tc in tcs)
+        _feature_words = set(re.findall(r'\b\w{4,}\b', feature_short.lower()))
+        _feature_words.discard('new')
+        _feature_words.discard('mvno')
+        for scenario in deep_mine_result.related_chalk_scenarios[:15]:  # Cap at 15
+            title = scenario.get('title', '')
+            validation = scenario.get('validation', '')
+            source_feature = scenario.get('_source_feature', '')
+            if not title or len(title) < 10:
+                continue
+
+            # RELEVANCE GATE: scenario title or validation must mention the feature's API
+            _s_text = (title + ' ' + (validation or '')).lower()
+            _relevance_hits = sum(1 for w in _feature_words if w in _s_text)
+            if _relevance_hits < 2:
+                log('[ENGINE]   [DEEP] SKIP related scenario (irrelevant to %s): "%s"' % (feature_short, title[:50]))
+                continue
+
+            # Skip if already covered
+            title_words = set(re.findall(r'\b\w{5,}\b', title.lower()))
+            if title_words:
+                overlap = sum(1 for w in title_words if w in existing_text) / len(title_words)
+                if overlap > 0.6:
+                    continue
+
+            tc = TestCase(
+                sno=str(idx),
+                summary='TC%03d_%s_%s' % (idx, jira.key, title[:80]),
+                description='[From related feature %s] %s' % (source_feature, validation[:200] if validation else title),
+                preconditions='1.\tActive subscriber line\n2.\tRefer to %s for detailed setup' % source_feature,
+                story_linkage=jira.key, label=jira.key, category='Happy Path',
+                steps=_build_steps_from_scenario_title(title, validation, feature_short))
+            tcs.append(tc)
+            idx += 1
+            existing_text += ' ' + title.lower()
+
+    # ── From Subtask Mines (specific AC items not yet covered) ──
+    # Only add subtask AC items that provide NEW testable information
+    # not already covered by the Jira-only TCs above.
+    if deep_mine_result.subtask_mines:
+        existing_text = ' '.join(
+            tc.summary.lower() + ' ' + tc.description.lower() + ' ' +
+            ' '.join(s.summary.lower() + ' ' + s.expected.lower() for s in tc.steps)
+            for tc in tcs)
+        for mine in deep_mine_result.subtask_mines:
+            for ac_item in mine.ac_items:
+                if len(ac_item) < 20:
+                    continue
+                # STRICT dedup: check against ALL existing TC text (summary + desc + steps)
+                item_words = set(re.findall(r'\b\w{4,}\b', ac_item.lower()))
+                # Remove only truly generic words
+                item_words -= {'should', 'verify', 'when', 'with', 'that', 'this', 'from'}
+                if item_words:
+                    overlap = sum(1 for w in item_words if w in existing_text) / len(item_words)
+                    if overlap > 0.4:  # Stricter threshold
+                        continue
+
+                # Determine category from content
+                category = 'Happy Path'
+                if any(kw in ac_item.lower() for kw in ['error', 'invalid', 'fail', 'reject', 'not ']):
+                    category = 'Negative'
+
+                tc = TestCase(
+                    sno=str(idx),
+                    summary='TC%03d_%s_Verify: %s' % (idx, jira.key, ac_item[:70]),
+                    description='[From subtask %s/%s] %s' % (mine.key, mine.component, ac_item),
+                    preconditions='\n'.join('%d.\t%s' % (i+1, p) for i, p in enumerate(mine.preconditions[:3])) if mine.preconditions else '1.\tRefer to %s for setup' % mine.key,
+                    story_linkage=jira.key, label=jira.key, category=category,
+                    steps=[
+                        TestStep(1, 'Set up preconditions per %s' % mine.key, 'Preconditions met'),
+                        TestStep(2, 'Execute: %s' % ac_item[:100], 'Action completed'),
+                        TestStep(3, 'Verify expected outcome per AC', 'Outcome matches acceptance criteria'),
+                    ])
+                tcs.append(tc)
+                idx += 1
+                existing_text += ' ' + ac_item.lower()
+
+    log('[ENGINE]   [DEEP] Generated %d TCs from deep mine data' % len(tcs))
+    return tcs
+
+
+def _build_steps_from_api_spec(spec, title, validation):
+    """Build test steps from an API spec scenario."""
+    steps = []
+    step_num = 1
+
+    # Step 1: Trigger the API
+    trigger_text = 'Trigger %s %s API' % (spec.http_method or '', spec.api_name)
+    if spec.endpoint:
+        trigger_text += ' (%s)' % spec.endpoint
+    if spec.headers:
+        trigger_text += ' with headers: %s' % ', '.join(spec.headers)
+    steps.append(TestStep(step_num, trigger_text, 'API accepts request and returns HTTP 200'))
+    step_num += 1
+
+    # Step 2: Validate request was sent correctly
+    if spec.request_fields:
+        fields_str = ', '.join(spec.request_fields[:6])
+        steps.append(TestStep(step_num,
+            'Validate request payload contains required fields: %s' % fields_str,
+            'All required fields present in request'))
+        step_num += 1
+
+    # Step 3: Validate response
+    if spec.response_fields:
+        fields_str = ', '.join(spec.response_fields[:6])
+        steps.append(TestStep(step_num,
+            'Validate response payload contains: %s' % fields_str,
+            'All response fields present with correct values'))
+        step_num += 1
+
+    # Step 4: Validation from scenario
+    if validation and len(validation) > 10:
+        steps.append(TestStep(step_num,
+            'Verify: %s' % validation[:120],
+            validation[:120] if validation else 'Validation passed'))
+        step_num += 1
+
+    # Fallback: ensure at least 3 steps
+    if len(steps) < 3:
+        steps.append(TestStep(step_num,
+            'Verify end-to-end flow completes without errors',
+            'No errors. All systems updated correctly.'))
+
+    return steps
+
+
+def _build_steps_from_scenario_title(title, validation, feature_short):
+    """Build test steps from a scenario title and validation text."""
+    steps = []
+    val_text = validation if validation and len(validation) > 10 else title
+
+    steps.append(TestStep(1, 'Set up preconditions for: %s' % title[:80], 'Preconditions met'))
+    steps.append(TestStep(2, 'Execute %s scenario' % feature_short, 'Operation triggered'))
+    steps.append(TestStep(3, 'Verify: %s' % val_text[:120], val_text[:120]))
+
+    return steps
 
 
 # ================================================================
@@ -3364,7 +3987,7 @@ def _expand_by_matrix(suite, options, log=print, max_combos=4):
     channels = options.get('channel', ['ITMBO'])
     if isinstance(channels, str): channels = [channels]
     devices = options.get('devices', ['Mobile'])
-    networks = options.get('networks', ['4G', '5G'])
+    networks = options.get('networks', ['5G'])
     sim_types = options.get('sim_types', ['eSIM', 'pSIM'])
     os_platforms = options.get('os_platforms', ['iOS', 'Android'])
 
@@ -3615,6 +4238,26 @@ def _quality_gate(test_cases, feature_name, feature_id, log=print):
             log('[QUALITY]   Rejected vague TC: %s (only %d meaningful words)' % (
                 name_core[:60], len(meaningful_words)))
             continue
+
+        # ── Check 1c: Are the steps generic placeholders? ──
+        # TCs with steps like "Set up preconditions", "Execute", "Verify expected outcome"
+        # are NOT acceptable — they add no value. Every step must be specific.
+        if tc.steps:
+            _placeholder_steps = sum(1 for s in tc.steps if any(
+                ph in s.summary.lower() for ph in [
+                    'set up preconditions for:', 'set up preconditions per',
+                    'verify expected outcome per ac', 'action completed',
+                    'execute retrieve device', 'execute: when',
+                ]) or any(
+                ph in s.expected.lower() for ph in [
+                    'preconditions met', 'operation triggered',
+                    'outcome matches acceptance criteria',
+                ]))
+            if _placeholder_steps >= 2 and len(tc.steps) <= 3:
+                rejected += 1
+                log('[QUALITY]   Rejected placeholder-steps TC: %s (%d/%d generic steps)' % (
+                    name_core[:60], _placeholder_steps, len(tc.steps)))
+                continue
 
         # ── Check 2: Is the TC name a raw description paragraph? ──
         # Raw paragraphs: start with non-action words, or are too long without action verbs

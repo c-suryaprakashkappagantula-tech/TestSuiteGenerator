@@ -305,6 +305,17 @@ def get_page_buttons(page_name: str) -> List[str]:
 def _classify_scenario_intent(scenario_title: str) -> str:
     """Classify what the scenario is trying to test."""
     sc = scenario_title.lower()
+
+    # ── Priority intents: element removal / element verification ──
+    # These take priority over generic intents because they indicate specific
+    # element-level assertions rather than general visibility checks.
+    if any(kw in sc for kw in ['removed', 'hidden', 'not displayed', 'hide']):
+        return 'element_removal'
+    # Element verification: scenario mentions a specific element name with a
+    # positive display/visibility state (e.g., "Port Status is displayed")
+    if any(kw in sc for kw in ['is displayed', 'is visible', 'should be displayed']):
+        return 'element_verification'
+
     if any(kw in sc for kw in ['screen load', 'navigate', 'navigation', 'page load']):
         return 'navigation'
     if any(kw in sc for kw in ['visible', 'accessible', 'display', 'permission',
@@ -330,13 +341,131 @@ def _classify_scenario_intent(scenario_title: str) -> str:
     return 'action'
 
 
+def _extract_element_names(scenario_title: str) -> List[str]:
+    """Extract specific element names from a scenario title.
+
+    Looks for names in parentheses like "Port Status (Syniverse)" or
+    quoted names like '"Transaction Id"'.
+    """
+    import re
+    elements = []
+    # Match patterns like "Element Name (Detail)" — full phrase including parens
+    paren_matches = re.findall(r'([\w\s/\-]+\([^)]+\))', scenario_title)
+    for m in paren_matches:
+        elements.append(m.strip())
+    # If no parenthesized elements, look for quoted element names
+    if not elements:
+        quoted = re.findall(r'"([^"]+)"', scenario_title)
+        elements.extend(quoted)
+    # If still nothing, look for capitalized multi-word phrases that look like
+    # UI element names (e.g., "Port Status", "Transaction Id")
+    if not elements:
+        caps = re.findall(r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)', scenario_title)
+        elements.extend(caps)
+    return elements
+
+
+def _detect_history_tab(scenario_title: str) -> Optional[str]:
+    """Map scenario title keywords to a specific History tab name."""
+    sc = scenario_title.lower()
+    if 'port in' in sc or 'port-in' in sc or 'portin' in sc:
+        return 'Port In Activation'
+    if 'new mdn' in sc:
+        return 'New MDN Activation'
+    if 'wearable' in sc:
+        return 'Wearable Activation'
+    if 'port out' in sc or 'port-out' in sc:
+        return 'Port Out History'
+    if 'mdn' in sc or 'sim' in sc or 'device' in sc:
+        return 'MDN/SIM/Device History'
+    # Default for generic history references
+    return 'Port In Activation'
+
+
+def _is_history_scenario(scenario_title: str) -> bool:
+    """Check if scenario references a History page."""
+    sc = scenario_title.lower()
+    return any(kw in sc for kw in ['history', 'port in', 'port-in',
+                                    'activation history'])
+
+
 def generate_ui_steps(feature_name: str, description: str = '',
                       scenario_title: str = '') -> List[Tuple[str, str]]:
-    """Generate NBOP UI test steps based on scenario INTENT."""
+    """Generate NBOP UI test steps based on scenario INTENT.
+
+    ENHANCED: When scenario_title contains specific element names
+    (e.g., "Port Status (Syniverse) removed"), the function now:
+      1. Extracts element names from scenario_title
+      2. Determines the page where the element lives
+      3. Generates navigate → filter → verify-element sequence
+
+    Priority: scenario_title > feature_name for step specificity.
+    """
     ctx = (feature_name + ' ' + description + ' ' + scenario_title).lower()
     sc = scenario_title.lower()
     nav_path = get_navigation_path(feature_name, description)
     intent = _classify_scenario_intent(scenario_title)
+
+    # ── Element-name-aware step generation (Task 2.2) ──
+    # When scenario_title contains specific element names, generate targeted steps
+    if scenario_title and intent in ('element_removal', 'element_verification'):
+        elements = _extract_element_names(scenario_title)
+        if elements:
+            element_name = elements[0]
+            steps = []
+
+            # Determine if this is a History-related scenario (Task 2.3)
+            if _is_history_scenario(scenario_title):
+                tab_name = _detect_history_tab(scenario_title)
+                steps.append(('Launch NBOP and search subscriber by MDN',
+                              'Subscriber profile loaded'))
+                steps.append(('Navigate to Tile: History',
+                              'History page loads with tab options'))
+                steps.append(('Click %s tab' % tab_name,
+                              '%s tab content loads with search filters' % tab_name))
+                # Add search/filter step
+                steps.append(('Select Port Status = IN PROGRESS from dropdown, click Search',
+                              'Search results filtered and displayed'))
+            else:
+                # Non-history element scenario — navigate to relevant page
+                page = find_nbop_page(feature_name, description) or nav_path
+                steps.append(('Launch NBOP and search subscriber by MDN',
+                              'Subscriber profile loaded'))
+                steps.append(('Navigate to %s' % page,
+                              'Page loads with expected content'))
+
+            # Generate verification step based on intent
+            # Extract condition from scenario title (e.g., "for TMO")
+            import re
+            condition_match = re.search(r'\bfor\s+(\w+)', scenario_title)
+            condition = 'for %s' % condition_match.group(1) if condition_match else ''
+
+            if intent == 'element_removal':
+                steps.append(("Verify '%s' is NOT displayed on the screen %s" % (element_name, condition),
+                              "'%s' element is absent from the page" % element_name))
+                steps.append(('Verify all other information remains visible and unchanged',
+                              'Remaining page elements display correctly'))
+            else:  # element_verification
+                steps.append(("Verify '%s' IS displayed on the screen %s" % (element_name, condition),
+                              "'%s' element is present and correctly rendered" % element_name))
+
+            return steps
+
+    # ── History-tab-aware step generation (Task 2.3) ──
+    # Even without specific element names, if scenario references History page
+    if scenario_title and _is_history_scenario(scenario_title):
+        tab_name = _detect_history_tab(scenario_title)
+        steps = [
+            ('Launch NBOP and search subscriber by MDN', 'Subscriber profile loaded'),
+            ('Navigate to Tile: History', 'History page loads with tab options'),
+            ('Click %s tab' % tab_name,
+             '%s tab content loads with search filters' % tab_name),
+            ('Select Port Status = IN PROGRESS from dropdown, click Search',
+             'Search results filtered and displayed'),
+            ('Verify search results display expected records',
+             'Records matching filter criteria are shown in the table'),
+        ]
+        return steps
 
     if intent == 'navigation':
         return [
@@ -521,6 +650,15 @@ def generate_ui_steps(feature_name: str, description: str = '',
         steps.append(('Perform %s via NBOP portal' % _op_name, 'Operation completed successfully'))
     steps.append(('Verify subscriber profile reflects the operation result', 'Affected fields show correct post-operation values'))
     steps.append(('Navigate to ≡ Menu → Transaction History, verify entry recorded', 'Transaction logged with correct timestamp and status'))
+
+    # ── Fallback guarantee (Task 2.4) ──
+    # Ensure function NEVER returns an empty list — always at least 3 steps
+    if not steps:
+        steps = [
+            ('Launch NBOP and search subscriber by MDN', 'Subscriber profile loaded'),
+            ('Navigate to %s' % nav_path, 'Page loads successfully'),
+            ('Verify expected content is displayed', 'Page shows correct information'),
+        ]
     return steps
 
 
