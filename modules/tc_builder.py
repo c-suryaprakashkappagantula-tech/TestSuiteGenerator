@@ -356,23 +356,53 @@ def build_test_cases(
 
     # ── 3. Build TCs from scenarios ──
     if is_ui_path and classification.classification == 'ui':
-        # UI path: 1:1 scenario → TC mapping with enriched NBOP steps
+        # UI path: scenario → TC mapping with enriched NBOP steps
+        # Product crossing: only for TMO-specific verification scenarios (not regression, not evidence)
+        product_dim = next((d for d in plan.independent_dimensions if d.name == 'product'), None)
+        product_values = product_dim.values if product_dim and len(product_dim.values) > 1 else []
+
         subtask_context = _build_subtask_context(deep_mine_result)
-        for idx, scenario in enumerate(plan.scenario_tcs):
+        tc_idx = 0
+
+        for scenario in plan.scenario_tcs:
             scenario_dict = {
                 'title': scenario.title,
                 'validation': scenario.validation,
                 'category': scenario.category,
                 'steps_hint': scenario.steps_hint,
             }
-            tc = _build_ui_scenario_tc_enriched(
-                scenario_dict, idx, feature_name, feature_id, nav_path,
-                subtask_ac_text=_get_subtask_ac_for_scenario(scenario, subtask_context),
-                subtask_key=_get_subtask_key_for_scenario(scenario),
-                log=log,
-            )
-            test_cases.append(tc)
-        log('[TC-BUILD]   Built %d UI scenario TCs (1:1 mapping, enriched)' % len(plan.scenario_tcs))
+
+            # Determine if this scenario should be crossed by product
+            # Cross by product ONLY for TMO removal/verification scenarios (not regression, not evidence)
+            title_lower = (scenario.title or '').lower()
+            is_regression = scenario.category == 'Regression' or 'no change' in title_lower or 'verizon' in title_lower or 'vzw' in title_lower
+            is_evidence = title_lower.startswith('evidence:') or 'log in to nbop' in title_lower
+            should_cross = product_values and not is_regression and not is_evidence
+
+            if should_cross:
+                for product in product_values:
+                    crossed_dict = dict(scenario_dict)
+                    crossed_dict['title'] = '%s — %s' % (product, scenario.title)
+                    crossed_dict['_product'] = product
+                    tc = _build_ui_scenario_tc_enriched(
+                        crossed_dict, tc_idx, feature_name, feature_id, nav_path,
+                        subtask_ac_text=_get_subtask_ac_for_scenario(scenario, subtask_context),
+                        subtask_key=_get_subtask_key_for_scenario(scenario),
+                        log=log,
+                    )
+                    test_cases.append(tc)
+                    tc_idx += 1
+            else:
+                tc = _build_ui_scenario_tc_enriched(
+                    scenario_dict, tc_idx, feature_name, feature_id, nav_path,
+                    subtask_ac_text=_get_subtask_ac_for_scenario(scenario, subtask_context),
+                    subtask_key=_get_subtask_key_for_scenario(scenario),
+                    log=log,
+                )
+                test_cases.append(tc)
+                tc_idx += 1
+
+        log('[TC-BUILD]   Built %d UI scenario TCs (product crossing applied where appropriate)' % tc_idx)
     else:
         # API/hybrid path: standard scenario TC building
         for scenario in plan.scenario_tcs:
