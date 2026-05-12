@@ -272,6 +272,34 @@ def fetch_jira_issue(page, issue_key: str, log=print) -> JiraIssue:
         except Exception as e:
             log(f'[JIRA] Epic children fetch failed: {str(e)[:80]}')
 
+    # Deep-fetch attachments for epic children (search API doesn't return them)
+    _children_needing_att_fetch = [
+        st for st in issue.subtasks
+        if 'attachments' not in st or not st.get('attachments')
+    ]
+    if _children_needing_att_fetch:
+        for st in _children_needing_att_fetch:
+            try:
+                st_result = page.evaluate('''async (url) => {
+                    const r = await fetch(url, {
+                        credentials: 'include',
+                        headers: {'Accept': 'application/json'}
+                    });
+                    return {status: r.status, body: r.ok ? await r.json() : null};
+                }''', f'{JIRA_REST_V2}/issue/{st["key"]}?fields=attachment')
+                if st_result['status'] == 200 and st_result['body']:
+                    sf = st_result['body'].get('fields', {})
+                    st_attachments = sf.get('attachment', [])
+                    if st_attachments:
+                        st['attachments'] = [
+                            {'filename': a.get('filename', ''), 'size': a.get('size', 0),
+                             'mimeType': a.get('mimeType', ''), 'url': a.get('content', '')}
+                            for a in st_attachments
+                        ]
+                        log(f'[JIRA]   {st["key"]}: {len(st_attachments)} attachments found')
+            except Exception:
+                pass
+
     return issue
 
 

@@ -7,6 +7,7 @@ Blocks:
   1. Jira Fetch (+ subtasks + attachments download)
   2. Chalk DB Cache Lookup
   3. Chalk Live Page Fetch (only if Block 2 misses)
+  3b. Deep Mine (crawl Chalk URLs, mine subtasks, find related features)
   4. Document Parsing (uploads + attachments)
   5. Test Engine (build suite)
   6. Excel Generation + DB Save
@@ -163,12 +164,39 @@ def block_jira_fetch(page, feature_id, log=print):
             # Attachments: check if already downloaded locally
             att_paths = []
             from .config import ATTACHMENTS
+            from pathlib import Path
             for att in jira.attachments:
                 local = ATTACHMENTS / ('%s_%s' % (feature_id, att.filename))
                 if local.exists():
                     att_paths.append(local)
+
+            # Subtask attachments: check if already downloaded locally
+            for st in jira.subtasks:
+                st_attachments = st.get('attachments', [])
+                st_key = st.get('key', 'unknown')
+                for att in st_attachments:
+                    fname = att.get('filename', '')
+                    if not fname:
+                        continue
+                    ext = Path(fname).suffix.lower()
+                    if ext not in ('.docx', '.xlsx', '.pdf', '.txt', '.html', '.zip', '.csv'):
+                        continue
+                    local = ATTACHMENTS / ('%s_%s' % (st_key, fname))
+                    if local.exists():
+                        att_paths.append(local)
+                    elif page and att.get('url'):
+                        # Download if not cached locally but URL available
+                        try:
+                            response = page.request.get(att['url'])
+                            if response.ok:
+                                local.write_bytes(response.body())
+                                att_paths.append(local)
+                                log('[PIPELINE]   Subtask %s: downloaded %s' % (st_key, fname))
+                        except Exception:
+                            pass  # Skip if download fails
+
             if att_paths:
-                log('[PIPELINE]   %d attachments found locally (no download needed)' % len(att_paths))
+                log('[PIPELINE]   %d attachments found/downloaded (parent + subtask)' % len(att_paths))
 
             return {'jira': jira, 'warnings': warnings, 'att_paths': att_paths}
 
@@ -184,11 +212,50 @@ def block_jira_fetch(page, feature_id, log=print):
     except Exception as e:
         log('[PIPELINE] Jira DB save warning: %s' % str(e)[:60])
 
-    # Download attachments
+    # Download attachments (parent epic)
     att_paths = []
     if jira.attachments:
         att_paths = download_attachments(page, jira, log=log)
         log('[PIPELINE] Downloaded %d attachments' % len(att_paths))
+
+    # Download subtask attachments (evidence docs, unit testing docs, test results)
+    if jira.subtasks:
+        from .config import ATTACHMENTS
+        from pathlib import Path
+        subtask_att_count = 0
+        for st in jira.subtasks:
+            st_attachments = st.get('attachments', [])
+            if not st_attachments:
+                continue
+            st_key = st.get('key', 'unknown')
+            for att in st_attachments:
+                fname = att.get('filename', '')
+                url = att.get('url', '')
+                if not fname or not url:
+                    continue
+                # Skip large files (>10MB) and non-document types
+                size = att.get('size', 0)
+                if size > 10 * 1024 * 1024:
+                    continue
+                ext = Path(fname).suffix.lower()
+                if ext not in ('.docx', '.xlsx', '.pdf', '.txt', '.html', '.zip', '.csv'):
+                    continue
+                save_path = ATTACHMENTS / ('%s_%s' % (st_key, fname))
+                if save_path.exists():
+                    att_paths.append(save_path)
+                    subtask_att_count += 1
+                    continue
+                try:
+                    response = page.request.get(url)
+                    if response.ok:
+                        save_path.write_bytes(response.body())
+                        att_paths.append(save_path)
+                        subtask_att_count += 1
+                        log('[PIPELINE]   Subtask %s: downloaded %s' % (st_key, fname))
+                except Exception as e:
+                    log('[PIPELINE]   Subtask %s: failed to download %s — %s' % (st_key, fname, str(e)[:50]))
+        if subtask_att_count:
+            log('[PIPELINE] Downloaded %d subtask attachments' % subtask_att_count)
 
     return {'jira': jira, 'warnings': warnings, 'att_paths': att_paths}
 
@@ -265,14 +332,62 @@ def block_parse_docs(att_paths, uploaded_files, inputs_dir, log=print):
     return parsed
 
 
-def block_build_suite(jira, chalk, parsed_docs, options, log=print):
-    """Block 5: Build the test suite."""
+def block_deep_mine(jira, chalk, page=None, log=print):
+    """Block 3b: Deep mine all data sources — Chalk URLs, subtasks, related features.
+    This is the exhaustive data gathering step that ensures no information is missed."""
+    from .deep_miner import deep_mine
+
+    result = deep_mine(jira, chalk, page=page, log=log)
+    log('[PIPELINE] Deep mine complete: %d API specs | %d subtask mines | %d related | %d total items' % (
+        len(result.api_specs), len(result.subtask_mines),
+        len(result.related_chalk_scenarios), len(result.all_testable_items)))
+    return {'deep_mine_result': result}
+
+
+def block_build_suite(jira, chalk, parsed_docs, options, log=print, deep_mine_result=None):
+    """Block 5: Build the test suite (V7 — template-based)."""
     from .test_engine import build_test_suite
 
-    suite = build_test_suite(jira, chalk, parsed_docs, options, log=log)
+    suite = build_test_suite(jira, chalk, parsed_docs, options, log=log, deep_mine_result=deep_mine_result)
     total_steps = sum(len(tc.steps) for tc in suite.test_cases)
     log('[PIPELINE] Suite built: %d TCs | %d steps' % (len(suite.test_cases), total_steps))
     return {'suite': suite, 'total_steps': total_steps}
+
+
+def block_build_suite_v8(jira, chalk, parsed_docs, options, deep_mine_result=None, log=print):
+    """Block 5 (V8): Build the test suite using Data-First Engine.
+
+    Selects V8.0 engine when options.get('engine_version') == '8'.
+    Reports timing for each sub-step within the Build block.
+    """
+    import time as _time
+    from .data_first_engine import build_test_suite_v8
+    from .database import save_traceability_log, save_data_inventory_log
+
+    log('[PIPELINE] V8.0 Data-First Engine selected')
+
+    _t0 = _time.time()
+    suite = build_test_suite_v8(
+        jira=jira,
+        chalk=chalk,
+        parsed_docs=parsed_docs,
+        options=options,
+        deep_mine_result=deep_mine_result,
+        log=log,
+    )
+    _duration = _time.time() - _t0
+
+    total_steps = sum(len(tc.steps) for tc in suite.test_cases)
+    log('[PIPELINE] V8 Suite built: %d TCs | %d steps | %.1fs' % (
+        len(suite.test_cases), total_steps, _duration))
+
+    # Log data sources processed
+    if suite.data_inventory and suite.data_inventory.sources:
+        for src in suite.data_inventory.sources:
+            log('[PIPELINE]   Source: %s (%s) — %d items' % (
+                src.source_name, src.status, src.items_extracted))
+
+    return {'suite': suite, 'total_steps': total_steps, 'duration': _duration}
 
 
 def block_generate_output(suite, feature_id, pi, strategy, jira=None, chalk=None, log=print):

@@ -61,6 +61,8 @@ def parse_file(filepath: Path, log=print, source='Upload') -> ParsedDoc:
         return _parse_html(fp, doc, log)
     elif doc.file_type in ('.txt', '.csv'):
         return _parse_text(fp, doc, log)
+    elif doc.file_type == '.zip':
+        return _parse_zip(fp, doc, log)
     else:
         log(f'[DOC] WARN Unsupported file type: {doc.file_type}')
         return doc
@@ -209,4 +211,68 @@ def _parse_html(fp, doc: ParsedDoc, log=print) -> ParsedDoc:
         log(f'[DOC] OK Parsed {fp.name}: {len(doc.paragraphs)} paragraphs, {len(doc.tables)} tables, {len(doc.open_items)} open items')
     except Exception as e:
         log(f'[DOC] FAIL to parse {fp.name}: {e}')
+    return doc
+
+
+def _parse_zip(fp, doc: ParsedDoc, log=print) -> ParsedDoc:
+    """Extract and parse supported files from inside a .zip archive.
+
+    Extracts .docx, .xlsx, .pdf, .txt, .html, .csv files from the zip,
+    parses each one, and merges all content into a single ParsedDoc.
+    Skips images, binaries, and unsupported file types.
+    """
+    import zipfile
+    import tempfile
+    import shutil
+
+    SUPPORTED_EXTENSIONS = {'.docx', '.xlsx', '.xls', '.pdf', '.txt', '.csv', '.html', '.htm'}
+
+    try:
+        if not zipfile.is_zipfile(str(fp)):
+            log(f'[DOC] WARN {fp.name} is not a valid zip file')
+            return doc
+
+        temp_dir = Path(tempfile.mkdtemp(prefix='tsg_zip_'))
+        extracted_count = 0
+        parsed_count = 0
+
+        try:
+            with zipfile.ZipFile(str(fp), 'r') as zf:
+                for member in zf.namelist():
+                    # Skip directories and hidden files
+                    if member.endswith('/') or '/__MACOSX' in member or member.startswith('.'):
+                        continue
+                    member_ext = Path(member).suffix.lower()
+                    if member_ext not in SUPPORTED_EXTENSIONS:
+                        continue
+                    # Skip large files (>5MB)
+                    info = zf.getinfo(member)
+                    if info.file_size > 5 * 1024 * 1024:
+                        continue
+
+                    # Extract to temp dir
+                    extracted_path = temp_dir / Path(member).name
+                    with zf.open(member) as src, open(str(extracted_path), 'wb') as dst:
+                        dst.write(src.read())
+                    extracted_count += 1
+
+                    # Parse the extracted file
+                    sub_doc = parse_file(extracted_path, log=lambda x: None, source='Zip: %s' % fp.name)
+                    if sub_doc and (sub_doc.paragraphs or sub_doc.tables):
+                        # Merge into parent doc
+                        doc.paragraphs.extend(sub_doc.paragraphs)
+                        doc.tables.extend(sub_doc.tables)
+                        doc.open_items.extend(sub_doc.open_items)
+                        parsed_count += 1
+
+            doc.raw_text = '\n'.join(doc.paragraphs)
+            log(f'[DOC] OK Parsed {fp.name}: extracted {extracted_count} files, parsed {parsed_count} → {len(doc.paragraphs)} paragraphs, {len(doc.tables)} tables')
+
+        finally:
+            # Clean up temp directory
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    except Exception as e:
+        log(f'[DOC] FAIL to parse zip {fp.name}: {e}')
+
     return doc
