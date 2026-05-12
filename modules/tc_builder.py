@@ -2100,29 +2100,77 @@ def _build_ui_scenario_tc_enriched(
     # ── Priority 0: Use steps_hint from evidence documents (highest quality) ──
     steps_hint = scenario.get('steps_hint', [])
     if steps_hint and len(steps_hint) >= 2:
-        # Evidence docs provide exact test steps — use them directly
-        for i, hint in enumerate(steps_hint):
+        # Check if steps_hint is verification-only (no login/navigate steps)
+        has_nav = any(
+            any(kw in (h or '').lower() for kw in ['login', 'log in', 'navigate', 'launch', 'click on the'])
+            for h in steps_hint
+        )
+        all_verify = all(
+            'verify' in (h or '').lower() or 'not displayed' in (h or '').lower() or 'is displayed' in (h or '').lower()
+            for h in steps_hint if h and h.strip()
+        )
+
+        step_num = 0
+
+        # If verification-only, prepend navigation steps
+        if all_verify and not has_nav:
+            product = scenario.get('_product', '')
+            step_num += 1
+            steps.append(TestStep(
+                step_num=step_num,
+                summary='Launch NBOP portal and search %s subscriber by MDN' % (product + ' TMO' if product else 'TMO'),
+                expected='Subscriber profile loaded successfully',
+                data_reference='Navigation: NBOP login',
+            ))
+            step_num += 1
+            steps.append(TestStep(
+                step_num=step_num,
+                summary='Click ≡ (hamburger menu) → Click on Data Details',
+                expected='Data Details screen loaded with usage information',
+                data_reference='Navigation: %s' % (nav_path or 'NBOP → Data Details'),
+            ))
+
+        # Add the steps_hint content
+        for hint in steps_hint:
             hint_text = hint.strip() if isinstance(hint, str) else str(hint)
             if not hint_text:
                 continue
+            step_num += 1
             # Determine expected result from the step text
-            if 'verify' in hint_text.lower() or 'ensure' in hint_text.lower():
+            if 'not displayed' in hint_text.lower() or 'is not' in hint_text.lower():
+                expected = 'Element is NOT visible on the page'
+            elif 'is displayed' in hint_text.lower() or 'should be displayed' in hint_text.lower():
+                expected = 'Element IS visible and accessible'
+            elif 'verify' in hint_text.lower() or 'ensure' in hint_text.lower():
                 expected = 'Condition verified: %s' % hint_text[:80]
             elif 'navigate' in hint_text.lower() or 'click' in hint_text.lower():
                 expected = 'Navigation successful — target page/section loaded'
             elif 'login' in hint_text.lower() or 'log in' in hint_text.lower() or 'search' in hint_text.lower():
                 expected = 'Subscriber profile loaded successfully'
-            elif 'not displayed' in hint_text.lower() or 'is not' in hint_text.lower():
-                expected = 'Element is NOT visible on the page'
-            elif 'is displayed' in hint_text.lower() or 'should be displayed' in hint_text.lower():
-                expected = 'Element IS visible and accessible'
             else:
                 expected = 'Step completed successfully'
             steps.append(TestStep(
-                step_num=i + 1,
+                step_num=step_num,
                 summary=hint_text[:120],
                 expected=expected,
                 data_reference='Evidence document',
+            ))
+
+        # If verification-only, also add Historical Usage navigation + verify
+        if all_verify and not has_nav:
+            step_num += 1
+            steps.append(TestStep(
+                step_num=step_num,
+                summary='Click on View Historical Usage to navigate to Historical Usage Grid',
+                expected='Historical Usage Grid loaded',
+                data_reference='Navigation: Historical Usage',
+            ))
+            step_num += 1
+            steps.append(TestStep(
+                step_num=step_num,
+                summary='Verify same attributes are NOT displayed on Historical Usage screen',
+                expected='All removed attributes are absent from Historical Usage grid',
+                data_reference='Evidence: Historical Usage verification',
             ))
 
     # ── Priority 1: Try generate_ui_steps() for specific steps ──
