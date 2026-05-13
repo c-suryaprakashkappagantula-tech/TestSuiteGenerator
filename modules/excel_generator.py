@@ -345,7 +345,7 @@ def _build_summary_sheet(wb, suite: TestSuite):
     # Priority Distribution (V4)
     pris = {}
     for tc in suite.test_cases:
-        pri = getattr(tc, '_priority', 'P3')
+        pri = getattr(tc, 'priority', None) or getattr(tc, '_priority', 'P3')
         pris.setdefault(pri, []).append(f'TC{tc.sno.zfill(2)}')
     if pris:
         ws.merge_cells(f'A{r}:F{r}')

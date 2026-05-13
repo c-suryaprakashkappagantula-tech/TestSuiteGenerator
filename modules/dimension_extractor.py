@@ -1179,24 +1179,52 @@ def _extract_dimensions_from_chalk(
                     input_types_found.append(input_type)
 
         # ── Scenarios from Chalk ──
+        # Apply same quality filter as _extract_scenarios_from_chalk_data (Phase 1)
+        _INFO_PATTERNS_CHALK = [
+            r'^device\s+types?\s*:', r'^products?\s*:', r'^channels?\s*:',
+            r'^all\s+scenarios\s+will\s+require', r'^all\s+calls\s+can\s+',
+            r'^pre-?conditions?\s*:', r'^note\s*:', r'^assumption\s*:',
+            r'^scope\s*:', r'^environment\s*:', r'^test\s+data\s*:',
+        ]
+        _SCENARIO_VERBS_CHALK = [
+            'verify', 'validate', 'ensure', 'confirm', 'check',
+            'trigger', 'execute', 'send', 'submit', 'call',
+            'corrects', 'rejects', 'handles', 'returns', 'updates',
+        ]
         for sc in (spec.scenarios or []):
             title = sc.get('title', '').strip()
             validation = sc.get('validation', sc.get('expected', '')).strip()
             category = sc.get('category', 'Happy Path')
-            if title:
-                tr = create_traceability(
-                    source_type='Chalk Scenario',
-                    source_id=spec_id,
-                    extracted_text=title,
-                )
-                scenarios.append(ExtractedScenario(
-                    title=title,
-                    validation=validation,
-                    category=category,
-                    source=tr,
-                    api_spec=spec,
-                    steps_hint=sc.get('steps', []),
-                ))
+            if not title or len(title) < 5:
+                continue
+
+            # Quality filter: skip info/metadata rows
+            title_lower = title.lower()
+            is_info = False
+            for pattern in _INFO_PATTERNS_CHALK:
+                if re.search(pattern, title_lower):
+                    is_info = True
+                    break
+            if not is_info and len(title) < 25:
+                has_verb = any(v in title_lower for v in _SCENARIO_VERBS_CHALK)
+                if not has_verb:
+                    is_info = True
+            if is_info:
+                continue
+
+            tr = create_traceability(
+                source_type='Chalk Scenario',
+                source_id=spec_id,
+                extracted_text=title,
+            )
+            scenarios.append(ExtractedScenario(
+                title=title,
+                validation=validation,
+                category=category,
+                source=tr,
+                api_spec=spec,
+                steps_hint=sc.get('steps', []),
+            ))
 
         # ── Error codes → NegativeSpec ──
         for err in (spec.error_codes or []):

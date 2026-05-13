@@ -613,26 +613,139 @@ def _build_scenario_tc(
         steps = _build_api_spec_steps(spec, scenario.title, feature_name)
     elif api_context.get('_nmno_enriched'):
         # Build enriched API steps from NMNO context (Phase 2 enhancement)
+        # Extract scenario-specific context for step alignment
         endpoint = api_context.get('endpoint', '/api/v1/%s' % feature_name.lower().replace(' ', '-'))
         method = api_context.get('method', 'POST')
-        steps = [
-            TestStep(step_num=1,
-                     summary='Preconditions: Set up test data for scenario — %s' % scenario.title[:60],
-                     expected='Test environment configured with required data',
-                     data_reference='Scenario: %s' % scenario.title[:40]),
-            TestStep(step_num=2,
-                     summary='Send %s request to %s' % (method, endpoint),
-                     expected='Request accepted and processed by NSL',
-                     data_reference='API: %s %s' % (method, endpoint)),
-            TestStep(step_num=3,
-                     summary='Validate response status 200 OK and response body',
-                     expected='Success response with expected data for: %s' % scenario.title[:50],
-                     data_reference='Response validation'),
-            TestStep(step_num=4,
-                     summary='Verify: %s' % scenario.title[:80],
-                     expected=scenario.validation or 'Scenario condition verified successfully',
-                     data_reference=scenario.source.source_id),
-        ]
+        scenario_title = scenario.title or ''
+
+        # Extract violation code from scenario title (e.g., "ANDROID_AS_IOS", "MAKE_MISSING")
+        violation_code = ''
+        violation_match = re.search(r'([A-Z][A-Z0-9_]{5,})', scenario_title)
+        if violation_match:
+            violation_code = violation_match.group(1)
+
+        # Determine scenario action from title
+        if 'corrects' in scenario_title.lower() and violation_code:
+            # Violation correction scenario — specific steps
+            steps = [
+                TestStep(step_num=1,
+                         summary='Preconditions: Create %s out-of-sync condition in NSL DB for TMO subscriber' % violation_code,
+                         expected='NSL DB has %s mismatch data ready for data-alignment correction' % violation_code,
+                         data_reference='Violation: %s' % violation_code),
+                TestStep(step_num=2,
+                         summary='Send %s request to %s with violation=%s' % (method, endpoint, violation_code),
+                         expected='API accepts request and triggers correction workflow for %s' % violation_code,
+                         data_reference='API: %s %s' % (method, endpoint)),
+                TestStep(step_num=3,
+                         summary='Validate response status 200 OK and correction result in response body',
+                         expected='Response confirms %s violation corrected — sync status=SUCCESS' % violation_code,
+                         data_reference='Response: %s correction' % violation_code),
+                TestStep(step_num=4,
+                         summary='Verify downstream systems updated: NSL DB, CM, EMM reflect corrected %s data' % violation_code,
+                         expected='%s mismatch resolved — NSL and external systems now in sync' % violation_code,
+                         data_reference='Downstream: %s' % violation_code),
+            ]
+        elif 'rejects' in scenario_title.lower():
+            # Rejection/negative scenario
+            error_ref = violation_code or 'invalid request'
+            steps = [
+                TestStep(step_num=1,
+                         summary='Preconditions: Prepare invalid request data — %s' % scenario_title[:60],
+                         expected='Invalid/error-triggering data prepared',
+                         data_reference='Scenario: %s' % scenario_title[:40]),
+                TestStep(step_num=2,
+                         summary='Send %s request to %s with invalid data' % (method, endpoint),
+                         expected='API rejects request with appropriate error code',
+                         data_reference='API: %s %s' % (method, endpoint)),
+                TestStep(step_num=3,
+                         summary='Validate error response contains expected error code and message',
+                         expected='Error response returned — %s rejected with correct error details' % error_ref,
+                         data_reference='Error validation'),
+                TestStep(step_num=4,
+                         summary='Verify no downstream changes occurred (NSL DB, CM unchanged)',
+                         expected='No data modification — system state unchanged after rejection',
+                         data_reference='Rollback verification'),
+            ]
+        elif 'kafka' in scenario_title.lower():
+            # Kafka end-to-end scenario
+            steps = [
+                TestStep(step_num=1,
+                         summary='Preconditions: Publish data-alignment violation message to Kafka topic',
+                         expected='Kafka message published successfully with violation payload',
+                         data_reference='Kafka: data-alignment topic'),
+                TestStep(step_num=2,
+                         summary='Verify NSL consumes Kafka message and triggers %s %s' % (method, endpoint),
+                         expected='NSL processes Kafka message — API call initiated automatically',
+                         data_reference='API: %s %s' % (method, endpoint)),
+                TestStep(step_num=3,
+                         summary='Validate data-alignment correction completed end-to-end',
+                         expected='Violation corrected — response status 200, downstream systems updated',
+                         data_reference='E2E: Kafka → NSL → correction'),
+                TestStep(step_num=4,
+                         summary='Verify transaction logged with correct Kafka correlation ID',
+                         expected='Transaction history shows Kafka-triggered correction with matching correlation',
+                         data_reference='Audit: Kafka E2E'),
+            ]
+        elif 'deactivated' in scenario_title.lower():
+            # Deactivated line scenario
+            steps = [
+                TestStep(step_num=1,
+                         summary='Preconditions: Use TMO subscriber with line status = Deactivated',
+                         expected='Deactivated TMO MDN available in SIT environment',
+                         data_reference='Line state: Deactivated'),
+                TestStep(step_num=2,
+                         summary='Send %s request to %s for deactivated line with each violation type' % (method, endpoint),
+                         expected='API processes request for deactivated line',
+                         data_reference='API: %s %s' % (method, endpoint)),
+                TestStep(step_num=3,
+                         summary='Validate all violation corrections FAIL for deactivated line',
+                         expected='Each violation type returns error — corrections blocked for deactivated lines',
+                         data_reference='Negative: deactivated line'),
+                TestStep(step_num=4,
+                         summary='Verify no downstream changes — NSL DB and CM remain unchanged',
+                         expected='No data modification — deactivated line protection enforced',
+                         data_reference='Safety: no changes on deactivated'),
+            ]
+        elif 'multiple violations' in scenario_title.lower():
+            # Multiple violations scenario
+            steps = [
+                TestStep(step_num=1,
+                         summary='Preconditions: Create multiple out-of-sync conditions in NSL DB (2+ violations)',
+                         expected='NSL DB has multiple mismatches ready for batch correction',
+                         data_reference='Multi-violation setup'),
+                TestStep(step_num=2,
+                         summary='Send %s request to %s with multiple violation codes in single payload' % (method, endpoint),
+                         expected='API accepts batch request with multiple violations',
+                         data_reference='API: %s %s' % (method, endpoint)),
+                TestStep(step_num=3,
+                         summary='Validate response shows correction result for each violation individually',
+                         expected='Response contains per-violation status — all corrected successfully',
+                         data_reference='Batch response validation'),
+                TestStep(step_num=4,
+                         summary='Verify all downstream systems updated for each corrected violation',
+                         expected='All mismatches resolved — NSL, CM, EMM in sync for all violations',
+                         data_reference='Multi-violation downstream'),
+            ]
+        else:
+            # Generic API scenario with scenario-specific expected result
+            steps = [
+                TestStep(step_num=1,
+                         summary='Preconditions: Set up test data — %s' % scenario_title[:60],
+                         expected='Test environment configured for: %s' % scenario_title[:50],
+                         data_reference='Scenario: %s' % scenario_title[:40]),
+                TestStep(step_num=2,
+                         summary='Send %s request to %s' % (method, endpoint),
+                         expected='Request accepted and processed by NSL',
+                         data_reference='API: %s %s' % (method, endpoint)),
+                TestStep(step_num=3,
+                         summary='Validate response status 200 OK and response body',
+                         expected='Success response confirms: %s' % scenario_title[:50],
+                         data_reference='Response validation'),
+                TestStep(step_num=4,
+                         summary='Verify: %s' % scenario_title[:70],
+                         expected=scenario.validation or 'Scenario condition verified successfully',
+                         data_reference=scenario.source.source_id),
+            ]
     else:
         # Minimal steps from scenario title and validation
         steps = [
@@ -1209,38 +1322,82 @@ def _assign_serial_numbers(test_cases: List[TestCase]) -> None:
 def _transform_to_scenario_title(raw_text: str, feature_name: str) -> str:
     """Transform raw AC text into a proper test scenario title.
 
-    Converts:
-      'When CS access to the MNO_TMO permission is OFF, NBOP to display...'
-      → 'Verify MNO_TMO permission OFF hides MNO options in NBOP'
+    Rules:
+      1. Strip implementation detail after the core intent
+      2. For violation/error patterns: keep only the violation code
+      3. Remove em-dashes and trailing explanations
+      4. Never exceed 70 chars (truncate at word boundary)
+      5. No punctuation artifacts at the end
 
-      'Display device info in subscriber profile'
-      → 'Verify device info displayed in subscriber profile'
+    Examples:
+      'Verify data-alignment corrects ANDROID_AS_IOS violation by NSL triggers CM event...'
+      → 'Verify data-alignment corrects ANDROID_AS_IOS violation'
+
+      'Verify data-alignment corrects MAKE_MISSING violation — device make differs between...'
+      → 'Verify data-alignment corrects MAKE_MISSING violation'
+
+      'When CS access to the MNO_TMO permission is OFF, NBOP to display...'
+      → 'Verify MNO_TMO permission OFF hides MNO options'
     """
     text = raw_text.strip()
 
-    # If it starts with "When X, Y" → transform to "Verify Y when X"
+    # ── Strip implementation detail after violation code ──
+    # Pattern: "corrects VIOLATION_CODE violation [by/—/when/OS/device...]"
+    # Keep up to "violation" and drop the rest
+    violation_match = re.match(
+        r'^((?:Verify\s+)?.*?(?:corrects|rejects|handles)\s+[A-Z][A-Z0-9_]+(?:\s+violation)?)',
+        text
+    )
+    if violation_match:
+        text = violation_match.group(1).strip()
+        # Clean trailing punctuation
+        text = text.rstrip(' —-,.')
+        # If still too long, abbreviate "data-alignment corrects" → "DataAlign"
+        if len(text) > 60:
+            text = re.sub(r'data-alignment\s+corrects\s+', 'DataAlign_', text)
+            text = re.sub(r'data-alignment\s+rejects\s+', 'DataAlign_Rejects_', text)
+            text = re.sub(r'data-alignment\s+handles\s+', 'DataAlign_Handles_', text)
+        if len(text) <= 70:
+            return text
+
+    # ── Strip after em-dash (—) or " by " or " when " for long titles ──
+    if len(text) > 70:
+        for separator in [' — ', ' by NSL ', ' by NSL', ' OS differs', ' device make differs']:
+            if separator in text:
+                text = text.split(separator)[0].strip()
+                break
+
+    # ── "When X, Y" pattern → "Verify Y when X" ──
     when_match = re.match(
         r"^[Ww]hen\s+(.{10,80}?),?\s+(?:NBOP\s+to\s+|the\s+system\s+(?:shall\s+)?|NSL\s+(?:shall\s+)?)?(.+)",
         text
     )
     if when_match:
-        condition = when_match.group(1).strip().rstrip(',')
-        action = when_match.group(2).strip()
-        # Shorten condition
-        condition = condition[:50]
-        action = action[:50]
+        condition = when_match.group(1).strip().rstrip(',')[:40]
+        action = when_match.group(2).strip()[:40]
         return 'Verify %s when %s' % (action, condition)
 
-    # If it starts with a verb (Display, Show, Return, Send) → prefix with "Verify"
+    # ── Verb prefix → add "Verify" ──
     if re.match(r'^(Display|Show|Return|Send|Update|Create|Delete|Trigger|Process|Handle)\s', text, re.IGNORECASE):
-        return 'Verify %s' % text[:80]
+        text = 'Verify %s' % text
 
-    # If it already starts with "Verify" or "Validate" — keep it
-    if text.lower().startswith(('verify ', 'validate ')):
-        return text[:80]
+    # ── Already starts with "Verify"/"Validate" — keep it ──
+    if not text.lower().startswith(('verify ', 'validate ', 'for ')):
+        text = 'Verify %s' % text
 
-    # Default: prefix with "Verify" and clean up
-    return 'Verify %s for %s' % (text[:60], feature_name)
+    # ── Final truncation at 70 chars, word boundary ──
+    if len(text) > 70:
+        # Find last space before position 70
+        cut_pos = text.rfind(' ', 0, 70)
+        if cut_pos > 30:
+            text = text[:cut_pos]
+        else:
+            text = text[:70]
+
+    # Clean trailing punctuation/artifacts
+    text = text.rstrip(' —-,.:')
+
+    return text
 
 
 def _extract_feature_name(jira) -> str:
