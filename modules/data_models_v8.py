@@ -148,6 +148,7 @@ class TestCase:
     story_linkage: str = ''
     label: str = ''
     category: str = 'Happy Path'                 # "Happy Path" | "Negative" | "Edge Case"
+    priority: str = 'P2'                         # "P1" | "P2" | "P3" — assigned by engine
     traceability: Optional[TraceabilityRecord] = None  # V8.0: links TC to data source
     dimension_values: Dict[str, str] = field(default_factory=dict)  # e.g., {"input_type": "IMEI"}
 

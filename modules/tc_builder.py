@@ -283,6 +283,7 @@ def build_test_cases(
     chalk,
     deep_mine_result,
     nbop_knowledge: Optional[Dict] = None,
+    nmno_result=None,
     log: Callable = print,
 ) -> List[TestCase]:
     """Build concrete TestCase objects from the combination plan.
@@ -322,6 +323,25 @@ def build_test_cases(
 
     # ── Determine API spec context for step generation ──
     api_context = _build_api_context(jira, deep_mine_result, feature_name)
+
+    # ── Enrich api_context with NMNO data (highest quality source) ──
+    if nmno_result and nmno_result.api_specs:
+        nmno_spec = nmno_result.api_specs[0]
+        if nmno_spec.endpoint:
+            api_context['endpoint'] = nmno_spec.endpoint
+        if nmno_spec.http_method:
+            api_context['method'] = nmno_spec.http_method
+        if nmno_spec.api_name:
+            api_context['api_name'] = nmno_spec.api_name
+        if hasattr(nmno_spec, 'request_fields') and nmno_spec.request_fields:
+            api_context['request_fields'] = nmno_spec.request_fields
+        if hasattr(nmno_spec, 'response_fields') and nmno_spec.response_fields:
+            api_context['response_fields'] = nmno_spec.response_fields
+        if hasattr(nmno_spec, 'source_system') and nmno_spec.source_system:
+            api_context['source_system'] = nmno_spec.source_system
+        if hasattr(nmno_spec, 'target_system') and nmno_spec.target_system:
+            api_context['target_system'] = nmno_spec.target_system
+        api_context['_nmno_enriched'] = True
 
     # ── Determine routing path ──
     is_api_path = classification.classification in ('api', 'hybrid')
@@ -575,6 +595,7 @@ def _build_scenario_tc(
 ) -> TestCase:
     """Build a TC from an ExtractedScenario with steps from hints and api_spec."""
     feature_id = jira.key if jira else ''
+    api_context = api_context or {}
 
     # Build steps from scenario hints or api_spec
     steps = []
@@ -590,6 +611,28 @@ def _build_scenario_tc(
         # Build steps from API spec
         spec = scenario.api_spec
         steps = _build_api_spec_steps(spec, scenario.title, feature_name)
+    elif api_context.get('_nmno_enriched'):
+        # Build enriched API steps from NMNO context (Phase 2 enhancement)
+        endpoint = api_context.get('endpoint', '/api/v1/%s' % feature_name.lower().replace(' ', '-'))
+        method = api_context.get('method', 'POST')
+        steps = [
+            TestStep(step_num=1,
+                     summary='Preconditions: Set up test data for scenario — %s' % scenario.title[:60],
+                     expected='Test environment configured with required data',
+                     data_reference='Scenario: %s' % scenario.title[:40]),
+            TestStep(step_num=2,
+                     summary='Send %s request to %s' % (method, endpoint),
+                     expected='Request accepted and processed by NSL',
+                     data_reference='API: %s %s' % (method, endpoint)),
+            TestStep(step_num=3,
+                     summary='Validate response status 200 OK and response body',
+                     expected='Success response with expected data for: %s' % scenario.title[:50],
+                     data_reference='Response validation'),
+            TestStep(step_num=4,
+                     summary='Verify: %s' % scenario.title[:80],
+                     expected=scenario.validation or 'Scenario condition verified successfully',
+                     data_reference=scenario.source.source_id),
+        ]
     else:
         # Minimal steps from scenario title and validation
         steps = [
@@ -605,7 +648,16 @@ def _build_scenario_tc(
 
     # Transform raw AC text into a proper test scenario title
     clean_title = _transform_to_scenario_title(scenario.title, feature_name)
-    summary = '%s_%s' % (feature_id, clean_title[:80])
+    # Phase 4: Truncate at word boundary (no mid-word cuts), replace spaces with underscores
+    clean_title_safe = clean_title.replace(' ', '_')
+    if len(clean_title_safe) > 80:
+        # Find last underscore before position 80
+        cut_pos = clean_title_safe.rfind('_', 0, 80)
+        if cut_pos > 40:
+            clean_title_safe = clean_title_safe[:cut_pos]
+        else:
+            clean_title_safe = clean_title_safe[:80]
+    summary = '%s_%s' % (feature_id, clean_title_safe)
 
     # Short intent-focused description
     description = 'To validate: %s' % scenario.title[:120]
@@ -720,42 +772,52 @@ def _build_negative_tc(
             ),
         ]
     else:
-        # ── Fallback: 3-step generic pattern (no Business Rule) ──
+        # ── Fallback: 3-step pattern (no Business Rule object but has NegativeSpec) ──
         error_code = neg_spec.error_code
-        condition = neg_spec.triggering_condition
-        summary = '%s_Negative: %s %s - %s' % (
-            feature_id, feature_name, error_code, condition[:50],
+        condition = neg_spec.triggering_condition or ''
+        error_msg = neg_spec.error_message or ''
+
+        # Phase 3: If condition is too short/generic, use error_message as context
+        if len(condition.strip()) < 10 or condition.strip().lower() in ('if not', 'if', 'when', 'not'):
+            # Derive meaningful condition from error message
+            if error_msg:
+                condition = error_msg[:100]
+            else:
+                condition = 'Error condition triggers %s' % error_code
+
+        summary = '%s_Negative_%s_%s' % (
+            feature_id, feature_name.replace(' ', '_'), error_code,
         )
 
-        description = 'To validate %s API returns error %s (%s) when %s' % (
-            feature_name, error_code, neg_spec.error_message, condition
+        description = 'To validate %s API returns error %s when %s' % (
+            feature_name, error_code, condition[:100]
         )
 
         preconditions = '\n'.join([
             '1. TMO MDN available in SIT environment',
-            '2. Condition: %s' % condition,
-            '3. API endpoint accessible: %s' % endpoint,
+            '2. Condition: %s' % condition[:80],
+            '3. API endpoint accessible: %s %s' % (method, endpoint),
         ])
 
         steps = [
             TestStep(
                 step_num=1,
-                summary='Prepare condition: %s' % condition,
-                expected='Error condition established',
-                data_reference='%s: %s' % (error_code, condition),
+                summary='Preconditions: Set up error condition — %s' % condition[:70],
+                expected='System is in state to trigger error %s' % error_code,
+                data_reference='%s: %s' % (error_code, condition[:50]),
             ),
             TestStep(
                 step_num=2,
-                summary='Execute %s operation with invalid/error condition active' % feature_name,
-                expected='System rejects request with error code %s' % error_code,
-                data_reference='Error code: %s' % error_code,
+                summary='Send %s request to %s with error-triggering data' % (method, endpoint),
+                expected='Request sent to API endpoint',
+                data_reference='Endpoint: %s %s' % (method, endpoint),
             ),
             TestStep(
                 step_num=3,
-                summary='Verify error response contains code %s and message "%s"' % (
-                    error_code, neg_spec.error_message),
-                expected='Error response: code=%s, message="%s"' % (error_code, neg_spec.error_message),
-                data_reference='Business Rule: %s' % neg_spec.source.source_id,
+                summary='Validate error response: code=%s, message="%s"' % (
+                    error_code, error_msg[:60]),
+                expected='Error response: code=%s, message="%s"' % (error_code, error_msg[:80]),
+                data_reference='Business Rule: %s' % (neg_spec.source.source_id if neg_spec.source else error_code),
             ),
         ]
 
@@ -1110,9 +1172,38 @@ def _build_api_spec_steps(
 
 
 def _assign_serial_numbers(test_cases: List[TestCase]) -> None:
-    """Assign sequential serial numbers to all test cases."""
+    """Assign sequential serial numbers and priorities to all test cases.
+
+    Priority assignment (Phase 5):
+      P1 (Critical): Happy Path core scenarios — the primary feature verification.
+                     First 3 happy path TCs, or any TC with 'corrects'/'validates' in title.
+      P2 (Important): Negative/error scenarios, regression TCs.
+      P3 (Nice-to-have): Edge cases, remaining happy path beyond core set.
+    """
+    # Count happy path TCs to determine P1 allocation
+    happy_path_count = 0
     for i, tc in enumerate(test_cases, 1):
         tc.sno = str(i)
+
+        # Priority assignment based on category and position
+        category_lower = (tc.category or '').lower()
+        summary_lower = (tc.summary or '').lower()
+
+        if category_lower == 'negative':
+            tc.priority = 'P2'
+        elif category_lower == 'regression':
+            tc.priority = 'P2'
+        elif category_lower == 'edge case':
+            tc.priority = 'P3'
+        elif category_lower == 'happy path':
+            happy_path_count += 1
+            # First 5 happy path TCs are P1 (core verification)
+            if happy_path_count <= 5:
+                tc.priority = 'P1'
+            else:
+                tc.priority = 'P3'
+        else:
+            tc.priority = 'P2'
 
 
 def _transform_to_scenario_title(raw_text: str, feature_name: str) -> str:

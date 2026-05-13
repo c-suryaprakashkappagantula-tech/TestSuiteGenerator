@@ -158,6 +158,7 @@ def build_test_suite_v8(
         chalk=chalk,
         deep_mine_result=deep_mine_result,
         nbop_knowledge=nbop_knowledge,
+        nmno_result=nmno_result,
         log=log,
     )
 

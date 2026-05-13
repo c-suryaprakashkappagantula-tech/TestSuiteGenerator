@@ -1044,15 +1044,53 @@ def _extract_scenarios_from_chalk_data(chalk, log: Callable = print) -> tuple:
     ChalkData has .scenarios (list of ChalkScenario with title, validation, category, steps, etc.)
     Each scenario becomes an ExtractedScenario with traceability.
 
+    QUALITY FILTER: Separates actual test scenarios from metadata/info rows:
+      - Metadata rows (device types, notes, preconditions) → extracted as dimensions/notes, NOT TCs
+      - Test scenarios (Verify X, Validate Y, action verbs) → become TCs
+
     Returns: (scenarios, data_source_entry)
     """
     scenarios: List[ExtractedScenario] = []
     items_detail: List[str] = []
     feature_id = chalk.feature_id or 'chalk'
 
+    # ── Patterns that indicate metadata/info rows (NOT test scenarios) ──
+    _INFO_PATTERNS = [
+        r'^device\s+types?\s*:', r'^products?\s*:', r'^channels?\s*:',
+        r'^all\s+scenarios\s+will\s+require', r'^all\s+calls\s+can\s+',
+        r'^pre-?conditions?\s*:', r'^note\s*:', r'^assumption\s*:',
+        r'^scope\s*:', r'^environment\s*:', r'^test\s+data\s*:',
+    ]
+    # ── Patterns that indicate actual test scenarios ──
+    _SCENARIO_VERBS = [
+        'verify', 'validate', 'ensure', 'confirm', 'check',
+        'trigger', 'execute', 'send', 'submit', 'call',
+        'corrects', 'rejects', 'handles', 'returns', 'updates',
+    ]
+
+    _skipped_info = 0
     for sc in chalk.scenarios:
         title = (sc.title or '').strip()
         if not title or len(title) < 5:
+            continue
+
+        title_lower = title.lower()
+
+        # ── Filter: Skip metadata/info rows ──
+        is_info = False
+        for pattern in _INFO_PATTERNS:
+            if re.search(pattern, title_lower):
+                is_info = True
+                break
+
+        # Also skip very short titles that are just labels (< 20 chars, no verb)
+        if not is_info and len(title) < 25:
+            has_verb = any(v in title_lower for v in _SCENARIO_VERBS)
+            if not has_verb:
+                is_info = True
+
+        if is_info:
+            _skipped_info += 1
             continue
 
         # Determine category
@@ -1078,8 +1116,11 @@ def _extract_scenarios_from_chalk_data(chalk, log: Callable = print) -> tuple:
 
     if scenarios:
         items_detail.append('%d scenarios from Chalk DB cache' % len(scenarios))
+    if _skipped_info:
+        items_detail.append('%d info/metadata rows filtered out' % _skipped_info)
 
-    log('[DIM-EXTRACT]   Chalk DB scenarios: %d extracted from %s' % (len(scenarios), feature_id))
+    log('[DIM-EXTRACT]   Chalk DB scenarios: %d extracted from %s (%d info rows filtered)' % (
+        len(scenarios), feature_id, _skipped_info))
 
     source_entry = DataSourceEntry(
         source_name='Chalk DB Scenarios',
