@@ -135,14 +135,18 @@ def extract_dimensions(
     # When NMNO has data, the Chalk DB scenarios are from the PI page (not the API spec page)
     # and often contain unrelated scenarios from other features on the same PI page.
     _nmno_has_data = nmno_result and nmno_result.business_rules
-    if not _nmno_has_data and chalk and hasattr(chalk, 'scenarios') and chalk.scenarios:
+    # ── 1b. Extract from ChalkData object (DB cache scenarios) ──
+    # ALWAYS use Chalk DB scenarios when available — they provide functional/happy path
+    # scenarios that complement NMNO Business Rules (which provide negative/error TCs).
+    # Dedup against NMNO-derived scenarios to avoid overlap.
+    if chalk and hasattr(chalk, 'scenarios') and chalk.scenarios:
         chalk_sc_scenarios, chalk_sc_source = _extract_scenarios_from_chalk_data(chalk, log)
         existing_titles = {s.title.strip().lower() for s in scenarios}
         new_scenarios = [s for s in chalk_sc_scenarios if s.title.strip().lower() not in existing_titles]
         scenarios.extend(new_scenarios)
         sources_checked.append(chalk_sc_source)
-    elif _nmno_has_data:
-        log('[DIM-EXTRACT]   Skipping Chalk DB scenarios (NMNO already has Business Rules)')
+        if _nmno_has_data:
+            log('[DIM-EXTRACT]   Chalk DB scenarios: %d added (complementing NMNO Business Rules)' % len(new_scenarios))
 
     # ── 2. Extract from Jira AC text ──
     if jira and jira.acceptance_criteria:
