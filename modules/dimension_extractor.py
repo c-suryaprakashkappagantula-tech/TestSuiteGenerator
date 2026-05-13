@@ -299,8 +299,33 @@ def extract_dimensions(
             existing_titles = {s.title.lower().strip() for s in scenarios}
             for ds in doc_scenarios:
                 if ds.title.lower().strip() not in existing_titles:
-                    scenarios.append(ds)
-                    existing_titles.add(ds.title.lower().strip())
+                    # Check if this doc scenario supersedes an existing subtask scenario
+                    # (same verification type with more complete steps_hint)
+                    ds_hints = getattr(ds, 'steps_hint', []) or []
+                    replaced = False
+                    if ds_hints and len(ds_hints) >= 3:
+                        ds_title_lower = (ds.title or '').lower()
+                        # Detect removal/display verification scenarios
+                        ds_is_removal = 'removed' in ds_title_lower or 'not displayed' in ds_title_lower
+                        ds_is_display = 'displayed' in ds_title_lower and not ds_is_removal
+                        if ds_is_removal or ds_is_display:
+                            for idx_s, existing_s in enumerate(scenarios):
+                                ex_title_lower = (existing_s.title or '').lower()
+                                ex_hints = getattr(existing_s, 'steps_hint', []) or []
+                                # Match: both are removal or both are display, and doc has more hints
+                                ex_is_removal = 'removed' in ex_title_lower or 'not displayed' in ex_title_lower
+                                ex_is_display = 'displayed' in ex_title_lower and not ex_is_removal
+                                if ((ds_is_removal and ex_is_removal) or (ds_is_display and ex_is_display)):
+                                    if len(ds_hints) >= len(ex_hints):
+                                        # Replace with the more complete doc scenario
+                                        scenarios[idx_s] = ds
+                                        replaced = True
+                                        log('[DIM-EXTRACT]   Doc scenario supersedes subtask: "%s" (%d→%d hints)' % (
+                                            ds.title[:50], len(ex_hints), len(ds_hints)))
+                                        break
+                    if not replaced:
+                        scenarios.append(ds)
+                        existing_titles.add(ds.title.lower().strip())
         sources_checked.append(doc_source)
 
     # ── 7. Build data inventory ──
@@ -1570,10 +1595,12 @@ def _extract_dimensions_from_parsed_docs(
                 })
 
         # ── Extract removed/kept elements ──
+        _found_removal = False
+        _found_display = False
         for para in (doc.paragraphs or []):
             para_lower = para.lower().strip()
             # Check if this paragraph describes removal
-            if REMOVAL_PATTERNS.search(para):
+            if not _found_removal and REMOVAL_PATTERNS.search(para):
                 # The next few paragraphs might list the elements
                 idx = (doc.paragraphs or []).index(para)
                 for sub_para in (doc.paragraphs or [])[idx + 1:idx + 10]:
@@ -1586,9 +1613,10 @@ def _extract_dimensions_from_parsed_docs(
                     # Element names are typically short lines (< 50 chars)
                     if len(sub) < 50 and not sub.startswith(('Step', 'Click', 'Login')):
                         removed_elements.append(sub)
-                break  # Only process first removal block per doc
+                _found_removal = True
+                continue  # Continue looking for display patterns in same doc
 
-            if DISPLAY_PATTERNS.search(para):
+            if not _found_display and DISPLAY_PATTERNS.search(para):
                 idx = (doc.paragraphs or []).index(para)
                 for sub_para in (doc.paragraphs or [])[idx + 1:idx + 10]:
                     sub = sub_para.strip()
@@ -1598,7 +1626,8 @@ def _extract_dimensions_from_parsed_docs(
                         break
                     if len(sub) < 50 and not sub.startswith(('Step', 'Click', 'Login')):
                         kept_elements.append(sub)
-                break
+                _found_display = True
+                continue
 
     # ── Build dimensions ──
     if products_found:

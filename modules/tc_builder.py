@@ -377,7 +377,8 @@ def build_test_cases(
             title_lower = (scenario.title or '').lower()
             is_regression = scenario.category == 'Regression' or 'no change' in title_lower or 'verizon' in title_lower or 'vzw' in title_lower
             is_evidence = title_lower.startswith('evidence:') or 'log in to nbop' in title_lower
-            should_cross = product_values and not is_regression and not is_evidence
+            is_positive_verify = 'attributes displayed' in title_lower or 'is displayed' in title_lower or 'should be displayed' in title_lower
+            should_cross = product_values and not is_regression and not is_evidence and not is_positive_verify
 
             if should_cross:
                 for product in product_values:
@@ -1924,6 +1925,15 @@ def _validate_step_quality(
         ))
     if not has_verify:
         verify_text = subtask_ac_text[:80] if subtask_ac_text else scenario_title[:80]
+        # Clean up verify text to avoid "Verify: Phone — Verify ..." double patterns
+        # Strip product prefix (e.g., "Phone — ", "Tablet — ")
+        if ' — ' in verify_text:
+            verify_text = verify_text.split(' — ', 1)[1].strip()
+        # Strip leading "Verify" / "Verify that" to avoid "Verify: Verify ..."
+        import re as _re_pad
+        verify_text = _re_pad.sub(r'^(?:Verify\s+(?:that\s+)?)', '', verify_text).strip()
+        if not verify_text:
+            verify_text = scenario_title[:80]
         pad_steps.append(TestStep(
             step_num=0,
             summary='Verify: %s' % verify_text,
@@ -1940,9 +1950,12 @@ def _validate_step_quality(
 
         enriched_steps = nav_pads + enriched_steps + action_pads + verify_pads
 
-    # ── Enforce step count bounds: 4–8 ──
-    if len(enriched_steps) > 8:
-        enriched_steps = enriched_steps[:8]
+    # ── Enforce step count bounds: 4–15 ──
+    # Allow up to 15 steps for evidence-based TCs with explicit verification points.
+    # Evidence TCs often verify multiple attributes across multiple screens.
+    max_steps = 15
+    if len(enriched_steps) > max_steps:
+        enriched_steps = enriched_steps[:max_steps]
 
     while len(enriched_steps) < 4:
         # Pad with context steps
@@ -1964,16 +1977,29 @@ def _build_ui_tc_summary_name(title: str, feature_name: str, tc_num: int) -> str
     """Build a clean, intent-focused TC summary name for UI test cases.
 
     Transforms raw Chalk/AC text into a proper naming convention:
-      NBOP_{Action/Verification}_{Element}_{Condition}
+      NBOP_{Product}_{Action/Verification}_{Element}_{Condition}
 
     Examples:
       - "Initiate a TMO PortIn activation that doesn't succeed..." → "NBOP_Verify_PortIn_TMO_Port_Status_Removed"
       - "Port Status (Syniverse) is removed from History Details..." → "NBOP_Verify_Port_Status_Syniverse_Removed_TMO"
-      - "All other information remains visible for TMO..." → "NBOP_Verify_Other_Info_Remains_Visible_TMO"
+      - "Phone — Verify attributes removed: Total MNO Usage..." → "NBOP_Phone_Verify_Attributes_Removed_TMO"
       - "There are no changes for VZW subscribers" → "NBOP_Verify_No_Changes_VZW"
     """
     text = title.strip()
     text_lower = text.lower()
+
+    # ── Extract product prefix from crossed scenarios (e.g., "Phone — ...")
+    product_prefix = ''
+    if ' — ' in text:
+        parts_split = text.split(' — ', 1)
+        product_prefix = parts_split[0].strip()
+        text = parts_split[1].strip()
+        text_lower = text.lower()
+    elif ' - ' in text and text.split(' - ', 1)[0].strip().lower() in ('phone', 'tablet', 'smartwatch', 'wearable', 'hotspot'):
+        parts_split = text.split(' - ', 1)
+        product_prefix = parts_split[0].strip()
+        text = parts_split[1].strip()
+        text_lower = text.lower()
 
     # Extract MNO from title
     mno = ''
@@ -1985,33 +2011,50 @@ def _build_ui_tc_summary_name(title: str, feature_name: str, tc_num: int) -> str
     # Determine the action/intent
     if any(kw in text_lower for kw in ['removed', 'hidden', 'hide', 'not displayed']):
         # Element removal scenario
-        # Try to extract element name
+        # Try to extract element name — skip leading "Verify/Verify that" before matching
         element = ''
         import re as _re
-        m = _re.search(r'([\w\s()]+?)\s+(?:is\s+)?removed', text, _re.IGNORECASE)
+        # Strip leading "Verify (that) " before extracting element
+        clean_text = _re.sub(r'^(?:verify\s+(?:that\s+)?(?:the\s+)?(?:following\s+)?)', '', text, flags=_re.IGNORECASE).strip()
+        m = _re.search(r'([\w\s()]+?)\s+(?:are\s+)?(?:is\s+)?removed', clean_text, _re.IGNORECASE)
         if m:
             element = m.group(1).strip()
         elif 'port status' in text_lower:
             element = 'Port_Status_Syniverse'
+        elif 'attributes' in text_lower:
+            element = 'Attributes'
         else:
             element = feature_name.replace(' ', '_')
 
+        # Capitalize first letter of element
         element_clean = element.replace(' ', '_').replace('(', '').replace(')', '')[:30]
-        parts = ['NBOP', 'Verify', element_clean, 'Removed']
+        if element_clean and element_clean[0].islower():
+            element_clean = element_clean[0].upper() + element_clean[1:]
+
+        parts = ['NBOP']
+        if product_prefix:
+            parts.append(product_prefix)
+        parts.extend(['Verify', element_clean, 'Removed'])
         if mno:
             parts.append(mno)
         return '_'.join(parts)
 
     elif any(kw in text_lower for kw in ['remains visible', 'remains', 'other information']):
         # Preservation scenario
-        parts = ['NBOP', 'Verify', 'Other_Info_Remains_Visible']
+        parts = ['NBOP']
+        if product_prefix:
+            parts.append(product_prefix)
+        parts.append('Verify_Other_Info_Remains_Visible')
         if mno:
             parts.append(mno)
         return '_'.join(parts)
 
     elif any(kw in text_lower for kw in ['no changes', 'no change', 'unchanged']):
         # No-change scenario
-        parts = ['NBOP', 'Verify', 'No_Changes']
+        parts = ['NBOP']
+        if product_prefix:
+            parts.append(product_prefix)
+        parts.append('Verify_No_Changes')
         if mno:
             parts.append(mno)
         return '_'.join(parts)
@@ -2026,10 +2069,23 @@ def _build_ui_tc_summary_name(title: str, feature_name: str, tc_num: int) -> str
         elif 'in progress' in text_lower:
             status = 'InProgress'
 
-        parts = ['NBOP', 'PortIn']
+        parts = ['NBOP']
+        if product_prefix:
+            parts.append(product_prefix)
+        parts.append('PortIn')
         if status:
             parts.append(status)
         parts.append('Verify_Port_Status_Removed')
+        if mno:
+            parts.append(mno)
+        return '_'.join(parts)
+
+    elif any(kw in text_lower for kw in ['attributes displayed', 'fields displayed', 'is displayed', 'should be displayed']):
+        # Positive display verification scenario
+        parts = ['NBOP']
+        if product_prefix:
+            parts.append(product_prefix)
+        parts.append('Verify_Attributes_Displayed')
         if mno:
             parts.append(mno)
         return '_'.join(parts)
@@ -2048,6 +2104,8 @@ def _build_ui_tc_summary_name(title: str, feature_name: str, tc_num: int) -> str
         clean = clean[:50]
 
         parts = ['NBOP']
+        if product_prefix:
+            parts.append(product_prefix)
         if clean:
             parts.append(clean)
         if mno and mno not in clean.upper():
@@ -2165,36 +2223,57 @@ def _build_ui_scenario_tc_enriched(
                 expected='Historical Usage Grid loaded',
                 data_reference='Navigation: Historical Usage',
             ))
-            step_num += 1
-            steps.append(TestStep(
-                step_num=step_num,
-                summary='Verify same attributes are NOT displayed on Historical Usage screen',
-                expected='All removed attributes are absent from Historical Usage grid',
-                data_reference='Evidence: Historical Usage verification',
-            ))
+            # Repeat each verification step for Historical Usage screen
+            for hint in steps_hint:
+                hint_text = hint.strip() if isinstance(hint, str) else str(hint)
+                if not hint_text:
+                    continue
+                # Only repeat verification steps (not navigation/login)
+                hint_lower = hint_text.lower()
+                if 'verify' in hint_lower or 'not displayed' in hint_lower or 'is displayed' in hint_lower:
+                    step_num += 1
+                    # Append "on Historical Usage screen" context if not already present
+                    if 'historical' not in hint_lower:
+                        hist_summary = '%s on Historical Usage screen' % hint_text[:100]
+                    else:
+                        hist_summary = hint_text[:120]
+                    if 'not displayed' in hint_lower or 'is not' in hint_lower:
+                        expected = 'Element is NOT visible on Historical Usage screen'
+                    elif 'is displayed' in hint_lower or 'should be displayed' in hint_lower:
+                        expected = 'Element IS visible on Historical Usage screen'
+                    else:
+                        expected = 'Condition verified on Historical Usage screen'
+                    steps.append(TestStep(
+                        step_num=step_num,
+                        summary=hist_summary,
+                        expected=expected,
+                        data_reference='Evidence: Historical Usage verification',
+                    ))
 
     # ── Priority 1: Try generate_ui_steps() for specific steps ──
-    try:
-        from .nbop_ui_knowledge import generate_ui_steps, is_available
-        if is_available():
-            ui_steps = generate_ui_steps(feature_name, scenario_title=title)
-            if ui_steps and len(ui_steps) > 4:
-                # Check if steps have specific content (not just generic placeholders)
-                has_specific = any(
-                    any(kw in desc.lower() for kw in ('mdn', 'tab', 'dropdown', 'field', 'menu', 'tile', 'click', 'select'))
-                    for desc, _ in ui_steps
-                )
-                if has_specific:
-                    # Use directly — these are high-quality steps
-                    for i, (desc, expected) in enumerate(ui_steps):
-                        steps.append(TestStep(
-                            step_num=i + 1,
-                            summary=desc,
-                            expected=expected,
-                            data_reference='NBOP UI Knowledge: %s' % title[:40],
-                        ))
-    except (ImportError, Exception):
-        pass
+    # Skip if Priority 0 already produced steps (steps_hint had content)
+    if not steps:
+        try:
+            from .nbop_ui_knowledge import generate_ui_steps, is_available
+            if is_available():
+                ui_steps = generate_ui_steps(feature_name, scenario_title=title)
+                if ui_steps and len(ui_steps) > 4:
+                    # Check if steps have specific content (not just generic placeholders)
+                    has_specific = any(
+                        any(kw in desc.lower() for kw in ('mdn', 'tab', 'dropdown', 'field', 'menu', 'tile', 'click', 'select'))
+                        for desc, _ in ui_steps
+                    )
+                    if has_specific:
+                        # Use directly — these are high-quality steps
+                        for i, (desc, expected) in enumerate(ui_steps):
+                            steps.append(TestStep(
+                                step_num=i + 1,
+                                summary=desc,
+                                expected=expected,
+                                data_reference='NBOP UI Knowledge: %s' % title[:40],
+                            ))
+        except (ImportError, Exception):
+            pass
 
     # ── Priority 2: Build enriched steps from AC verification points ──
     if not steps and subtask_ac_text:

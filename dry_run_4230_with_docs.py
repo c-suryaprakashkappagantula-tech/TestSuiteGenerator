@@ -121,6 +121,33 @@ for tc in suite.test_cases[:3]:
         print('    %d. %s' % (s.step_num, s.summary[:75]))
         print('       -> %s' % s.expected[:75])
 
+# ── Validation Summary ──
+print('\n' + '=' * 70)
+print('VALIDATION SUMMARY')
+print('=' * 70)
+tc_count = len(suite.test_cases)
+target = 8
+status = 'PASS' if tc_count == target else 'FAIL'
+print('  TC Count: %d (target=%d) [%s]' % (tc_count, target, status))
+
+# Check Historical Usage coverage in TC01-TC03
+for i, tc in enumerate(suite.test_cases[:3]):
+    has_hist = any('historical usage' in s.summary.lower() for s in tc.steps)
+    hist_verify = sum(1 for s in tc.steps if 'historical usage screen' in s.summary.lower())
+    status = 'PASS' if has_hist and hist_verify >= 6 else 'FAIL'
+    print('  TC%02d Historical Usage: nav=%s, verify_steps=%d [%s]' % (
+        i + 1, has_hist, hist_verify, status))
+
+# Check TC05 title
+tc05 = suite.test_cases[4] if len(suite.test_cases) > 4 else None
+if tc05:
+    has_correct_title = 'Data_Details_and_Historical_Usage' in tc05.summary
+    print('  TC05 Title: %s [%s]' % (
+        'correct' if has_correct_title else 'WRONG: ' + tc05.summary[:50],
+        'PASS' if has_correct_title else 'FAIL'))
+
+print('=' * 70)
+
 print('\n' + '=' * 70)
 print('DRY RUN COMPLETE')
 print('=' * 70)
