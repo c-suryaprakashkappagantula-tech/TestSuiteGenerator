@@ -26,6 +26,7 @@ from .combination_engine import plan_combinations
 from .tc_builder import build_test_cases, classify_feature
 from .zero_generic_validator import validate_suite
 from .nmno_api_lookup import extract_api_operation_name, lookup_api_specs
+from .cr_detector import is_cr_or_bug
 
 
 # Engine version identifier
@@ -81,6 +82,20 @@ def build_test_suite_v8(
     log('[V8-ENGINE]   Classification: %s (confidence=%.2f, api_kw=%s, ui_kw=%s)' % (
         classification.classification, classification.confidence,
         classification.api_keywords_found[:3], classification.ui_keywords_found[:3]))
+
+    # ── Step 0a: CR/Bug Fix Detection ──
+    # CR/bug fix tickets have narrow scope — they should NOT get channel/device
+    # expansion, raw Jira text mining, or NBOP UI knowledge injection.
+    # Delegate to the old engine's CR-specific path which produces proper
+    # defect reproduction TCs.
+    _is_cr = is_cr_or_bug(
+        summary=jira.summary if jira else '',
+        issue_type=jira.issue_type if jira and hasattr(jira, 'issue_type') else '',
+        description=jira.description if jira and hasattr(jira, 'description') else '',
+    )
+    if _is_cr:
+        log('[V8-ENGINE] *** CR/Bug fix detected — delegating to CR-specific engine ***')
+        return _build_cr_suite_v8(jira, chalk, parsed_docs, options, deep_mine_result, log)
 
     # ── Step 0b: NMNO API Lookup (if API or hybrid) ──
     nmno_result = None
@@ -238,6 +253,86 @@ def build_test_suite_v8(
             len(nmno_result.business_rules), len(nmno_result.api_specs)))
     if nbop_data:
         log('[V8-ENGINE]   NBOP UI: nav=%s' % (nbop_data.get('nav_path', 'none')))
+    log('═' * 60)
+
+    return suite
+
+
+# ================================================================
+# CR/BUG FIX DELEGATION
+# ================================================================
+
+
+def _build_cr_suite_v8(jira, chalk, parsed_docs, options, deep_mine_result, log):
+    """Build a test suite for CR/bug fix tickets using the old engine's
+    CR-specific path. This avoids channel/device expansion, raw Jira text
+    mining, and NBOP UI knowledge injection that produce bad TCs for CRs.
+
+    The old engine's build_test_suite() already has mature CR handling:
+      - is_cr_or_bug detection
+      - _build_from_jira_only CR mode (defect reproduction TCs)
+      - Step 9b CR/Bug fix scope filter (cap at 8 TCs)
+      - Skips UI mirror for CR tickets
+      - Skips device matrix expansion for CR tickets
+    """
+    from .test_engine import build_test_suite as build_test_suite_v7
+
+    log('[V8-ENGINE] CR delegation: using V7 engine CR path...')
+
+    # Call the old engine which has proper CR handling
+    v7_suite = build_test_suite_v7(
+        jira=jira,
+        chalk=chalk,
+        parsed_docs=parsed_docs or [],
+        options=options or {},
+        log=log,
+        deep_mine_result=deep_mine_result,
+    )
+
+    # Wrap in V8 TestSuite format for dashboard compatibility
+    feature_id = jira.key if jira else ''
+    feature_title = jira.summary if jira else ''
+
+    suite = TestSuite(
+        feature_id=feature_id,
+        feature_title=feature_title,
+        feature_desc=v7_suite.feature_desc if hasattr(v7_suite, 'feature_desc') else '',
+        test_cases=v7_suite.test_cases,
+        data_inventory=DataInventory(sources=[], total_testable_items=len(v7_suite.test_cases)),
+        combination_plan=CombinationPlan(),
+        warnings=v7_suite.warnings if hasattr(v7_suite, 'warnings') else [],
+        engine_version='8.0.0-CR',
+        # Legacy fields for dashboard compatibility
+        acceptance_criteria=v7_suite.acceptance_criteria if hasattr(v7_suite, 'acceptance_criteria') else [],
+        scope=v7_suite.scope if hasattr(v7_suite, 'scope') else '',
+        rules=v7_suite.rules if hasattr(v7_suite, 'rules') else '',
+        channel=options.get('channel', jira.channel if jira and hasattr(jira, 'channel') else ''),
+        pi=jira.pi if jira and hasattr(jira, 'pi') else '',
+        # Jira metadata
+        jira_status=getattr(jira, 'status', '') or '',
+        jira_priority=getattr(jira, 'priority', '') or '',
+        jira_assignee=getattr(jira, 'assignee', '') or '',
+        jira_reporter=getattr(jira, 'reporter', '') or '',
+        jira_labels=getattr(jira, 'labels', []) or [],
+        jira_links=[{'key': l.get('key', ''), 'summary': l.get('summary', '')} for l in (getattr(jira, 'linked_issues', []) or [])],
+        attachment_names=[a.filename for a in (getattr(jira, 'attachments', []) or [])] if hasattr(jira, 'attachments') else [],
+    )
+
+    # Build routing audit for CR
+    from .data_models_v8 import RoutingAudit
+    suite.routing_audit = RoutingAudit(
+        classification='cr_bug_fix',
+        confidence=1.0,
+        matched_components=['CR/Bug fix detected'],
+        matched_keywords=['cr', 'bug', 'defect', 'not working'],
+        data_sources_queried=['Jira_AC', 'Linked_Defects', 'Subtask_AC'],
+        api_tcs_generated=0,
+        ui_tcs_generated=0,
+        negative_tcs_generated=sum(1 for tc in suite.test_cases if tc.category == 'Negative'),
+        total_tcs=len(suite.test_cases),
+    )
+
+    log('[V8-ENGINE] CR delegation complete: %d TCs (capped at 8 for defect scope)' % len(suite.test_cases))
     log('═' * 60)
 
     return suite
