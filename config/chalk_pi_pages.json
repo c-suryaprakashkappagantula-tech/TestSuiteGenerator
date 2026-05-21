@@ -1,0 +1,16 @@
+{
+    "_comment": "Chalk PI page URLs. Add new PIs here when they become available.",
+    "base_url": "https://chalk.charter.com/spaces/MDA/pages",
+    "pages": [
+        {"label": "PI-46", "page_id": "3007682660"},
+        {"label": "PI-47", "page_id": "3007682684"},
+        {"label": "PI-48", "page_id": "3007682700"},
+        {"label": "PI-49", "page_id": "3034265360"},
+        {"label": "PI-50", "page_id": "3055797856"},
+        {"label": "PI-51", "page_id": "3146012807"},
+        {"label": "PI-52", "page_id": "3146012810"},
+        {"label": "PI-53", "page_id": "3281127794"},
+        {"label": "PI-54", "page_id": "3281128572"},
+        {"label": "PI-55", "page_id": "3281128730"}
+    ]
+}

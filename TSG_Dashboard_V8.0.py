@@ -111,18 +111,31 @@ st.markdown("""<style>
 # DEFAULT PI LIST
 # ================================================================
 CHALK_PI_BASE = 'https://chalk.charter.com/spaces/MDA/pages'
-_DEFAULT_PIS = [
-    ('PI-46', f'{CHALK_PI_BASE}/3007682660/PI-46'),
-    ('PI-47', f'{CHALK_PI_BASE}/3007682684/PI-47'),
-    ('PI-48', f'{CHALK_PI_BASE}/3007682700/PI-48'),
-    ('PI-49', f'{CHALK_PI_BASE}/3034265360/PI-49'),
-    ('PI-50', f'{CHALK_PI_BASE}/3055797856/PI-50'),
-    ('PI-51', f'{CHALK_PI_BASE}/3146012807/PI-51'),
-    ('PI-52', f'{CHALK_PI_BASE}/3146012810/PI-52'),
-    ('PI-53', f'{CHALK_PI_BASE}/3281127794/PI-53'),
-    ('PI-54', f'{CHALK_PI_BASE}/3281128572/PI-54'),
-    ('PI-55', f'{CHALK_PI_BASE}/3281128730/PI-55'),
-]
+
+def _load_pi_pages():
+    """Load PI pages from config/chalk_pi_pages.json (editable without code changes)."""
+    config_path = Path(__file__).parent / 'config' / 'chalk_pi_pages.json'
+    try:
+        import json
+        data = json.loads(config_path.read_text(encoding='utf-8'))
+        base = data.get('base_url', CHALK_PI_BASE)
+        return [(p['label'], f"{base}/{p['page_id']}/{p['label']}") for p in data['pages']]
+    except Exception:
+        # Fallback to hardcoded if JSON is missing/corrupt
+        return [
+            ('PI-46', f'{CHALK_PI_BASE}/3007682660/PI-46'),
+            ('PI-47', f'{CHALK_PI_BASE}/3007682684/PI-47'),
+            ('PI-48', f'{CHALK_PI_BASE}/3007682700/PI-48'),
+            ('PI-49', f'{CHALK_PI_BASE}/3034265360/PI-49'),
+            ('PI-50', f'{CHALK_PI_BASE}/3055797856/PI-50'),
+            ('PI-51', f'{CHALK_PI_BASE}/3146012807/PI-51'),
+            ('PI-52', f'{CHALK_PI_BASE}/3146012810/PI-52'),
+            ('PI-53', f'{CHALK_PI_BASE}/3281127794/PI-53'),
+            ('PI-54', f'{CHALK_PI_BASE}/3281128572/PI-54'),
+            ('PI-55', f'{CHALK_PI_BASE}/3281128730/PI-55'),
+        ]
+
+_DEFAULT_PIS = _load_pi_pages()
 
 # ================================================================
 # SESSION STATE
