@@ -45,7 +45,7 @@ class JiraIssue:
 
 def _wait(page, timeout=NETWORK_IDLE_TIMEOUT_MS):
     try: page.wait_for_load_state('networkidle', timeout=timeout)
-    except: pass
+    except Exception: pass  # Timeout is expected for slow pages — not an error
 
 
 def fetch_jira_issue(page, issue_key: str, log=print) -> JiraIssue:
@@ -297,8 +297,8 @@ def fetch_jira_issue(page, issue_key: str, log=print) -> JiraIssue:
                             for a in st_attachments
                         ]
                         log(f'[JIRA]   {st["key"]}: {len(st_attachments)} attachments found')
-            except Exception:
-                pass
+            except Exception as e:
+                log(f'[JIRA]   ⚠️ Subtask attachment fetch failed: {str(e)[:60]}')
 
     return issue
 
@@ -377,8 +377,8 @@ def download_attachments(page, issue: JiraIssue, log=print) -> List[Path]:
                     continue
                 else:
                     log(f'[JIRA] ⚠️ API download returned {response.status}, falling back to navigation...')
-            except Exception:
-                pass  # Fall through to navigation-based download
+            except Exception as e:
+                log(f'[JIRA] ⚠️ API download failed ({str(e)[:40]}), falling back to navigation...')
 
             # Fallback: navigation-based download
             with page.expect_download(timeout=60000) as dl:
