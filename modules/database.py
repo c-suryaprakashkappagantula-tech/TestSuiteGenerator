@@ -25,8 +25,22 @@ def _conn():
 
 
 def init_db():
-    """Create tables if they don't exist."""
+    """Create tables if they don't exist. Runs migrations for schema changes."""
     c = _conn()
+
+    # Schema versioning — tracks which migrations have been applied
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS schema_version (
+            version INTEGER PRIMARY KEY,
+            applied_at TEXT DEFAULT (datetime('now','localtime')),
+            description TEXT
+        )
+    ''')
+    c.commit()
+
+    # Get current schema version
+    current_version = c.execute('SELECT COALESCE(MAX(version), 0) FROM schema_version').fetchone()[0]
+
     c.executescript('''
         CREATE TABLE IF NOT EXISTS pi_pages (
             label       TEXT PRIMARY KEY,
@@ -219,8 +233,32 @@ def init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_inventory_suite ON data_inventory_log(suite_id);
     ''')
+
+    # ── Run migrations ──
+    _run_migrations(c, current_version)
+
     c.commit()
     c.close()
+
+
+def _run_migrations(c, current_version: int):
+    """Apply pending schema migrations. Add new migrations to the list below."""
+    migrations = [
+        # (version, description, sql)
+        # Example: (1, 'add vendor column to features', 'ALTER TABLE features ADD COLUMN vendor TEXT DEFAULT ""'),
+    ]
+    for version, description, sql in migrations:
+        if version > current_version:
+            try:
+                c.execute(sql)
+                c.execute(
+                    'INSERT INTO schema_version (version, description) VALUES (?, ?)',
+                    (version, description)
+                )
+                print(f'[DB] Migration v{version} applied: {description}')
+            except Exception as e:
+                print(f'[DB] Migration v{version} FAILED: {e}')
+                break
 
 
 # ================================================================
