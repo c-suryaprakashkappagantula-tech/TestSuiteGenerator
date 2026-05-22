@@ -1,0 +1,131 @@
+{
+  "_version": "1.0.0",
+  "_description": "NBOP UI Knowledge Base — externalized constants from nbop_ui_knowledge.py",
+  "_updated": "2026-05-21",
+
+  "feature_to_page": {
+    "validate device": "Tile: Validate Device/SIM",
+    "validate sim": "Tile: Validate Device/SIM",
+    "validate port": "Tile: Validate Port-In Eligibility",
+    "port-in eligibility": "Tile: Validate Port-In Eligibility",
+    "portin eligibility": "Tile: Validate Port-In Eligibility",
+    "port in eligibility": "Tile: Validate Port-In Eligibility",
+    "hmno inquiry": "Tile: HMNO Inquiry",
+    "network inquiry": "Tile: Network Inquiry",
+    "service plan": "Tile: View Service Plan",
+    "batch processing": "Tile: Batch Processing",
+    "history": "Tile: History",
+    "new line activation": "Tile: New Line Activation",
+    "gsma blocklist": "Tile: GSMA Blocklist Batch",
+    "sftp report": "Tile: SFTP Reports",
+    "apollo portal": "Tile: Apollo Portal",
+    "line history": "Context: Line History",
+    "transaction history": "Context: Transaction History",
+    "notification": "Context: Notifications",
+    "voice detail": "Context: Voice Details",
+    "data detail": "Context: Data Details",
+    "sms detail": "Context: SMS/MMS Details",
+    "mms detail": "Context: SMS/MMS Details",
+    "mediation detail": "Context: Mediation Details",
+    "mediation subscriber": "Context: Mediation Details",
+    "change line status": "Manage Line → Change Line Status",
+    "change device": "Manage Line → Change Device and SIM",
+    "change sim": "Manage Line → Change SIM",
+    "change feature": "Manage Line → Change Features",
+    "change mdn": "Manage Line → Change MDN",
+    "reclaim mdn": "Manage Line → Reclaim MDN",
+    "swap mdn": "Manage Line → Swap MDN",
+    "change dpfo": "Manage Line → Change DPFO Reset Day",
+    "sync subscriber": "Sync Line → Sync with Network",
+    "sync line": "Sync Line → Sync with Network",
+    "sync key": "Sync Line → Sync with Network",
+    "reset line": "Reset Line",
+    "voice mail": "Reset Line → Voice Mail",
+    "network reset": "Reset Line → Network",
+    "add line": "Add Line",
+    "hotline": "Manage Line → Change Line Status",
+    "remove hotline": "Manage Line → Change Line Status",
+    "suspend": "Manage Line → Change Line Status",
+    "reconnect": "Manage Line → Change Line Status",
+    "reconnect eligibility": "Manage Line → Change Line Status",
+    "line summary": "Button: Line Summary(MNO)",
+    "features": "Button: Features",
+    "qr code": "Button: View QR CODE",
+    "change bcd": "Manage Line → Change DPFO Reset Day",
+    "bill cycle": "Manage Line → Change DPFO Reset Day",
+    "dpfo reset": "Manage Line → Change DPFO Reset Day",
+    "reset day": "Manage Line → Change DPFO Reset Day",
+    "reset feature": "Manage Line → Change Features",
+    "retrieve device": "Context: Line Information",
+    "device details": "Context: Line Information",
+    "get transaction status": "Context: Transaction History",
+    "transaction status": "Context: Transaction History",
+    "retrigger transaction": "Context: Transaction History",
+    "retrigger": "Context: Transaction History",
+    "usage inquiry": "Context: Mediation Details",
+    "inquiry usage": "Context: Mediation Details",
+    "usage details": "Context: Mediation Details",
+    "usage detail": "Context: Mediation Details",
+    "wearable": "Manage Line → Change Device and SIM",
+    "add wearable": "Manage Line → Change Device and SIM",
+    "device id object": "Context: Line Information",
+    "port-in": "Tile: Validate Port-In Eligibility",
+    "port in": "Tile: Validate Port-In Eligibility",
+    "new port": "Tile: Validate Port-In Eligibility"
+  },
+
+  "profile_sections": {
+    "Account Information": [
+      "Mobile Solo Account ID", "Spectrum Core Account", "Account Type",
+      "DPFO Reset Day", "Billing Account Name", "Mobile Account Number",
+      "Device Nickname", "Division ID"
+    ],
+    "Line Information": [
+      "MDN", "Channel", "Line ID", "Line Status", "Line Type", "MIN",
+      "LTE Status", "Initial Service Date", "Activated Network", "MNO",
+      "Last Status Change", "Port In Flag", "Wifi Address"
+    ],
+    "Device Information": [
+      "IMEI1 (Device)", "Model", "Make", "Mode", "Device Type",
+      "CDMA Less", "Serial Number"
+    ],
+    "SIM Information": [
+      "ICCID (SIM)", "SIM Type", "SIM Profile Type", "First Activated Network",
+      "SIM Status", "IMSI", "Charter IMSI", "RCS Status",
+      "Activation Date", "Deactivation Date", "Last Update Date", "Activation Code"
+    ],
+    "Add-Ons": [
+      "Global Day Pass", "Retail Plan", "Wholesale Plan",
+      "PDL Data", "Data Limit", "MHS Data Limit"
+    ]
+  },
+
+  "card_headers": ["Account (ACC...)", "MDN", "IMEI1", "ICCID"],
+
+  "profile_buttons": ["View All", "View", "View QR CODE", "Line Summary(MNO)", "Service Plan", "Features"],
+
+  "history_tabs": [
+    "Port In Activation", "New MDN Activation", "Wearable Activation",
+    "HMNO Activation", "Port Out History", "MDN/SIM/Device History"
+  ],
+
+  "mediation_tabs": ["Subscriber Summary", "Subscriber History"],
+
+  "mediation_fields": [
+    "Biller Account Indicator", "Mobile Solo Account ID", "Line Status",
+    "DPFO Reset Day", "MDN", "Line ID", "IMEI (Device)", "IMSI",
+    "HMNO IMEI (Device)", "HMNO IMSI", "Plan Group", "Wholesale Plan",
+    "Start Date", "End Date", "Speed Reduction Flag"
+  ],
+
+  "gsma_tabs": ["Manage Blocklist", "GSMA Blocklist Inquiry", "Charter Blocklist History"],
+
+  "activation_tabs": ["Subscriber Line", "Network only Line"],
+
+  "notification_tabs": ["DPFO Notifications"],
+
+  "sftp_reports": [
+    "MDN Swap", "Aging Port-in", "Subscriber Differential Report",
+    "CBU Subscriber differential", "Delayed Port-in", "eSIM Errors"
+  ]
+}

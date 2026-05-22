@@ -9,13 +9,17 @@ Loads the NBOP UI discovery map and provides intelligent lookup for:
 
 Used by: step_templates.py, test_analyst.py, test_engine.py
 Source:  TMO DashBoard/nbop_discovery/nbop_ui_map.json
+Knowledge: TestSuiteGenerator/nbop_knowledge_base.json
 """
 
 import json
+import logging
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
-# ── Load the UI map ──
+logger = logging.getLogger(__name__)
+
+# ── Load the UI map (crawl discovery data) ──
 _UI_MAP = None
 _UI_MAP_PATHS = [
     Path(__file__).parent.parent.parent / 'TMO DashBoard' / 'nbop_discovery' / 'nbop_ui_map.json',
@@ -34,6 +38,31 @@ def _load_ui_map() -> dict:
             return _UI_MAP
     _UI_MAP = {}
     return _UI_MAP
+
+
+# ── Load the knowledge base (externalized constants) ──
+_KNOWLEDGE_BASE = None
+_KNOWLEDGE_BASE_PATHS = [
+    Path(__file__).parent.parent / 'nbop_knowledge_base.json',
+]
+
+
+def _load_knowledge_base() -> dict:
+    """Load nbop_knowledge_base.json. Returns empty dict if missing."""
+    global _KNOWLEDGE_BASE
+    if _KNOWLEDGE_BASE is not None:
+        return _KNOWLEDGE_BASE
+    for p in _KNOWLEDGE_BASE_PATHS:
+        if p.exists():
+            try:
+                with open(p, 'r', encoding='utf-8') as f:
+                    _KNOWLEDGE_BASE = json.load(f)
+                logger.info("NBOP knowledge base loaded from %s", p)
+                return _KNOWLEDGE_BASE
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.warning("Failed to load knowledge base from %s: %s", p, exc)
+    _KNOWLEDGE_BASE = {}
+    return _KNOWLEDGE_BASE
 
 
 def is_available() -> bool:
@@ -64,88 +93,100 @@ def get_context_menu_items() -> List[str]:
 #  FEATURE → NBOP PAGE MAPPING
 # ════════════════════════════════════════════════════════════════════
 
-# Map feature keywords to NBOP pages/tiles/menus
-_FEATURE_TO_PAGE = {
-    # Landing tiles
-    'validate device': 'Tile: Validate Device/SIM',
-    'validate sim': 'Tile: Validate Device/SIM',
-    'validate port': 'Tile: Validate Port-In Eligibility',
-    'port-in eligibility': 'Tile: Validate Port-In Eligibility',
-    'portin eligibility': 'Tile: Validate Port-In Eligibility',
-    'port in eligibility': 'Tile: Validate Port-In Eligibility',
-    'hmno inquiry': 'Tile: HMNO Inquiry',
-    'network inquiry': 'Tile: Network Inquiry',
-    'service plan': 'Tile: View Service Plan',
-    'batch processing': 'Tile: Batch Processing',
-    'history': 'Tile: History',
-    'new line activation': 'Tile: New Line Activation',
-    'gsma blocklist': 'Tile: GSMA Blocklist Batch',
-    'sftp report': 'Tile: SFTP Reports',
-    'apollo portal': 'Tile: Apollo Portal',
-    # Context menu pages
-    'line history': 'Context: Line History',
-    'transaction history': 'Context: Transaction History',
-    'notification': 'Context: Notifications',
-    'voice detail': 'Context: Voice Details',
-    'data detail': 'Context: Data Details',
-    'sms detail': 'Context: SMS/MMS Details',
-    'mms detail': 'Context: SMS/MMS Details',
-    'mediation detail': 'Context: Mediation Details',
-    'mediation subscriber': 'Context: Mediation Details',
-    # Edit menu actions
-    'change line status': 'Manage Line → Change Line Status',
-    'change device': 'Manage Line → Change Device and SIM',
-    'change sim': 'Manage Line → Change SIM',
-    'change feature': 'Manage Line → Change Features',
-    'change mdn': 'Manage Line → Change MDN',
-    'reclaim mdn': 'Manage Line → Reclaim MDN',
-    'swap mdn': 'Manage Line → Swap MDN',
-    'change dpfo': 'Manage Line → Change DPFO Reset Day',
-    'sync subscriber': 'Sync Line → Sync with Network',
-    'sync line': 'Sync Line → Sync with Network',
-    'sync key': 'Sync Line → Sync with Network',
-    'reset line': 'Reset Line',
-    'voice mail': 'Reset Line → Voice Mail',
-    'network reset': 'Reset Line → Network',
-    'add line': 'Add Line',
-    'hotline': 'Manage Line → Change Line Status',
-    'remove hotline': 'Manage Line → Change Line Status',
-    'suspend': 'Manage Line → Change Line Status',
-    'reconnect': 'Manage Line → Change Line Status',
-    'reconnect eligibility': 'Manage Line → Change Line Status',
-    # Profile buttons
-    'line summary': 'Button: Line Summary(MNO)',
-    'features': 'Button: Features',
-    'qr code': 'Button: View QR CODE',
-    # ── PI-52/53 features — NBOP UI paths for the 12 ui_portal features ──
-    'change bcd': 'Manage Line → Change DPFO Reset Day',
-    'bill cycle': 'Manage Line → Change DPFO Reset Day',
-    'dpfo reset': 'Manage Line → Change DPFO Reset Day',
-    'reset day': 'Manage Line → Change DPFO Reset Day',
-    'reset feature': 'Manage Line → Change Features',
-    'retrieve device': 'Context: Line Information',
-    'device details': 'Context: Line Information',
-    'get transaction status': 'Context: Transaction History',
-    'transaction status': 'Context: Transaction History',
-    'retrigger transaction': 'Context: Transaction History',
-    'retrigger': 'Context: Transaction History',
-    'usage inquiry': 'Context: Mediation Details',
-    'inquiry usage': 'Context: Mediation Details',
-    'usage details': 'Context: Mediation Details',
-    'usage detail': 'Context: Mediation Details',
-    'wearable': 'Manage Line → Change Device and SIM',
-    'add wearable': 'Manage Line → Change Device and SIM',
-    'device id object': 'Context: Line Information',
-    'port-in': 'Tile: Validate Port-In Eligibility',
-    'port in': 'Tile: Validate Port-In Eligibility',
-    'new port': 'Tile: Validate Port-In Eligibility',
-}
+def _get_feature_to_page() -> Dict[str, str]:
+    """Load feature-to-page mapping from JSON, with hardcoded fallback."""
+    kb = _load_knowledge_base()
+    if kb.get('feature_to_page'):
+        return kb['feature_to_page']
+    # Hardcoded fallback in case JSON is missing
+    return {
+        'validate device': 'Tile: Validate Device/SIM',
+        'validate sim': 'Tile: Validate Device/SIM',
+        'validate port': 'Tile: Validate Port-In Eligibility',
+        'port-in eligibility': 'Tile: Validate Port-In Eligibility',
+        'portin eligibility': 'Tile: Validate Port-In Eligibility',
+        'port in eligibility': 'Tile: Validate Port-In Eligibility',
+        'hmno inquiry': 'Tile: HMNO Inquiry',
+        'network inquiry': 'Tile: Network Inquiry',
+        'service plan': 'Tile: View Service Plan',
+        'batch processing': 'Tile: Batch Processing',
+        'history': 'Tile: History',
+        'new line activation': 'Tile: New Line Activation',
+        'gsma blocklist': 'Tile: GSMA Blocklist Batch',
+        'sftp report': 'Tile: SFTP Reports',
+        'apollo portal': 'Tile: Apollo Portal',
+        'line history': 'Context: Line History',
+        'transaction history': 'Context: Transaction History',
+        'notification': 'Context: Notifications',
+        'voice detail': 'Context: Voice Details',
+        'data detail': 'Context: Data Details',
+        'sms detail': 'Context: SMS/MMS Details',
+        'mms detail': 'Context: SMS/MMS Details',
+        'mediation detail': 'Context: Mediation Details',
+        'mediation subscriber': 'Context: Mediation Details',
+        'change line status': 'Manage Line → Change Line Status',
+        'change device': 'Manage Line → Change Device and SIM',
+        'change sim': 'Manage Line → Change SIM',
+        'change feature': 'Manage Line → Change Features',
+        'change mdn': 'Manage Line → Change MDN',
+        'reclaim mdn': 'Manage Line → Reclaim MDN',
+        'swap mdn': 'Manage Line → Swap MDN',
+        'change dpfo': 'Manage Line → Change DPFO Reset Day',
+        'sync subscriber': 'Sync Line → Sync with Network',
+        'sync line': 'Sync Line → Sync with Network',
+        'sync key': 'Sync Line → Sync with Network',
+        'reset line': 'Reset Line',
+        'voice mail': 'Reset Line → Voice Mail',
+        'network reset': 'Reset Line → Network',
+        'add line': 'Add Line',
+        'hotline': 'Manage Line → Change Line Status',
+        'remove hotline': 'Manage Line → Change Line Status',
+        'suspend': 'Manage Line → Change Line Status',
+        'reconnect': 'Manage Line → Change Line Status',
+        'reconnect eligibility': 'Manage Line → Change Line Status',
+        'line summary': 'Button: Line Summary(MNO)',
+        'features': 'Button: Features',
+        'qr code': 'Button: View QR CODE',
+        'change bcd': 'Manage Line → Change DPFO Reset Day',
+        'bill cycle': 'Manage Line → Change DPFO Reset Day',
+        'dpfo reset': 'Manage Line → Change DPFO Reset Day',
+        'reset day': 'Manage Line → Change DPFO Reset Day',
+        'reset feature': 'Manage Line → Change Features',
+        'retrieve device': 'Context: Line Information',
+        'device details': 'Context: Line Information',
+        'get transaction status': 'Context: Transaction History',
+        'transaction status': 'Context: Transaction History',
+        'retrigger transaction': 'Context: Transaction History',
+        'retrigger': 'Context: Transaction History',
+        'usage inquiry': 'Context: Mediation Details',
+        'inquiry usage': 'Context: Mediation Details',
+        'usage details': 'Context: Mediation Details',
+        'usage detail': 'Context: Mediation Details',
+        'wearable': 'Manage Line → Change Device and SIM',
+        'add wearable': 'Manage Line → Change Device and SIM',
+        'device id object': 'Context: Line Information',
+        'port-in': 'Tile: Validate Port-In Eligibility',
+        'port in': 'Tile: Validate Port-In Eligibility',
+        'new port': 'Tile: Validate Port-In Eligibility',
+    }
+
+
+# Cached reference — loaded once on first access
+_FEATURE_TO_PAGE: Optional[Dict[str, str]] = None
+
+
+def _feature_to_page() -> Dict[str, str]:
+    """Get the feature-to-page map (cached after first call)."""
+    global _FEATURE_TO_PAGE
+    if _FEATURE_TO_PAGE is None:
+        _FEATURE_TO_PAGE = _get_feature_to_page()
+    return _FEATURE_TO_PAGE
 
 
 def find_nbop_page(feature_name: str, description: str = '') -> Optional[str]:
     """Given a feature name/description, find the matching NBOP page."""
     ctx = (feature_name + ' ' + description).lower()
-    for keyword, page_name in _FEATURE_TO_PAGE.items():
+    for keyword, page_name in _feature_to_page().items():
         if keyword in ctx:
             return page_name
     return None
@@ -200,8 +241,8 @@ def get_navigation_path(feature_name: str, description: str = '') -> str:
 #  FIELD KNOWLEDGE — what fields exist on each page
 # ════════════════════════════════════════════════════════════════════
 
-# Subscriber profile sections with their fields
-PROFILE_SECTIONS = {
+# ── Fallback constants (used when JSON is missing) ──
+_FALLBACK_PROFILE_SECTIONS = {
     'Account Information': [
         'Mobile Solo Account ID', 'Spectrum Core Account', 'Account Type',
         'DPFO Reset Day', 'Billing Account Name', 'Mobile Account Number',
@@ -227,40 +268,85 @@ PROFILE_SECTIONS = {
     ],
 }
 
-# Card header fields (the top bar)
-CARD_HEADERS = ['Account (ACC...)', 'MDN', 'IMEI1', 'ICCID']
-
-# Profile action buttons
-PROFILE_BUTTONS = ['View All', 'View', 'View QR CODE', 'Line Summary(MNO)',
-                   'Service Plan', 'Features']
-
-# History page tabs
-HISTORY_TABS = ['Port In Activation', 'New MDN Activation', 'Wearable Activation',
-                'HMNO Activation', 'Port Out History', 'MDN/SIM/Device History']
-
-# Mediation Details tabs
-MEDIATION_TABS = ['Subscriber Summary', 'Subscriber History']
-
-# Mediation fields
-MEDIATION_FIELDS = [
+_FALLBACK_CARD_HEADERS = ['Account (ACC...)', 'MDN', 'IMEI1', 'ICCID']
+_FALLBACK_PROFILE_BUTTONS = ['View All', 'View', 'View QR CODE', 'Line Summary(MNO)',
+                             'Service Plan', 'Features']
+_FALLBACK_HISTORY_TABS = ['Port In Activation', 'New MDN Activation', 'Wearable Activation',
+                          'HMNO Activation', 'Port Out History', 'MDN/SIM/Device History']
+_FALLBACK_MEDIATION_TABS = ['Subscriber Summary', 'Subscriber History']
+_FALLBACK_MEDIATION_FIELDS = [
     'Biller Account Indicator', 'Mobile Solo Account ID', 'Line Status',
     'DPFO Reset Day', 'MDN', 'Line ID', 'IMEI (Device)', 'IMSI',
     'HMNO IMEI (Device)', 'HMNO IMSI', 'Plan Group', 'Wholesale Plan',
     'Start Date', 'End Date', 'Speed Reduction Flag',
 ]
+_FALLBACK_GSMA_TABS = ['Manage Blocklist', 'GSMA Blocklist Inquiry', 'Charter Blocklist History']
+_FALLBACK_ACTIVATION_TABS = ['Subscriber Line', 'Network only Line']
+_FALLBACK_NOTIFICATION_TABS = ['DPFO Notifications']
+_FALLBACK_SFTP_REPORTS = ['MDN Swap', 'Aging Port-in', 'Subscriber Differential Report',
+                          'CBU Subscriber differential', 'Delayed Port-in', 'eSIM Errors']
 
-# GSMA Blocklist tabs
-GSMA_TABS = ['Manage Blocklist', 'GSMA Blocklist Inquiry', 'Charter Blocklist History']
 
-# New Line Activation tabs
-ACTIVATION_TABS = ['Subscriber Line', 'Network only Line']
+def _kb_get(key: str, fallback):
+    """Get a value from the knowledge base JSON, falling back to hardcoded."""
+    kb = _load_knowledge_base()
+    return kb.get(key, fallback)
 
-# Notifications tabs
-NOTIFICATION_TABS = ['DPFO Notifications']
 
-# SFTP Report types
-SFTP_REPORTS = ['MDN Swap', 'Aging Port-in', 'Subscriber Differential Report',
-                'CBU Subscriber differential', 'Delayed Port-in', 'eSIM Errors']
+# ── Public accessors (JSON-first, fallback-safe) ──
+
+
+def _get_profile_sections() -> Dict[str, List[str]]:
+    return _kb_get('profile_sections', _FALLBACK_PROFILE_SECTIONS)
+
+
+def _get_card_headers() -> List[str]:
+    return _kb_get('card_headers', _FALLBACK_CARD_HEADERS)
+
+
+def _get_profile_buttons() -> List[str]:
+    return _kb_get('profile_buttons', _FALLBACK_PROFILE_BUTTONS)
+
+
+def _get_history_tabs() -> List[str]:
+    return _kb_get('history_tabs', _FALLBACK_HISTORY_TABS)
+
+
+def _get_mediation_tabs() -> List[str]:
+    return _kb_get('mediation_tabs', _FALLBACK_MEDIATION_TABS)
+
+
+def _get_mediation_fields() -> List[str]:
+    return _kb_get('mediation_fields', _FALLBACK_MEDIATION_FIELDS)
+
+
+def _get_gsma_tabs() -> List[str]:
+    return _kb_get('gsma_tabs', _FALLBACK_GSMA_TABS)
+
+
+def _get_activation_tabs() -> List[str]:
+    return _kb_get('activation_tabs', _FALLBACK_ACTIVATION_TABS)
+
+
+def _get_notification_tabs() -> List[str]:
+    return _kb_get('notification_tabs', _FALLBACK_NOTIFICATION_TABS)
+
+
+def _get_sftp_reports() -> List[str]:
+    return _kb_get('sftp_reports', _FALLBACK_SFTP_REPORTS)
+
+
+# Module-level constants — loaded from JSON on first access, cached thereafter
+PROFILE_SECTIONS = _get_profile_sections()
+CARD_HEADERS = _get_card_headers()
+PROFILE_BUTTONS = _get_profile_buttons()
+HISTORY_TABS = _get_history_tabs()
+MEDIATION_TABS = _get_mediation_tabs()
+MEDIATION_FIELDS = _get_mediation_fields()
+GSMA_TABS = _get_gsma_tabs()
+ACTIVATION_TABS = _get_activation_tabs()
+NOTIFICATION_TABS = _get_notification_tabs()
+SFTP_REPORTS = _get_sftp_reports()
 
 
 def get_profile_fields(section: str = None) -> List[str]:

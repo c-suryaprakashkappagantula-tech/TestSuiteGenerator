@@ -304,7 +304,7 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print, deep_mine_res
         # AC often has business rules (PL/YL/YD/YP, Syniverse actions) that Chalk doesn't cover
         if jira.acceptance_criteria and len(jira.acceptance_criteria) > 50:
             log('[ENGINE]   Also mining AC text for supplementary scenarios...')
-            ac_tcs = _build_from_jira_only(jira, feature_short)
+            ac_tcs = _build_from_jira_only(jira, feature_short, log=log)
             if ac_tcs:
                 # ── Quality gate: reject wrong-feature TCs ──
                 # When feature is "Change BCD", reject TCs about "Change Rateplan",
@@ -347,7 +347,7 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print, deep_mine_res
                     log('[ENGINE]   Added %d supplementary TCs from AC text' % len(ac_tcs))
     else:
         log('[ENGINE]   [WARN] No Chalk scenarios -- building from Jira description')
-        suite.test_cases = _build_from_jira_only(jira, feature_short)
+        suite.test_cases = _build_from_jira_only(jira, feature_short, log=log)
         suite.warnings.append('No Chalk data available -- TCs built from Jira description only')
 
     # ════════════════════════════════════════════════════════════════
@@ -1806,25 +1806,47 @@ def _chalk_scenario_to_tc(sc, idx, feature_id, channel='', feature_type=''):
 
     # Fallback if no steps at all (numbered format scenarios land here)
     if not steps:
-        # Use domain-specific step templates
-        context = _scenario_context(sc)
-        # Enrich context with feature-level keywords for better routing
-        # This ensures sync subscriber scenarios get sync steps, not notification steps
-        _feature_ctx = (feature_id + ' ' + channel + ' ' + context).lower()
-        # Determine feature type for step routing
-        _ft = ''
-        if _has_business_terms and any(kw in (sc.title + ' ' + (sc.validation or '')).lower()
-                                        for kw in ['cdr', 'prr', 'mediation', 'ild', 'roaming',
-                                                    'country code', 'usage']):
-            _ft = 'notification'
-        # Use the feature-level classification when available — this is the
-        # single source of truth from tc_templates.classify_feature().
-        # It ensures ui_portal features ALWAYS get UI step templates.
-        if feature_type and not _ft:
-            _ft = feature_type
-        chain = get_step_chain(sc.title, sc.validation, _feature_ctx, feature_type=_ft)
-        for i, (step_sum, step_exp) in enumerate(chain, 1):
-            steps.append(TestStep(i, step_sum, step_exp))
+        # ── CR/Deactivation override: If scenario is about deactivating a TMO line,
+        # generate Genesis Portal + NBOP verification steps instead of generic ones
+        _sc_lower = (sc.title + ' ' + (sc.validation or '')).lower()
+        if ('deactivat' in _sc_lower and 'tmo' in _sc_lower and
+            ('active in nsl' in _sc_lower or 'move' in _sc_lower or 'nbop' in _sc_lower)):
+            steps = [
+                TestStep(1, 'Open Genesis Portal (TMO) → Search Subscriber by MSISDN → '
+                         'Verify Status column = "Deactivated" → Capture screenshot',
+                         'Genesis Search Results show MDN with Status = Deactivated'),
+                TestStep(2, 'Open NBOP Portal → Search by MDN → '
+                         'Verify Line Status = "Active" in subscriber profile → Capture screenshot',
+                         'NBOP subscriber profile shows Line Status = Active (mismatch with TMO)'),
+                TestStep(3, 'Run the Deactivate API for the MDN',
+                         'Deactivate API request sent to NSL'),
+                TestStep(4, 'Verify NSL processes deactivation via guaranteed delivery flow (no MSISDN error)',
+                         'NSL returns 200 OK — guaranteed delivery triggered'),
+                TestStep(5, 'Verify MDN is now Deactivated in NBOP → Capture screenshot',
+                         'NBOP Line Status updated to De-Active'),
+                TestStep(6, 'Verify Transaction History records the deactivation',
+                         'Transaction entry logged with correct timestamp and status'),
+            ]
+        else:
+            # Use domain-specific step templates
+            context = _scenario_context(sc)
+            # Enrich context with feature-level keywords for better routing
+            # This ensures sync subscriber scenarios get sync steps, not notification steps
+            _feature_ctx = (feature_id + ' ' + channel + ' ' + context).lower()
+            # Determine feature type for step routing
+            _ft = ''
+            if _has_business_terms and any(kw in (sc.title + ' ' + (sc.validation or '')).lower()
+                                            for kw in ['cdr', 'prr', 'mediation', 'ild', 'roaming',
+                                                        'country code', 'usage']):
+                _ft = 'notification'
+            # Use the feature-level classification when available — this is the
+            # single source of truth from tc_templates.classify_feature().
+            # It ensures ui_portal features ALWAYS get UI step templates.
+            if feature_type and not _ft:
+                _ft = feature_type
+            chain = get_step_chain(sc.title, sc.validation, _feature_ctx, feature_type=_ft)
+            for i, (step_sum, step_exp) in enumerate(chain, 1):
+                steps.append(TestStep(i, step_sum, step_exp))
 
     # Clean the title for TC summary — must be short and crisp
     clean_title = _clean_tc_title(sc.title, feature_id)
@@ -2631,7 +2653,7 @@ def _build_subtask_steps(scenario_text, feature_short, subtask_key, category, ji
 # FALLBACK: Build from Jira only
 # ================================================================
 
-def _build_from_jira_only(jira, feature_name=''):
+def _build_from_jira_only(jira, feature_name='', log=print):
     """Build TCs from Jira description when no Chalk data available.
     V3.1: Deep-mines Jira description for:
       - Transaction types (CP, CE, PU, PD, PC, etc.)
@@ -2654,6 +2676,7 @@ def _build_from_jira_only(jira, feature_name=''):
     if _is_cr:
         # ── CR MODE: Build TCs from defect scope, not generic mining ──
         # Sources: AC text, linked defect descriptions, subtask AC
+        log('[ENGINE]  [CR] ENTERED CR MODE for %s' % jira.key)
         _defect_text = ''
         _repro_steps = []
         _expected = ''
@@ -2677,6 +2700,9 @@ def _build_from_jira_only(jira, feature_name=''):
                                        li_desc, re.IGNORECASE | re.DOTALL)
             if _steps_match:
                 _repro_steps = [s.strip() for s in _steps_match if s.strip()]
+                log('[ENGINE]  [CR] Found repro steps from LINKED DEFECT (%s): %d steps' % (li.get('key', '?'), len(_repro_steps)))
+                for _rs in _repro_steps:
+                    log('[ENGINE]  [CR]   linked: %s' % _rs[:80])
             # Parse Actual/Expected
             _actual_match = re.search(r'Actual[:\s]*(.+?)(?=Expected|$)', li_desc, re.IGNORECASE | re.DOTALL)
             if _actual_match:
@@ -2697,6 +2723,9 @@ def _build_from_jira_only(jira, feature_name=''):
                                            st_desc, re.IGNORECASE | re.DOTALL)
                 if _steps_match:
                     _repro_steps = [s.strip() for s in _steps_match if s.strip()]
+                    log('[ENGINE]  [CR] Found repro steps from SUBTASK (%s): %d steps' % (st.get('key', '?'), len(_repro_steps)))
+                    for _rs in _repro_steps:
+                        log('[ENGINE]  [CR]   subtask: %s' % _rs[:80])
             # Parse Post-Conditions as expected behavior
             _post_match = re.search(r'Post.?Conditions[:\s]*(.+?)(?=Assumptions|Dependencies|Reason|$)',
                                      st_desc, re.IGNORECASE | re.DOTALL)
@@ -2710,6 +2739,12 @@ def _build_from_jira_only(jira, feature_name=''):
                                     ac_text, re.IGNORECASE | re.DOTALL)
             if _ac_steps:
                 _repro_steps = [s.strip() for s in _ac_steps if s.strip()]
+                log('[ENGINE]  [CR] Found repro steps from AC TEXT: %d steps' % len(_repro_steps))
+                for _rs in _repro_steps:
+                    log('[ENGINE]  [CR]   ac: %s' % _rs[:80])
+
+        if not _repro_steps:
+            log('[ENGINE]  [CR] No repro steps found — will build from AC keywords')
 
         # Parse AC for actual/expected if not found yet
         if not _actual:
@@ -2799,20 +2834,55 @@ def _build_from_jira_only(jira, feature_name=''):
         # ── TC1: Reproduce defect & verify fix ──
         _tc1_steps = []
         if _repro_steps:
+            log('[ENGINE]  [CR] TC1 using REPRO STEPS (%d steps)' % len(_repro_steps))
+            # Enrich vague repro steps with portal-specific actions
             for ri, rs in enumerate(_repro_steps, 1):
-                _tc1_steps.append(TestStep(ri, rs, 'Step completed successfully'))
+                _rs_lower = rs.lower().strip()
+                # Replace vague "MDN is Deactivated in TMO" with Genesis Portal step
+                if ('deactivated in tmo' in _rs_lower or 'de-active' in _rs_lower or
+                    'deactive' in _rs_lower) and 'tmo' in _rs_lower:
+                    _tc1_steps.append(TestStep(ri,
+                        'Open Genesis Portal (TMO) → Search Subscriber by MSISDN → '
+                        'Verify Status column = "Deactivated" → Capture screenshot',
+                        'Genesis Search Results show MDN with Status = Deactivated'))
+                # Replace vague "MDN is Active in NBOP" with NBOP Portal step
+                elif 'active in nbop' in _rs_lower or 'active in nsl' in _rs_lower:
+                    _tc1_steps.append(TestStep(ri,
+                        'Open NBOP Portal → Search by MDN → '
+                        'Verify Line Status = "Active" in subscriber profile → Capture screenshot',
+                        'NBOP subscriber profile shows Line Status = Active (mismatch with TMO)'))
+                # Replace vague "Ran the Deactivate API" with specific action
+                elif 'ran the deactivat' in _rs_lower or 'run.*deactivat' in _rs_lower:
+                    _tc1_steps.append(TestStep(ri,
+                        'Run the Deactivate API for the MDN (via NSL)',
+                        'Deactivate API request sent to NSL'))
+                # Replace error step with verification
+                elif 'deactivation got failed' in _rs_lower or 'invalid msisdn' in _rs_lower:
+                    _tc1_steps.append(TestStep(ri,
+                        'Verify the old error "Deactivation got failed with invalid MSISDN" does NOT occur',
+                        'No error. NSL returns guaranteed delivery response.'))
+                # Replace vague re-verify step
+                elif 're-verif' in _rs_lower or 'still showing' in _rs_lower:
+                    _tc1_steps.append(TestStep(ri,
+                        'Verify MDN is now Deactivated in NBOP → Capture screenshot',
+                        'NBOP Line Status updated to De-Active — guaranteed delivery worked'))
+                else:
+                    _tc1_steps.append(TestStep(ri, rs, 'Step completed with expected outcome — no errors'))
         else:
+            log('[ENGINE]  [CR] TC1 building from AC text (no repro steps)')
             # Build steps from the defect scenario in AC
             _step_num = 1
             if 'de-active in tmo' in _ac_clean.lower():
                 _tc1_steps.append(TestStep(_step_num,
-                    'Verify MDN is De-Active (inactive) in TMO',
-                    'MDN status confirmed as inactive/de-active in TMO'))
+                    'Open Genesis Portal (TMO) → Search Subscriber by MSISDN → '
+                    'Verify Status column = "Deactivated" → Capture screenshot',
+                    'Genesis Search Results show MDN with Status = Deactivated'))
                 _step_num += 1
             if 'active in nbop' in _ac_clean.lower() or 'still shows' in _ac_clean.lower():
                 _tc1_steps.append(TestStep(_step_num,
-                    'Verify MDN is Active in NBOP/NSL DB',
-                    'MDN status confirmed as Active in NBOP/NSL DB'))
+                    'Open NBOP Portal → Search by MDN → '
+                    'Verify Line Status = "Active" in subscriber profile → Capture screenshot',
+                    'NBOP subscriber profile shows Line Status = Active (mismatch with TMO)'))
                 _step_num += 1
             _tc1_steps.append(TestStep(_step_num,
                 'Run the Deactivate API for the MDN',
@@ -2855,8 +2925,9 @@ def _build_from_jira_only(jira, feature_name=''):
                 description='Confirm the previously reported error ("%s") no longer occurs after the fix.' % _error_msg,
                 preconditions=_precond_text or '1.\tMDN is De-Active in TMO\n2.\tMDN is Active in NBOP/NSL DB',
                 steps=[
-                    TestStep(1, 'Set up the exact defect scenario: MDN de-active in TMO, active in NBOP/NSL',
-                             'Defect preconditions established'),
+                    TestStep(1, 'Set up defect scenario: Open Genesis Portal → verify MDN Status = Deactivated; '
+                             'Open NBOP → verify Line Status = Active',
+                             'Defect preconditions established — MDN de-active in TMO, active in NBOP'),
                     TestStep(2, 'Run the Deactivate API for the MDN',
                              'API request sent'),
                     TestStep(3, 'Verify the error "%s" does NOT appear in the response' % _error_msg,
@@ -2891,17 +2962,29 @@ def _build_from_jira_only(jira, feature_name=''):
         tcs.append(TestCase(
             sno=str(idx),
             summary='TC%03d_%s_Regression: Normal Deactivation flow unaffected by CR fix' % (idx, jira.key),
-            description='Ensure the GD fix does not break normal deactivation (MDN active in both TMO and NBOP).',
-            preconditions='1.\tMDN is Active in both TMO and NBOP/NSL DB\n2.\tDeactivate API is available',
+            description='Ensure the GD fix does not break normal deactivation (MDN active in both TMO and NBOP). '
+                        'Execute for all device combinations (BYOD, Lease, EIP, JOD).',
+            preconditions='1.\tMDN is Active in both TMO and NBOP/NSL DB\n'
+                          '2.\tDeactivate API is available\n'
+                          '3.\tExecute for all device combinations (BYOD, Lease, EIP, JOD)',
             steps=[
-                TestStep(1, 'Verify MDN is Active in both TMO and NBOP/NSL DB',
-                         'MDN confirmed Active in both systems'),
-                TestStep(2, 'Run the Deactivate API for the MDN',
-                         'Deactivate API completes successfully — no error'),
-                TestStep(3, 'Verify MDN is De-Active in both TMO and NBOP',
-                         'MDN status updated to De-Active in both systems'),
-                TestStep(4, 'Verify no guaranteed delivery mechanism triggered (normal flow)',
-                         'Normal deactivation path used — no GD retry needed'),
+                TestStep(1, 'Open Genesis Portal (TMO) → Search Subscriber by MSISDN → '
+                         'Verify Status column = "Active" → Capture screenshot',
+                         'Genesis Search Results show MDN with Status = Active'),
+                TestStep(2, 'Open NBOP Portal → Search by MDN → '
+                         'Verify Line Status = "Active" in subscriber profile → Capture screenshot',
+                         'NBOP subscriber profile shows Line Status = Active (matches TMO)'),
+                TestStep(3, 'Run the Deactivate API for the MDN (normal flow — MDN active in both systems)',
+                         'Deactivate API returns HTTP 200 success — no error, no guaranteed delivery triggered'),
+                TestStep(4, 'Open Genesis Portal (TMO) → Search Subscriber by MSISDN → '
+                         'Verify Status column = "Deactivated" → Capture screenshot',
+                         'Genesis Search Results show MDN with Status = Deactivated'),
+                TestStep(5, 'Open NBOP Portal → Search by MDN → '
+                         'Verify Line Status = "De-Active" in subscriber profile → Capture screenshot',
+                         'NBOP subscriber profile shows Line Status = De-Active (matches TMO)'),
+                TestStep(6, 'Open Century Report (Service Grouping) → Verify transaction name shows '
+                         'normal Deactivation — no guaranteed delivery retry entry present',
+                         'Century Report confirms normal deactivation path used — no GD retry transaction found'),
             ],
             story_linkage=jira.key, label=jira.key, category='Regression',
         ))
