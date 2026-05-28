@@ -1,0 +1,225 @@
+
+════════════════════════════════════════════════════════════
+  MDA Dashboard V6.0 — Run 2f2b09d7
+  Iteration: 54.2 | Vendor: Infy
+  Modules: M1, M2, M3
+════════════════════════════════════════════════════════════
+
+[BROWSER] Launching Chromium (headed=False)...
+[BROWSER] Chromium launched successfully (PID: [])
+[BROWSER] Authenticating to Jira...
+[BROWSER] Jira authentication complete
+[ORCH] Phase 1: Running M1 (browser) then M2 (REST)...
+
+=== QMetry Test Case Export (V6.0 — Consolidated) ===
+    Iteration: 54.2
+    Vendor: Infy
+[EXTRACT] Step 1: Ensuring QMetry SPA is loaded...
+[EXTRACT]   Cold session — navigating via menu...
+[EXTRACT]   Menu failed — using direct URL...
+[API-CAPTURE] GET https://jira.charter.com/rest/jiraxporter/1.0/product/config/executioncontext?_=1779809623559 → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/jiraxporter/1.0/settings?key=XP_ISSUE_DETAIL_EXPORT&_=1779809623563 → 200
+[API-CAPTURE] PUT https://jira.charter.com/rest/qtm4j/ui/latest/preferences → 204
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/get-jira-projects?startAt=0&maxResults=50&searchText= → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/preferences?key=Pagination → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/h2dbinfo/isH2 → 200
+[API-CAPTURE] PUT https://jira.charter.com/rest/qtm4j/ui/latest/preferences → 204
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/127207/user-permissions → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/127207/settings → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/127207/execution-results → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/127207/testcase-filters?maxResults=10000 → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/127207/testcase-custom-fields → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/127207/testcase-system-fields → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/127207/testcase-system-fields → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/127207/testcase-folders?withCount=true&sort=SQNO:ASC → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/preferences?key=testcaselist_127207 → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/127207/testcase-statuses?status=active → 200
+[API-CAPTURE] POST https://jira.charter.com/rest/qtm4j/ui/latest/testcases/search?startAt=0&maxResults=20 → 200
+[EXTRACT]   Waiting for QMetry SPA...
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/127207/testcase-folders?sort=NAME:ASC → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/app/preferences → 200
+[EXTRACT]   SPA ready after 2s
+[EXTRACT] Step 2: Selecting Software Project → MDA-Integration...
+[API-CAPTURE] POST https://jira.charter.com/rest/qtm4j/ui/latest/testcases/search?startAt=0&maxResults=20&fields=key,version,summary,priori → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/get-jira-projects?startAt=0&maxResults=50&searchText=M → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/get-jira-projects?startAt=0&maxResults=50&searchText=MD → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/get-jira-projects?startAt=0&maxResults=50&searchText=MDA → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/get-jira-projects?startAt=0&maxResults=50&searchText=MDA- → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/get-jira-projects?startAt=0&maxResults=50&searchText=MDA-I → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/get-jira-projects?startAt=0&maxResults=50&searchText=MDA-Int → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/get-jira-projects?startAt=0&maxResults=50&searchText=MDA-In → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/get-jira-projects?startAt=0&maxResults=50&searchText=MDA-Integ → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/get-jira-projects?startAt=0&maxResults=50&searchText=MDA-Inte → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/get-jira-projects?startAt=0&maxResults=50&searchText=MDA-Integr → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/get-jira-projects?startAt=0&maxResults=50&searchText=MDA-Integra → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/get-jira-projects?startAt=0&maxResults=50&searchText=MDA-Integrat → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/get-jira-projects?startAt=0&maxResults=50&searchText=MDA-Integrat → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/get-jira-projects?startAt=0&maxResults=50&searchText=MDA-Integrat → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/get-jira-projects?startAt=0&maxResults=50&searchText=MDA-Integrat → 200
+  Project selected: MDA-Integration
+[EXTRACT] Step 3: Searching for folder: INTEGRATION_PROGRESSION_54.2
+  Searched for: INTEGRATION_PROGRESSION_54.2
+[EXTRACT] Step 4: Expanding folder and applying filter...
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/127207/testcase-statuses?status=active → 200
+[API-CAPTURE] PUT https://jira.charter.com/rest/qtm4j/ui/latest/preferences → 204
+[API-CAPTURE] POST https://jira.charter.com/rest/qtm4j/ui/latest/testcases/search?startAt=0&maxResults=20&fields=key,version,summary,priori → 200
+  Folder expanded and filter applied
+[EXTRACT] Step 5: Finding CHPROJECT-18431 in tree...
+  Waiting for tree nodes to render...
+  [V5.3] Atomic in-browser scroll for "CHPROJECT-18431"...
+  [V5.3] ✓ Found in 0.0s via atomic scroll (3 labels seen, pass=initial)
+[EXTRACT] Step 6: Right-click → Export to Excel...
+  Export to Excel clicked
+[EXTRACT] Step 7: Waiting for download...
+[API-CAPTURE] POST https://jira.charter.com/rest/qtm4j/ui/latest/testcases/export → 200
+  Notification clicked
+[API-CAPTURE] POST https://jira.charter.com/rest/qtm4j/ui/latest/tasks?maxResults=20&startAt=0 → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/download/latest/export/testcases_1779809210667_J8IAQDgvHz.xlsx → 200
+[EXTRACT] ✅ Downloaded: testcases_1779809210667_J8IAQDgvHz.xlsx (145,459 bytes)
+[EXTRACT] Step 8: Applying vendor filter...
+  Filtered: 2891 → 118 rows → testcases_1779809210667_J8IAQDgvHz_filtered.xlsx
+[EXTRACT] Step 9: Creating labels pivot...
+  Pivot saved: pivot_labels_testcases_testcases_1779809210667_J8IAQDgvHz_filtered.xlsx (7 rows)
+[EXTRACT] ✅ Complete — 118 test cases extracted
+[EXTRACT] Duration: 44.7s
+
+=== Jira Defect Extract (V6.0) ===
+    Iteration: 54.2, Label: PROGRESSION
+    Vendor: Infy
+[DEFECT] JQL: project = MOBLPLTFRM AND issuetype = Bug AND labels = INTG_UAT_PROGRESSION_54.2 and "Service Type." ...
+[DEFECT] Fetching defects via REST API...
+   Fetched 36/36 issues...
+[DEFECT] Total issues fetched: 36
+[DEFECT] Raw export saved: Jira_defects_54.2_PROGRESSION.xlsx (36 rows)
+  Defect pivot saved: pivot_defects_INTG_PROG_54.2.xlsx (4 status rows)
+[DEFECT] ✅ Complete — 36 defects, pivot at pivot_defects_INTG_PROG_54.2.xlsx
+[DEFECT] Duration: 2.0s
+
+[ORCH] Phase 2: QMetry Report (sequential)...
+
+=== QMetry Test Execution Report (V6.0 — Module 3) ===
+    Iteration: 54.2
+    Vendor: Infy
+[REPORT] Phase 1: Setup — fetching test cycle keys
+[API-CAPTURE] GET https://jira.charter.com/rest/jiraxporter/1.0/product/config/executioncontext?_=1779809665447 → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/jiraxporter/1.0/settings?key=XP_ISSUE_DETAIL_EXPORT&_=1779809665451 → 200
+[API-CAPTURE] PUT https://jira.charter.com/rest/qtm4j/ui/latest/preferences → 204
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/get-jira-projects?startAt=0&maxResults=50&searchText= → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/preferences?key=Pagination → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/h2dbinfo/isH2 → 200
+[API-CAPTURE] PUT https://jira.charter.com/rest/qtm4j/ui/latest/preferences → 204
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/127207/user-permissions → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/127207/settings → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/127207/testcycle-custom-fields → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/127207/execution-results → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/127207/testcycle-folders?withCount=true&sort=SQNO:ASC → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/127207/testcycle-filters?maxResults=10000 → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/127207/testcycle-system-fields → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/preferences?key=testcyclelist_127207 → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/127207/testcycle-folders?sort=NAME:ASC → 200
+[API-CAPTURE] POST https://jira.charter.com/rest/qtm4j/ui/latest/testcycles/search?startAt=0&maxResults=20&fields=automationRule → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/projects/127207/testcycle-statuses?status=active → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/app/preferences → 200
+[API-CAPTURE] POST https://jira.charter.com/rest/qtm4j/ui/latest/testcycles/search?startAt=0&maxResults=20&fields=key,summary,priority,stat → 200
+[REPORT]   ✓ Key "QMMDA-TR-118" for "TMO_INTEGRATION_PROGRESSION_54.2"
+[REPORT]   ✓ Key "QMMDA-TR-119" for "TMO_INTEGRATION_REGRESSION_54.2"
+[REPORT]   Keys: prog=QMMDA-TR-118, reg=QMMDA-TR-119
+[REPORT] Phase 2: Progression reports
+[REPORT]   → Navigate to Test Report > By Execution Assignee
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/preferences?key=TESTCASE_SUMMARY_BY_WORKFLOW_STATUS → 200
+[API-CAPTURE] POST https://jira.charter.com/rest/qtm4j/ui/latest/gadgets/filter/search → 200
+[API-CAPTURE] POST https://jira.charter.com/rest/qtm4j/ui/latest/gadgets/filter/suggestions/customfields → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/gadgets/filter/460/user-group-permission → 200
+[API-CAPTURE] POST https://jira.charter.com/rest/qtm4j/ui/latest/gadgets/filter/search → 200
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/preferences?key=TESTCASE_EXECUTION_SUMMARY_BY_ASSIGNEE → 200
+[API-CAPTURE] POST https://jira.charter.com/rest/qtm4j/ui/latest/gadgets/filter/suggestions/customfields → 200
+[REPORT]   Ready
+[REPORT]   Filter: QMMDA-TR-118
+[REPORT]   Generate clicked
+[API-CAPTURE] POST https://jira.charter.com/rest/qtm4j/ui/latest/gadgets/TESTCASE_EXECUTION_SUMMARY_BY_ASSIGNEE → 200
+[API-CAPTURE] PUT https://jira.charter.com/rest/qtm4j/ui/latest/preferences → 204
+[REPORT]   Export CSV (prog_assignee)...
+[REPORT]   Tabular clicked
+[REPORT]   Export clicked
+[REPORT]   CSV clicked
+[REPORT]   ✓ Downloaded: TESTCASE_EXECUTION_SUMMARY_BY_ASSIGNEE_TABULAR_VIEW.csv (519 bytes)
+[REPORT]   → Click By Label (under Test Execution Reports)
+[REPORT]   Found 2 "By Label" nodes in tree
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/preferences?key=TESTCASE_EXECUTION_SUMMARY_BY_LABEL → 200
+[API-CAPTURE] POST https://jira.charter.com/rest/qtm4j/ui/latest/gadgets/filter/search → 200
+[API-CAPTURE] POST https://jira.charter.com/rest/qtm4j/ui/latest/gadgets/filter/suggestions/customfields → 200
+[REPORT]   Clicked 2nd "By Label" (Test Execution Reports)
+[REPORT]   Filter: QMMDA-TR-118
+[REPORT]   Generate clicked
+[API-CAPTURE] POST https://jira.charter.com/rest/qtm4j/ui/latest/gadgets/TESTCASE_EXECUTION_SUMMARY_BY_LABEL → 200
+[API-CAPTURE] PUT https://jira.charter.com/rest/qtm4j/ui/latest/preferences → 204
+[REPORT]   Export CSV (prog_label)...
+[REPORT]   Tabular clicked
+[REPORT]   Export clicked
+[REPORT]   CSV clicked
+[REPORT]   ✓ Downloaded: TESTCASE_EXECUTION_SUMMARY_BY_LABEL_TABULAR_VIEW.csv (2,770 bytes)
+[REPORT] Phase 3: Regression reports
+[REPORT]   → Navigate to Test Report > By Execution Assignee
+[API-CAPTURE] POST https://jira.charter.com/rest/qtm4j/ui/latest/gadgets/filter/suggestions/customfields → 200
+[API-CAPTURE] POST https://jira.charter.com/rest/qtm4j/ui/latest/gadgets/filter/search → 200
+[REPORT]   Ready
+[REPORT]   Filter: QMMDA-TR-119
+[REPORT]   Generate clicked
+[API-CAPTURE] POST https://jira.charter.com/rest/qtm4j/ui/latest/gadgets/TESTCASE_EXECUTION_SUMMARY_BY_ASSIGNEE → 200
+[API-CAPTURE] PUT https://jira.charter.com/rest/qtm4j/ui/latest/preferences → 204
+[REPORT]   Export CSV (reg_assignee)...
+[REPORT]   ⚠ Regression By Assignee failed: Tabular button not found — continuing
+[REPORT]   → Navigate to Test Report > By Execution Assignee
+[REPORT]   Ready
+[REPORT]   → Click By Label (under Test Execution Reports)
+[REPORT]   Found 2 "By Label" nodes in tree
+[API-CAPTURE] POST https://jira.charter.com/rest/qtm4j/ui/latest/gadgets/filter/suggestions/customfields → 200
+[API-CAPTURE] POST https://jira.charter.com/rest/qtm4j/ui/latest/gadgets/filter/search → 200
+[REPORT]   Clicked 2nd "By Label" (Test Execution Reports)
+[REPORT]   Filter: QMMDA-TR-119
+[REPORT]   Generate clicked
+[API-CAPTURE] POST https://jira.charter.com/rest/qtm4j/ui/latest/gadgets/TESTCASE_EXECUTION_SUMMARY_BY_LABEL → 200
+[API-CAPTURE] PUT https://jira.charter.com/rest/qtm4j/ui/latest/preferences → 204
+[REPORT]   Export CSV (reg_label)...
+[REPORT]   Tabular clicked
+[REPORT]   Export clicked
+[REPORT]   CSV clicked
+[REPORT]   ✓ Downloaded: TESTCASE_EXECUTION_SUMMARY_BY_LABEL_TABULAR_VIEW.csv (268 bytes)
+[REPORT] Phase 4: Cycle Pie Charts
+[REPORT]   → Navigate to Test Report > By Test Cycle
+[API-CAPTURE] GET https://jira.charter.com/rest/qtm4j/ui/latest/preferences?key=TESTCASE_EXECUTION_SUMMARY_BY_TEST_CYCLE → 200
+[API-CAPTURE] POST https://jira.charter.com/rest/qtm4j/ui/latest/gadgets/filter/search → 200
+[API-CAPTURE] POST https://jira.charter.com/rest/qtm4j/ui/latest/gadgets/filter/suggestions/customfields → 200
+[REPORT]   Filter: QMMDA-TR-118,QMMDA-TR-119
+[REPORT]   Generate clicked
+[API-CAPTURE] PUT https://jira.charter.com/rest/qtm4j/ui/latest/preferences → 204
+[API-CAPTURE] POST https://jira.charter.com/rest/qtm4j/ui/latest/gadgets/TESTCASE_EXECUTION_SUMMARY_BY_TEST_CYCLE → 200
+[REPORT]   Pie screenshot: progression (QMMDA-TR-118)
+[REPORT]   ✓ Saved: cycle_pie_progression_54.2.png
+[REPORT]   Pie screenshot: regression (QMMDA-TR-119)
+[REPORT]   ✓ Saved: cycle_pie_regression_54.2.png
+[REPORT] ✅ Complete — 3 CSVs exported
+[REPORT]   prog_assignee: C:\Users\P3314665\Downloads\TESTCASE_EXECUTION_SUMMARY_BY_ASSIGNEE_TABULAR_VIEW.csv
+[REPORT]   prog_label: C:\Users\P3314665\Downloads\TESTCASE_EXECUTION_SUMMARY_BY_LABEL_TABULAR_VIEW.csv
+[REPORT]   reg_label: C:\Users\P3314665\Downloads\TESTCASE_EXECUTION_SUMMARY_BY_LABEL_TABULAR_VIEW.csv
+[REPORT] Duration: 90.7s
+[API-CAPTURE] Flushed 91 new + 89 existing = 94 total endpoints → qmetry_api_cache.json
+[BROWSER] Closing browser...
+[BROWSER] Browser closed successfully
+
+[ORCH] Phase 3: Post-data processing...
+[ORCH] Data validation skipped (error): '>' not supported between instances of 'str' and 'int'
+[OK] Cycle report slides added
+[OK] Current Open Defects slide added
+[OK] PPT saved: C:\Users\P3314665\Documents\mcp-jira-server\artifacts\MDA_QA_TMobile_INTG_Weekly_Status_20260526_210557.pptx
+[ARTIFACTS] Purging files older than 14 days (before 2026-05-12)
+[ARTIFACTS] [PURGED] 0 files (0.0 MB), 301 skipped, 0 errors
+[NOTIFY] Notifications disabled — skipping
+
+════════════════════════════════════════════════════════════
+  Run 2f2b09d7 complete: SUCCESS
+  Duration: 2m 39s (159.4s total)
+  Artifacts: 4 | Errors: 0
+════════════════════════════════════════════════════════════

@@ -112,6 +112,29 @@ def analyze_and_suggest(feature_name: str, feature_id: str,
     dedup_threshold = 0.7 if ftype in ('ui_portal', 'hybrid') else 0.5
     unique = []
     for s in suggestions:
+        # Auto-assign test_category if not explicitly set
+        if 'test_category' not in s:
+            _cat = s.get('category', '').lower()
+            _title = s.get('title', '').lower()
+            if 'happy path' in _cat:
+                s['test_category'] = 'Cat1-HappyPath'
+            elif 'negative' in _cat and any(kw in _title for kw in ['auth', 'header', 'token', '401', '403']):
+                s['test_category'] = 'Cat3-Auth'
+            elif 'negative' in _cat and any(kw in _title for kw in ['invalid', 'missing', 'empty', 'null', 'reject']):
+                s['test_category'] = 'Cat2-InputValidation'
+            elif 'negative' in _cat:
+                s['test_category'] = 'Cat2-InputValidation'
+            elif 'edge' in _cat or 'boundary' in _cat:
+                s['test_category'] = 'Cat4-EdgeCase'
+            elif 'regression' in _cat:
+                s['test_category'] = 'Cat1-HappyPath'
+            elif any(kw in _title for kw in ['adaptor', 'downstream', 'syniverse', 'backend']):
+                s['test_category'] = 'Cat7-Adaptor'
+            elif any(kw in _title for kw in ['config', 'feature flag', 'cr-', 'rule']):
+                s['test_category'] = 'Cat5-ConfigDriven'
+            else:
+                s['test_category'] = 'Cat1-HappyPath'
+
         title_words = set(re.findall(r'\b\w{5,}\b', s['title'].lower()))
         # Remove common UI words from dedup check — they appear everywhere
         _common = {'verify', 'validate', 'portal', 'screen', 'subscriber', 'nbop',
@@ -199,6 +222,7 @@ def _core_qa_thinking(fname, ftype, ctx, existing):
                 'description': 'Navigate to %s screen via NBOP menu. '
                                'Verify screen loads correctly with all expected fields and labels.' % fname,
                 'category': 'Happy Path',
+                'test_category': 'Cat1-HappyPath',
                 'reasoning': 'If users cannot reach the screen via the menu, the feature is unusable.',
             })
         if 'valid mdn' not in existing and 'search' not in existing and 'lookup' not in existing:
@@ -207,6 +231,7 @@ def _core_qa_thinking(fname, ftype, ctx, existing):
                 'description': 'Enter a valid MDN on %s screen and submit. '
                                'Verify correct data is returned and displayed in the portal.' % fname,
                 'category': 'Happy Path',
+                'test_category': 'Cat1-HappyPath',
                 'reasoning': 'The primary user action — search/lookup must return correct data.',
             })
         if 'invalid' not in existing or 'error' not in existing:
@@ -215,6 +240,7 @@ def _core_qa_thinking(fname, ftype, ctx, existing):
                 'description': 'Enter invalid MDN (non-numeric, too short, too long) on %s screen. '
                                'Verify appropriate error message displayed — no crash or blank screen.' % fname,
                 'category': 'Negative',
+                'test_category': 'Cat2-InputValidation',
                 'reasoning': 'Users type wrong data. UI must show clear error, not crash.',
             })
         return s
@@ -229,6 +255,7 @@ def _core_qa_thinking(fname, ftype, ctx, existing):
             'description': 'Trigger %s with all valid parameters via %s. '
                            'Verify NSL accepts request, TMO responds, and operation completes end-to-end.' % (fname, _channel),
             'category': 'Happy Path',
+            'test_category': 'Cat1-HappyPath',
             'reasoning': 'Basic sanity — does the feature work on the primary channel?',
         })
 
@@ -239,6 +266,7 @@ def _core_qa_thinking(fname, ftype, ctx, existing):
             'description': 'Trigger %s for an MDN, then immediately trigger again before first completes. '
                            'Second request should be rejected or queued, not create duplicate records.' % fname,
             'category': 'Edge Case',
+            'test_category': 'Cat4-EdgeCase',
             'reasoning': 'Duplicate requests happen in production from retries and network glitches.',
         })
 
@@ -249,6 +277,7 @@ def _core_qa_thinking(fname, ftype, ctx, existing):
             'description': 'After %s, query NSL DB directly. Verify no orphaned records, '
                            'no mismatched foreign keys, all timestamps correct.' % fname,
             'category': 'Happy Path',
+            'test_category': 'Cat1-HappyPath',
             'reasoning': 'Inconsistent DB state is the #1 production bug. Every operation must leave clean data.',
         })
 
@@ -269,6 +298,7 @@ def _api_crud_thinking(fname, ctx, existing):
             'description': 'Verify %s response includes transactionId, rootTransactionId, status, '
                            'timestamp, and all fields per API spec. No null values for required fields.' % fname,
             'category': 'Happy Path',
+            'test_category': 'Cat1-HappyPath',
             'reasoning': 'Downstream consumers parse the response. Missing fields break integrations silently.',
         })
 
@@ -279,6 +309,7 @@ def _api_crud_thinking(fname, ctx, existing):
             'description': 'Simulate TMO not responding within SLA timeout during %s. '
                            'Verify NSL retries per config, then returns appropriate error. No data corruption.' % fname,
             'category': 'Negative',
+            'test_category': 'Cat2-InputValidation',
             'reasoning': 'TMO timeouts are the #1 production issue. Every external call can timeout.',
         })
 
@@ -289,6 +320,7 @@ def _api_crud_thinking(fname, ctx, existing):
             'description': 'Simulate failure after NSL sends request to TMO but before receiving response during %s. '
                            'Verify rollback restores original state. No partial updates in DB.' % fname,
             'category': 'Negative',
+            'test_category': 'Cat4-EdgeCase',
             'reasoning': 'Multi-step operations can fail at any point. Each failure point needs rollback.',
         })
 

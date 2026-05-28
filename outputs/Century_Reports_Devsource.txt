@@ -1,0 +1,2210 @@
+
+<!DOCTYPE HTML>
+<html>
+<head>
+<meta http-equiv="X-UA-Compatible" content="IE=edge" />
+<meta http-equiv="Cache-Control" content="no-cache"/>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<title>Reports</title>
+<link  rel="shortcut icon"  href="modular/images/icons/favicon.ico" type="image/x-icon">
+<script src="modular/bootstrap-4.0.0/js/jquery-3.6.0.js"></script>
+<link rel="stylesheet" href="modular/ext-7.0.0/classic/theme-neptune/resources/theme-neptune-all.css" type="text/css">
+<link rel="stylesheet" href="modular/assets/resources/css/common.css" type="text/css">
+<link rel="stylesheet" href="modular/assets/resources/css/century.css" type="text/css">
+<link rel="stylesheet" href="modular/assets/resources/css/chatbot.css" type="text/css">
+
+<script src="modular/graphicalDashboard/js/jquery-ui-drag.js"></script>
+<script src="modular/graphicalDashboard/js/jquery.blockUI.js"></script>
+<script type="text/javascript" src="modular/centurylayout/js/jquery.tinycarousel.js"></script>
+<!--<link rel="stylesheet" href="modular/centurylayout/css/bootstrap-modal.css" type="text/css">
+<script src="modular/centurylayout/js/bootstrap-modal.min.js"></script>
+<link rel="stylesheet" type="text/css" href="modular/Century-all.css" />
+<link rel="stylesheet" type="text/css" href="modular/century.css" />-->
+<script type="text/javascript" src="modular/ext-7.0.0/ext-all.js"></script>
+<script type="text/javascript" src="modular/ext-7.0.0/classic/theme-neptune/theme-neptune.js"></script>
+<script language="javascript" src="modular/common.js" type="text/javascript"></script>
+<script type="text/javascript" src="modular/LayoutPage.js"></script>
+<script type='text/javascript' src='/centuryreports/dwr/engine.js'></script>
+<script type='text/javascript' src='/centuryreports/dwr/interface/EurekaDWR.js'></script>
+<script type='text/javascript' src='/centuryreports/dwr/util.js'></script> 
+ 
+<script type="text/javascript">
+
+var OMWindow;
+var loopCounter;
+
+function checkPage(url,domainURL) {
+		loopCounter++;
+	try{
+	
+		if(loopCounter == 60){
+			OMWindow.location.href = url;
+			return;			// maximum recursion loop run time exceeded;
+		}
+		if(!OMWindow){
+			console.info('OMWindow is not a object');
+			return;
+		}
+		var isOpera = !!window.opera || navigator.userAgent.indexOf(' OPR/') >= 0;
+		var isChrome = !!window.chrome && !isOpera;   
+		console.info('isChrome'+isChrome);
+		if(isChrome){
+		
+			console.info(OMWindow.document.getElementById('applicationName')); //checks the OMpage loadin is completed
+		if (OMWindow.document.getElementById('applicationName')) {
+			OMWindow.location.href = url; // if loading completed then the URL is changed to the actuall worklistpage or taskpage URL
+				return ;
+		}
+		else{
+		setTimeout(function(){
+			checkPage(url,domainURL);
+		},1000);  // calls the method recursively for every 1 sec and checks if the OM page is loaded
+			return;
+	}
+		
+	}
+	else{
+	
+		console.info(OMWindow.document.readyState); //checks the OMpage loadin is completed
+		if (OMWindow.document.readyState == 'complete' || OMWindow.document.readyState === "interactive") {
+			OMWindow.location.href = url; // if loading completed then the URL is changed to the actuall worklistpage or taskpage URL
+				return ;
+		}
+		else{
+		setTimeout(function(){
+			checkPage(url,domainURL);
+		},1000);  // calls the method recursively for every 1 sec and checks if the OM page is loaded
+			return;
+	}
+	
+	}
+	}
+	catch(err){
+		console.info('error in opening the window');
+		console.info(err);
+		OMWindow.location.href = domainURL+url; // changes the OM page URL to the actual worklistpage or taskpage URL
+		return;
+	}
+}
+
+function checkPageUrl(form) {
+		loopCounter++;
+	try{
+	
+		if(loopCounter == 60){
+			form.submit();
+			return;			// maximum recursion loop run time exceeded;
+		}
+		if(!OMWindow){
+			console.info('OMWindow is not a object');
+			return;
+		}
+		var isOpera = !!window.opera || navigator.userAgent.indexOf(' OPR/') >= 0;
+		var isChrome = !!window.chrome && !isOpera;   
+		console.info('isChrome'+isChrome);
+		if(isChrome){
+		
+			console.info(OMWindow.document.getElementById('applicationName')); //checks the OMpage loadin is completed
+		if (OMWindow.document.getElementById('applicationName')) {
+	/* 		OMWindow.location.href = url; // if loading completed then the URL is changed to the actuall worklistpage or taskpage URL */
+			form.submit();
+				return ;
+		}
+		else{
+		setTimeout(function(){
+			checkPageUrl(form);
+		},1000);  // calls the method recursively for every 1 sec and checks if the OM page is loaded
+			return;
+	}
+		
+	}
+	else{
+	
+		console.info(OMWindow.document.readyState); //checks the OMpage loadin is completed
+		if (OMWindow.document.readyState == 'complete' || OMWindow.document.readyState === "interactive") {
+			/* OMWindow.location.href = url; // if loading completed then the URL is changed to the actuall worklistpage or taskpage URL */
+			form.submit();
+				return ;
+		}
+		else{
+		setTimeout(function(){
+			checkPageUrl(form);
+		},1000);  // calls the method recursively for every 1 sec and checks if the OM page is loaded
+			return;
+	}
+	
+	}
+	}
+	catch(err){
+		console.info('error in opening the window');
+		console.info(err);
+/* 		OMWindow.location.href = url; // changes the OM page URL to the actual worklistpage or taskpage URL */
+form.submit();
+		return;
+	}
+}
+	
+	
+	
+function spotToggle(value){
+    if(value=="true"){
+            try
+            {
+            var inputObjleft = document.getElementsByTagName('input');
+            var inputObjheader = parent.document.getElementsByTagName('input');
+            for(var i=0;i<inputObjleft.length;i++)
+                {
+                    if(inputObjleft[i].id=="toAcces")
+                    {
+                        inputObjleft[i].value="true";
+                        inputObjleft[i].focus();
+                        break;
+
+                    }
+
+                }
+                for(var i=0;i<inputObjheader.length;i++)
+                {
+                    if(inputObjheader[i].id=="toAcces")
+                    {
+                        inputObjheader[i].value="true";
+                        inputObjheader[i].focus();
+                        break;
+                    }
+                }
+            }
+            catch(e)
+            {
+                alert(e.message);
+            }
+
+    } else {
+            try
+            {
+            var inputObjleft = document.getElementsByTagName('input');
+            var inputObjheader = parent.document.getElementsByTagName('input');
+
+            for(var i=0;i<inputObjleft.length;i++)
+                {
+                    if(inputObjleft[i].id=="toAcces")
+                    {
+                        inputObjleft[i].value="false";
+                        inputObjleft[i].focus();
+                        break;
+                    }
+                }
+                for(var i=0;i<inputObjheader.length;i++)
+                {
+                    if(inputObjheader[i].id=="toAcces")
+                    {
+                        inputObjheader[i].value="false";
+                        inputObjheader[i].focus();
+                        break;
+                    }
+                }
+            }
+            catch(e)
+            {
+                alert(e.message);
+            }
+
+        }
+}
+</script>
+<style>
+.x-panel-body { overflow:hidden !important; }
+/* (V) >>>> adding some additional css >>>>>> start*/
+#breadcrumb {
+	background-attachment: scroll !important;
+	background-clip: border-box !important;
+	background-color: transparent !important;
+	/*    background-image: url("modular/CenturyUIFrameWork/resources/images/default/panel/white-top-bottom.gif") !important; */
+    background-origin: padding-box !important;
+	background-position: 0 -1px !important;
+	background-repeat: repeat-x !important;
+	background-size: auto auto !important;
+}
+#mainPane ul, #mainPane li {
+	list-style-type:none;
+	padding:0;
+	margin:0;
+}
+#crumbs {
+	height:2.3em;
+	/* border:1px solid #dedede; */
+   border-bottom:1px solid #99BBE8;
+}
+#crumbs li {
+	float:left;
+	line-height:2.3em;
+	color:#013677;
+	padding-left:.75em;
+}
+#crumbs li a {
+	/*
+modular/images/crumbs.gif
+
+*/
+
+    background: url("modular/images/arrow11.png") no-repeat right center !important;
+	display:block;
+	padding:0 15px 0 0;
+	color: #013677;
+}
+#crumbs li a:link, #crumbs li a:visited {
+	color:#013677;
+	text-decoration:none;
+}
+a:link, a:visited {
+ color:#04408C;
+}
+a { text-decoration:none!important; }
+#container-head {
+	position:fixed;
+	background:#FFF;
+	top:135px;
+	left:0;
+	bottom:0px;
+	right:0;
+}
+.x-layer {
+    visibility: visible;
+}
+
+.loader {
+  font-size: 10px;
+  position: relative;
+  text-indent: -9999em;
+  border-top: .5em solid rgba(214, 220, 228, 0.5);
+  border-right: .5em solid rgba(214, 220, 228, 0.5);
+  border-bottom: .5em solid rgba(214, 220, 228, 0.5);
+  border-left: .5em solid #51bcf6;
+  -webkit-transform: translateZ(0);
+  -ms-transform: translateZ(0);
+  transform: translateZ(0);
+  -webkit-animation: load8 1.1s infinite linear;
+  animation: load8 1.1s infinite linear;
+  margin:10px auto;
+}
+.loader,
+.loader:after {
+  border-radius: 50%;
+  width: 7em;
+  height: 7em;
+}
+@-webkit-keyframes load8 {
+  0% {
+    -webkit-transform: rotate(0deg);
+    transform: rotate(0deg);
+  }
+  100% {
+    -webkit-transform: rotate(360deg);
+    transform: rotate(360deg);
+  }
+}
+@keyframes load8 {
+  0% {
+    -webkit-transform: rotate(0deg);
+    transform: rotate(0deg);
+  }
+  100% {
+    -webkit-transform: rotate(360deg);
+    transform: rotate(360deg);
+  }
+}
+
+.modal-content{ border-radius: 2px; border:0px solid; box-shadow:none;}
+.modal-dialog{
+    transform: translate(0px, 141%) !important;
+}
+#notificationModel {
+    font-family: "Roboto", Helvetica, Arial, sans-serif;
+    font-size: 13px !important;
+    background-color: #3f67c0;
+    color: white;
+    float: right;
+    font-size: 16px;
+    padding: 6px 10px;
+    border: 1px;
+    display: none;
+    position: fixed;
+    bottom: 15px;
+    right: 35px;
+    z-index: 99999999;
+    max-width: 350px;
+}
+
+.horizontal-dot {
+    font-size: 40px;
+    line-height: 0;
+    vertical-align: top !important;
+    font-family: initial;
+    letter-spacing: -1px;
+}
+
+
+#notificationModel span {
+    word-wrap: break-word;
+    word-break: break-all;
+    display: table-cell;
+    padding: 0 5px;
+    vertical-align: middle;
+}
+
+
+#notificationModel span.glyphicon {
+    width: 25px;
+    font-size: 18px;
+    vertical-align: middle;
+    padding: 7px 0px;
+}
+
+#notificationModel span.message {
+    word-wrap: break-word;
+    background-image: none;
+    margin-left: 5px;
+}
+.message-icon {
+    width: 40px;
+    height: 40px;
+    background: #4085F6;
+    line-height: 40px;
+    text-align: center;
+    color: #fff;
+    font-size: 20px;
+    border-radius: 50%;
+    position: fixed;
+    bottom: 30px;
+    right: 30px;
+    cursor: pointer;
+    display: none;
+}
+</style>
+</head>
+
+<body class="base-container base-container--layout" style="overflow:hidden" onload="loadSessionTimer();" 
+    onmousemove="callTimeOut('','//:/cas/logout?service=//:/centuryreports');" 
+    onClick="resetSessionTimer();" 
+    onblur="callTimeOut('','//:/cas/logout?service=//:/centuryreports');">
+	
+	<div class="modal fade" id="homeMask"  role="dialog">
+  <div class="modal-dialog  modal-vertical-centered">
+    <div class="modal-content">
+	
+	
+	<div  style="display:block"> <div style="position: absolute; top: 0px;  margin: 423px 253px 0px; z-index:1;"><div class="loader" ></div><span style="font-size:10px; color:#E5E4E2; text-transform:uppercase" >Please wait...</span></div></div>
+	</div>
+	</div>
+	</div>
+	
+	<div id="notificationModel" class="tool">
+	<span>EXPORT IN PROGRESS</span>
+	<span class="horizontal-dot">...</span></div>
+
+	
+	
+<form name="layoutForm">
+
+<div id="header">
+<!DOCTYPE html>
+
+
+
+
+<html lang="en">
+<head>
+<style type="text/css">
+.toolbarOverlay {
+    display: none;
+    background: #fff;
+    opacity: .5;
+    filter: Alpha(OPACITY=50);
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    right: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 999
+}
+.toolbarWhole {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    right: 0;
+    width: 1px;
+    z-index: 1000
+}
+.toolbarWhole > .panel-default {
+    border: 0px solid #ddd;
+    border-radius: 0;
+    box-shadow: none;
+}
+.toolbarWhole > .panel-default > .panel-heading {
+    background-color: #182856;
+    border-color: #fff;
+    color: #fff;
+    font-weight: 700;
+    font-size: 14px;
+    text-transform: uppercase
+}
+.toolbarWhole > .panel-default > .panel-body {
+    padding: 0px;
+    height: 225px;
+    overflow-y: auto;
+    padding: 0;
+    position: relative
+}
+.list-group-item {
+    border: 0;
+    font-size: 12px;
+    color: #5c6165;
+    font-weight: 700;
+}
+.list-group-item:nth-child(odd) {
+    background-color: #e8e8e8;
+}
+.toolbarWhole .glyphicon {
+    color: #50b9f4;
+    margin-right: 10px;
+    font-size: 16px;
+}
+.list-group-item {
+    padding: 4px 10px !important;
+    border: 1px solid #ededed !important;
+}
+.toolBar {
+    height: 120px;
+    margin-top: -60px;
+    position: absolute;
+    left: auto;
+    right: -20px !important;
+    top: 50%;
+    width: 60px;
+}
+.toolBar a {
+    margin: 1px;
+    padding: 8px;
+    background-color: #182856;
+    border-radius: 0;
+    border-top-left-radius: 5px;
+    border-bottom-left-radius: 5px;
+    border: 0;
+}
+.toolBar a .glyphicon {
+    color: #fff
+}
+.toolBar a img {
+    width: 100%;
+    display: block
+}
+#recentviewContent {
+    position: absolute;
+    top: 50%;
+    width: 250px;
+    margin-top: -288px;
+    height: 280px;
+    right: -300px;
+    z-index: 99999;
+}
+#recentactContent {
+    position: absolute;
+    top: 48%;
+    width: 250px;
+    margin-top: 0px;
+    height: 280px;
+    right: -300px;
+    z-index: 99999;
+}
+#dummyIcon {
+    position: absolute;
+}
+#recentActivities {
+    height: 218px !important;
+}
+.modal-dialog {
+    margin: 15px auto !important;
+}
+.modal-header {
+    background: rgba(0, 0, 0, 0) none repeat scroll 0 0;
+    border-bottom: 1px solid #e5e5e5 !important;
+    min-height: 16.4286px !important;
+    padding: 15px !important;
+}
+.modal-title {
+    font-size: 14px;
+    font-weight: 700;
+    color: #607081;
+    text-transform: uppercase;
+}
+.modal-content {
+    border-radius: 2px;
+    border: 0px solid;
+    box-shadow: none;
+}
+.modal-body .form-control {
+    height: 30px;
+    padding: 0px 5px;
+    font-size: 12px;
+    border-radius: 1px;
+    box-shadow: none;
+}
+.modal-body select.form-control {
+    padding: 0px 0px 0px 5px;
+}
+.modal-footer .btn {
+    min-width: 100px;
+}
+.bg-white {padding-right: 0px !important;}
+ul.profile li a {
+    color: #768696;
+    font-size: 12px;
+    font-weight: 500;
+    margin-bottom: 0;
+    margin-left: 0;
+    margin-right: 0;
+    margin-top: 0;
+    padding-bottom: 0;
+    padding-left: 0;
+    padding-right: 0;
+    padding-top: 0;
+}
+.btn-primary-navigation {
+    background-color: #51bcf6;
+    border-bottom-color: #51bcf6;
+    border-left-color: #51bcf6;
+    border-right-color: #51bcf6;
+    border-top-color: #51bcf6;
+    color: #fff;
+}
+.modal-header1 {
+    padding: 8px !important;
+    background-color: #f2f2f2 !important;
+    border-color: #dadada !important;
+    border-radius: 4px 4px 0px 0px !important;
+}
+.modal-vertical-centered-e {
+    transform: translate(0, 140%) !important;
+    -ms-transform: translate(0, 140%) !important; /* IE 9 */
+    -webkit-transform: translate(0, 140%) !important; /* Safari and Chrome */
+}
+.modal-title-t {
+    color: #607081 !important;
+    font-weight: 900;
+    color: #fff;
+    font-size: 12px;
+    line-height: 15px;
+    text-transform: uppercase !important;
+font-family: "Roboto", Helvetica, Arial, sans-serif !!!important;
+}
+.loader {
+    font-size: 10px;
+    position: relative;
+    text-indent: -9999em;
+    border-top: .5em solid rgba(214, 220, 228, 0.5);
+    border-right: .5em solid rgba(214, 220, 228, 0.5);
+    border-bottom: .5em solid rgba(214, 220, 228, 0.5);
+    border-left: .5em solid #51bcf6;
+    -webkit-transform: translateZ(0);
+    -ms-transform: translateZ(0);
+    transform: translateZ(0);
+    -webkit-animation: load8 1.1s infinite linear;
+    animation: load8 1.1s infinite linear;
+    margin: 10px auto;
+}
+.loader, .loader:after {
+    border-radius: 50%;
+    width: 7em;
+    height: 7em;
+}
+.btn-primary2 {
+    background-color: #51bcf6 !important;
+    border-color: #51bcf6 !important;
+    min-width: 110px !important;
+    font-weight: 900 !important;
+    line-height: 1.5 !important;
+    padding: 5px 10px !important;
+    color: #fff !important;
+}
+#reportModalDetails .modal-header {
+    background-color: #51bcf6 !important;
+    font-weight: bold;
+    padding: 10px 15px;
+    text-transform: uppercase;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+}
+.wrap-thumb {
+    border: 2px solid #51bcf6;
+    padding: 10px 10px 0px 10px;
+    border-top: 0px;
+    border-radius: 0px 0px 3px 3px;
+}
+.view-table table tr th {
+    background: #e0e0e0;
+    font-size: 11px;
+}
+.view-table table tr td {
+    font-size: 11px;
+}
+.view-table table tr:nth-child(even) {
+    background: #f5f5f5
+}
+.view-table table tr td:nth-child(2) {
+    text-align: center;
+}
+#timeStandard {
+    width: 200px;
+}
+#timeStandard option {
+    width: 200px;
+}
+.buttonCls {
+    font-family: 'Roboto', sans-serif;
+    padding: 6px 12px;
+    margin-bottom: 0;
+    font-size: 11px;
+    font-weight: 500;
+    line-height: 1.42857143;
+    text-align: center;
+    white-space: nowrap;
+    vertical-align: middle;
+    cursor: pointer;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    right: -122px;
+    bottom: -80px;
+    height: 30px;
+}
+/****** changes report details ****/
+#reportModalDetails {
+    width: 100%;
+    z-index: 999999999 !important
+}
+#reportModalContent.modal-content {
+    position: absolute;
+    width: 100%;
+    top: 0
+}
+#reportModalHeader.modal-header1 .modal-title {
+    color: #fff !important
+}
+.wrap-thumb1 {
+    border: 2px solid #51bcf6
+}
+#user .list-group-item, #group .list-group-item, #viewedUser .list-group-item {
+    border: 0
+}
+#user .list-group-item:nth-child(odd), #group .list-group-item:nth-child(odd), #viewedUser .list-group-item:nth-child(odd) {
+    background-color: #fff
+}
+#user .list-group-item:nth-child(even), #group .list-group-item:nth-child(even), #viewedUser .list-group-item:nth-child(even) {
+    background-color: #dadada
+}
+#details .form-horizontal .control-label {
+    padding-top: 4px;
+    text-align: left
+}
+#details .divider {
+    border-top: 2px solid #51bcf6;
+    margin-top: 0px;
+    margin-bottom: 0
+}
+#details .form-horizontal p {
+    line-height: 1.9
+}
+#listOfPubTo, #listOfViewBy {
+    height: 110px;
+    padding: 0;
+    overflow: auto;
+}
+#listOfPubTo .list-group-item, #listOfViewBy .list-group-item {
+    padding: 5px 10px
+} 
+
+#mainMenus li:hover .dropdown-menu {
+display: block;
+}
+
+/****** /changes report details ****/
+</style>
+<meta http-equiv="X-UA-Compatible" content="IE=edge" >
+<meta charset="utf-8">
+<meta name="viewport" content="initial-scale=1,user-scalable=no,maximum-scale=1">
+<link href="modular/centurylayout/css/font-awesome.css" rel="stylesheet" type="text/css">
+<link href="modular/centurylayout/css/font-awesome.min.css" rel="stylesheet" type="text/css">
+<link href="modular/centurylayout/css/open-sans.css" rel="stylesheet" type="text/css">
+<link href="modular/graphicalDashboard/css/template.css" rel="stylesheet">
+<!--
+<link href="modular/graphicalDashboard/css/bootstrap.css" rel="stylesheet">
+<link rel="stylesheet" href="modular/centurylayout/css/bootstrap-modal.css" type="text/css">
+-->
+<link rel="stylesheet" href="modular/ext-7.0.0/classic/theme-neptune/resources/theme-neptune-all.css" type="text/css">
+<link rel="stylesheet" href="modular/bootstrap-4.0.0/css/bootstrap.min.css">
+<link rel="stylesheet" href="modular/centurylayout/css/perfect-scrollbar.css" type="text/css">
+<link  rel="shortcut icon"  href="modular/images/icons/favicon.ico" type="image/x-icon">
+<link rel="stylesheet" href="modular/centurylayout/css_new/custom.css" type="text/css">
+<script src="modular/Header.js"></script> 
+<script src="modular/LayoutPage.js"></script> 
+<script src="modular/common.js"></script> 
+<script type="text/javascript" src="modular/common/common.js"></script> 
+<script type="text/javascript" src="modular/ext-7.0.0/ext-all.js"></script> 
+<script type="text/javascript" src="modular/ext-7.0.0/classic/theme-neptune/theme-neptune.js"></script>
+<!--<script src="modular/graphicalDashboard/js/jquery-ui.js"></script>-->
+<script src="modular/jquery-ui-1.12.1/jquery-ui.min.js"></script>
+<link href="modular/graphicalDashboard/css/jquery-ui-custom.css" rel="stylesheet" />
+<script src = "modular/centurylayout/js/perfect-scrollbar.js"></script>
+<link rel="stylesheet" href="modular/graphicalDashboard/css/jquery.mCustomScrollbar.min.css">
+<link rel="stylesheet" href="modular/assets/resources/css/common.css" type="text/css">
+<link rel="stylesheet" href="modular/assets/resources/css/century.css" type="text/css">
+<script src="modular/graphicalDashboard/js/jquery.spinner.js"></script> 
+
+<!--
+<script src="modular/graphicalDashboard/js/jquery-2.1.1.min.js"></script> 
+<script src="modular/graphicalDashboard/js/bootstrap.min.js" type="text/javascript"></script> 
+<script src="modular/centurylayout/js/bootstrap-modal.min.js"></script> 
+
+--> 
+<script src="modular/bootstrap-4.0.0/js/jquery-3.6.0.js"></script>
+<script src="modular/centurylayout/js/bootstrap-hover-dropdown.min.js"></script> 
+<script src="modular/bootstrap-4.0.0/js/popper.min.js"></script>
+<script src="modular/bootstrap-4.0.0/js/bootstrap.min.js"></script>
+<script type="text/javascript" src="modular/graphicalDashboard/js/jquery.mCustomScrollbar.concat.min.js"></script>
+
+<!-- ADDED for grid in chat box -->
+<link rel="stylesheet" href="modular/graphicalDashboard/css/ui.jqgrid.css" />
+<link rel="stylesheet" href="modular/graphicalDashboard/css/jqGrid.overrides.css">
+
+<script src="modular/graphicalDashboard/js/i18n/grid.locale-en.js"></script> 
+<script src="modular/graphicalDashboard/js/jquery.jqGrid.min.js"></script> 
+ 
+<script type="text/javascript">
+    var applicationListJson = JSON.parse(JSON.stringify([{"url":"https://wireless-nsl.qa-uat.wtg.spectrum.net/centuryshield/,Century Shield","presentationOrder":0,"authority":"CS","presentationName":"Century Shield"},{"url":"/nboportal/,NBO Portal","presentationOrder":0,"authority":"NBO Portal","presentationName":"NBO Portal"}]));
+     var headerListJson = "<li class=\"dropdown active\" id=\"menuList1\"  role=\"presentation\"><a style=\"cursor:pointer;\" onClick=\"javascript:changeMainMenuIframeURL('/centuryreports/loadMyReport',this);\" class=\"dropdown-toggle\" data-hover=\"dropdown\" data-toggle=\"dropdown\" arial-expand=\"false\"><i class=icon-report></i><span>My <br> Reports</span></a></li><li class=\"dropdown\" id=\"menuList2\"  role=\"presentation\"><a style=\"cursor:pointer;\" onClick=\"javascript:changeMainMenuIframeURL('/centuryreports/loadViewDashboardPage',this);\" class=\"dropdown-toggle\" data-hover=\"dropdown\" data-toggle=\"dropdown\" arial-expand=\"false\"><i class=icon-dashboard></i><span>My <br> Dashboard</span></a><ul role=\"menu\" class=\"dropdown-menu dropdown-menu-default profile\"> <li><a href=\"#\" onClick=\"javascript:changeSubMenuIframeURL('/centuryreports/loadViewDashboardPage',this);\">My <br> Dashboard</a></li> <li><a href=\"#\" onClick=\"javascript:changeSubMenuIframeURL('/centuryreports/loadCreateDashboardPage',this);\">Create Dashboard</a></li> <li><a href=\"#\" onClick=\"javascript:changeSubMenuIframeURL('/centuryreports/loadPublishDashboardPage',this);\">Publish Dashboard</a></li></ul></li><li class=\"dropdown\" id=\"menuList3\"  role=\"presentation\"><a style=\"cursor:pointer;\" onClick=\"javascript:changeMainMenuIframeURL('/centuryreports/loadCreateReport',this);\" class=\"dropdown-toggle\" data-hover=\"dropdown\" data-toggle=\"dropdown\" arial-expand=\"false\"><i class=icon-manage></i><span>Manage <br> Report</span></a><ul role=\"menu\" class=\"dropdown-menu dropdown-menu-default profile\"> <li><a href=\"#\" onClick=\"javascript:changeSubMenuIframeURL('/centuryreports/loadCreateReport',this);\">Create Report</a></li> <li><a href=\"#\" onClick=\"javascript:changeSubMenuIframeURL('/centuryreports/loadInteractiveReport',this);\">Interactive Report</a></li> <li><a href=\"#\" onClick=\"javascript:changeSubMenuIframeURL('/centuryreports/loadCreateSuperReport',this);\">Create Super Report</a></li> <li><a href=\"#\" onClick=\"javascript:changeSubMenuIframeURL('/centuryreports/loadPublishReport',this);\">Publish Report</a></li></ul></li><li class=\"dropdown\" id=\"menuList4\"  role=\"presentation\"><a style=\"cursor:pointer;\" onClick=\"javascript:changeMainMenuIframeURL('/centuryreports/scheduler',this);\" class=\"dropdown-toggle\" data-hover=\"dropdown\" data-toggle=\"dropdown\" arial-expand=\"false\"><i class=icon-scheduler></i><span>My <br> Scheduler</span></a><ul role=\"menu\" class=\"dropdown-menu dropdown-menu-default profile\"> <li><a href=\"#\" onClick=\"javascript:changeSubMenuIframeURL('/centuryreports/scheduler',this);\">Schedule via mail/sftp</a></li> <li><a href=\"#\" onClick=\"javascript:changeSubMenuIframeURL('/centuryreports/loadSchedulerList',this);\">Manage Scheduler</a></li></ul></li><li class=\"dropdown\" id=\"menuList5\"  role=\"presentation\"><a style=\"cursor:pointer;\" onClick=\"javascript:changeMainMenuIframeURL('/centuryreports/loadViewLandingPage',this);\" class=\"dropdown-toggle\" data-hover=\"dropdown\" data-toggle=\"dropdown\" arial-expand=\"false\"><i class=icon-landing></i><span>Landing <br> Page</span></a><ul role=\"menu\" class=\"dropdown-menu dropdown-menu-default profile\"> <li><a href=\"#\" onClick=\"javascript:changeSubMenuIframeURL('/centuryreports/loadViewLandingPage',this);\">View Landing Page</a></li> <li><a href=\"#\" onClick=\"javascript:changeSubMenuIframeURL('/centuryreports/loadCreateLandingPage',this);\">Create Landing Page </a></li> <li><a href=\"#\" onClick=\"javascript:changeSubMenuIframeURL('/centuryreports/loadPublishLandingPage',this);\">Publish Landing Page </a></li></ul></li><li class=\"dropdown\" id=\"menuList6\"  role=\"presentation\"><a style=\"cursor:pointer;\" onClick=\"javascript:changeMainMenuIframeURL('/centuryreports/loadMyAdminPage',this);\" class=\"dropdown-toggle\" data-hover=\"dropdown\" data-toggle=\"dropdown\" arial-expand=\"false\"><i class=icon-admin></i><span>Admin <br> User</span></a><ul role=\"menu\" class=\"dropdown-menu dropdown-menu-default profile\"> <li><a href=\"#\" onClick=\"javascript:changeSubMenuIframeURL('/centuryreports/loadMyAdminPage',this);\">Admin User</a></li> <li><a href=\"#\" onClick=\"javascript:changeSubMenuIframeURL('/centuryreports/loadMyAdminPageConfig',this);\">Admin Config Menu</a></li> <li><a href=\"#\" onClick=\"javascript:changeSubMenuIframeURL('/centuryreports/loadExportConfigPage',this);\">Export Config</a></li> <li><a href=\"#\" onClick=\"javascript:changeSubMenuIframeURL('/centuryreports/loadImportConfigPage',this);\">Import Config</a></li> <li><a href=\"#\" onClick=\"javascript:changeSubMenuIframeURL('/centuryreports/loadReferenceConfigPage',this);\">Color Configuration</a></li></ul></li><li class=\"dropdown\" id=\"menuList7\"  role=\"presentation\"><a style=\"cursor:pointer;\" onClick=\"javascript:changeMainMenuIframeURL('/centuryreports/importExcel',this);\" class=\"dropdown-toggle\" data-hover=\"dropdown\" data-toggle=\"dropdown\" arial-expand=\"false\"><i class=icon-database></i><span>Import <br> Excel/CSV</span></a></li>";
+var rvIconArray = {};// stores recently viewed icons css
+rvIconArray['REPORT'] = 'glyphicon-list-alt';
+rvIconArray['DASHBOARD'] = 'glyphicon-dashboard';
+rvIconArray['LANDING'] = 'glyphicon-dashboard';
+var rvDeleteEntity = '<li class = "list-group-item"><span class="glyphicon glyphiconImage"></span>entityNewVal</li>'
+var rvEntity = '<li class = "list-group-item"><span class="glyphicon glyphiconImage"></span><a href="#" onClick="javascript:commonGotoEntityPage(\'entityId\',\'entityNewVal\',\'source\');">entityNewValue</a> </li>';
+	
+function buildAppListDiv(){ 
+	var appLi = '<a href="#" class="nav-link dropdown-toggle application" data-toggle="dropdown" data-close-others="true"></a>';
+    for(var i=0;i<applicationListJson.length;i++){
+      var newapplicationList = applicationListJson[i];
+    if(i == 0){
+       appLi+= '<ul class="dropdown-menu dropdown-menu-default profile" role="menu">';
+      }
+      appLi+= '<li><a href="#" onClick="javascript:loadApplication('+"'" +newapplicationList.url+ "'"+');" >'+newapplicationList.presentationName+'</a></li>';
+      if(i == applicationListJson.length - 1){
+       appLi+= '</ul>';
+      }
+    }
+	document.getElementById('applicationId').innerHTML = appLi;
+	
+	document.getElementById('mainMenus').innerHTML = headerListJson;
+	$('[data-hover="dropdown"]').dropdownHover();
+ }
+ $(document).ready(function(){
+  $('.dropdown-menu').on('click', function(){
+  event.cancelBubble = true;
+});
+	$(".leftSideNavigationMenu").mouseenter(function(){
+		$(".leftNavigationContainer,.btnCloseLeftNav,.leftNavigationOverlay").addClass("leftNavToggled");
+		$(this).addClass('open');
+		$('.dropdown-menu').removeClass('show');
+		$('.dropdown-menu').attr('style', '');
+	});
+	$(".subnavbar").mouseleave(function(){
+		//$(".leftNavigationContainer,.btnCloseLeftNav,.leftNavigationOverlay").removeClass("leftNavToggled");
+		//$(".leftSideNavigationMenu").removeClass('open');
+	});
+
+	$(document).on("click", ".leftSideNavigationMenu.open", function(){
+		$(".leftNavigationContainer,.btnCloseLeftNav,.leftNavigationOverlay").removeClass("leftNavToggled");
+		$(".leftSideNavigationMenu").removeClass('open');
+	});
+$("#recentView").on('click',function(){
+	loadrecentlyViewed();
+	
+$(".x-body").css('overflow','hidden');
+$(this).animate({marginLeft:"55px"});
+$("#recentAct").animate({"right": "-10px", "margin-top": "35px"});
+ $(".toolbarOverlay").fadeIn();
+$("#recentviewContent").animate({right:"-6px"});
+});
+
+$("#recentAct").on('click',function(){
+loadrecentlyActivity();
+$(".x-body").css('overflow','hidden');
+$(this).animate({marginLeft:"55px"});
+$("#recentView").animate({right:"-10px"});
+$(".toolbarOverlay").fadeIn();
+$("#recentactContent").animate({right:"-6px"});
+});
+
+$(".toolbarOverlay").on('click',function(){
+$("#recentactContent,#recentviewContent").animate({right:"-300px"});
+$(".toolbarOverlay").fadeOut();
+$(".x-body").css('overflow','');
+$(".toolBar a").animate({"right": "-10px", "margin": "1px"});
+$(".toolBar").animate({right:"-10px"});
+}); 	 	
+});
+
+	(function($){
+		$(window).on("load",function(){			
+			$(".scrollbar").mCustomScrollbar({
+				theme:"minimal-dark",
+				mouseWheel:{ preventDefault:true,scrollAmount:200 }
+			});
+			
+		});
+	})(jQuery);
+	
+
+	
+	function loadrecentlyViewed(){
+$('#recentViewMask').show();
+jQuery.ajax({
+
+//url: "landingAjax.exc?action=loadRecentlyViewed",
+url: "loadRecentlyViewed",
+type : 'POST',
+  dataType: "json",
+    success: function(restext){
+		$('#recentViewMask').hide();
+var recentlyViewedlistHtml="";
+			  					for (var i = 0 ; i < restext.length ; i++) {
+								var Obj =  restext[i];								
+								if(!Obj.isEntityAvailable)
+								{				
+								var deleteEntity = rvDeleteEntity.replace('glyphiconImage',rvIconArray[Obj.source]);
+								deleteEntity = deleteEntity.replace('entityNewVal',Obj.entityNewVal);
+								recentlyViewedlistHtml+= deleteEntity;
+								}
+								else
+								{
+			var viewedEntity = rvEntity.replace('glyphiconImage',rvIconArray[Obj.source]);
+								viewedEntity = viewedEntity.replace('entityId',Obj.entityId);
+								viewedEntity = viewedEntity.replace('entityNewVal',Obj.entityNewVal);
+								viewedEntity = viewedEntity.replace('source',Obj.source);
+								viewedEntity = viewedEntity.replace(/entityNewValue/g,Obj.entityNewVal);
+								recentlyViewedlistHtml+= viewedEntity;
+								}
+								
+								}
+							
+							$('#recentlyviewed').html(recentlyViewedlistHtml);
+							$(".scrollbar").perfectScrollbar();
+							
+if(restext.length==0)
+{
+recentlyViewedlistHtml+='<li class = "list-group-item valuenull">NO RECENTLY VIEWED ITEMS</li>'				
+$('#recentlyviewed').html(recentlyViewedlistHtml);
+}
+}
+
+
+});
+
+}
+
+function loadrecentlyActivity(){
+$('#activityMask').show();
+jQuery.ajax({
+//url: "landingAjax.exc?action=loadRecentActivity",
+url:"loadRecentActivity",
+type : 'POST',
+  dataType: "json",
+    success: function(restext){
+	$('#activityMask').hide();
+	var recentActivitylistHtml="";
+		 
+console.info("recentlyviewed stringify"+JSON.stringify(restext));
+
+			  					for (var i = 0 ; i < restext.length ; i++) {
+					 var Obj =  restext[i];		
+					var date = new Date(Obj.logTime+' UTC');			
+								console.info("inside list"+Obj.logDescription);
+								if(Obj.source == 'LANDING'){
+								var entityType = Obj.entityType.split('_');
+								Obj.entityType = entityType[0];
+								
+								}
+								
+								if(Obj.entityType == 'RENAME' || Obj.entityType == 'COPY' )
+								{
+								var description = Obj.logDescription.split(' ');
+								recentActivitylistHtml+='<li class = "list-group-item"><span class="glyphicon glyphicon-ok-circle"></span>'+'\''+Obj.entityOldVal+'\' '+Obj.source+' '+description[0]+' as '+'\''+Obj.entityNewVal+'\' '+' on '+formattedDate(date)+'</li>'
+								}
+								else{
+								recentActivitylistHtml+='<li class = "list-group-item"><span class="glyphicon glyphicon-ok-circle"></span>'+'\''+Obj.entityNewVal+'\' '+Obj.source+' '+Obj.logDescription+' on '+formattedDate(date)+'</li>'
+								}
+								}
+							//				});
+							$('#recentActivities').html(recentActivitylistHtml);
+							$(".scrollbar1").perfectScrollbar();
+							
+							
+if(restext.length==0)
+{
+recentActivitylistHtml+='<li class = "list-group-item valuenull">NO RECENT ACTIVITIES</li>'
+								$('#recentActivities').html(recentActivitylistHtml);
+							
+							}
+
+
+} });
+}
+	
+function createCommonForm(action){
+	var form = document.createElement("form");
+		form.setAttribute("method", "post");
+		form.setAttribute("action", action);
+		form.setAttribute("target", "RightFrame");
+		form.setAttribute("name", "commonActivityForm");
+		form.setAttribute("id", "commonActivityForm");
+return form;	
+}
+	
+function createElementForFormSubmit(elementName,defaultValue,formDocument){
+	var input = document.createElement('input');
+		input.type = 'hidden';
+		input.name = elementName;
+		input.value = defaultValue;
+		formDocument.appendChild(input);
+}
+	
+function commonGotoEntityPage(entityId,entityName,source)
+{
+	$(".toolbarOverlay").click();
+	homePageShowMask();
+
+jQuery.ajax({
+
+//url: "landingAjax.exc?action=loadEntityData",
+url: "loadEntityData",
+type : 'POST',
+  dataType: "json",
+  data:{source:source,entityId:entityId},
+    success: function(restext){
+		var url;
+		var commonForm;
+		var publishFlag = restext.publishFlag;
+	if(source=='REPORT')
+	{
+		var publishFolder="REPORTS"
+		if(publishFlag=="Y")
+			publishFolder="PUBLISHED REPORTS";
+
+		// url = 'MyReports.exc?action=loadMyReport&queryid='+entityId;
+		url = '/centuryreports/loadMyReport';
+		commonForm = createCommonForm(url);
+		createElementForFormSubmit('queryid',entityId,commonForm);
+		var nodeStr = entityId+'##DELIM##'+entityName+'##DELIM##'+restext.type;
+		createElementForFormSubmit('nodeString',nodeStr,commonForm);
+		createElementForFormSubmit('createdQueryId',entityId,commonForm);
+		createElementForFormSubmit('hidUpQueryId',entityId,commonForm);
+		createElementForFormSubmit('hidUpQueryName',entityName,commonForm);
+		createElementForFormSubmit('actionType',"edit",commonForm);
+		createElementForFormSubmit('viewCreated',"viewCreated",commonForm);
+		createElementForFormSubmit('sysDirName',publishFolder,commonForm);
+		commonChangeToEntityMenu("menuList1");
+	}else if(source=='DASHBOARD')
+	{	
+
+		//url='dynamicController.exc?action=loadViewDashboardPage&dashboardListingPageFlag=false&currentDashBoardId='+
+		//entityId+'&currentPage=Dashboard&mainTabName=Dashboard&backButtonFrom=dashboardListingPageFlag';
+		url='/centuryreports/loadViewDashboardPage';
+		commonForm = createCommonForm(url);
+		createElementForFormSubmit('dashboardListingPageFlag',false,commonForm);
+		createElementForFormSubmit('currentDashBoardId',entityId,commonForm);
+		createElementForFormSubmit('currentPage','Dashboard',commonForm);
+		createElementForFormSubmit('mainTabName', 'Dashboard',commonForm);
+		createElementForFormSubmit('backButtonFrom', 'dashboardListingPageFlag',commonForm);
+	
+		createElementForFormSubmit('dashboardName',entityName,commonForm);
+		if(publishFlag=="Y"){
+			var currDashTileData={"currentTileDataArray":[{"tileId":"14","tileType":"DASHBOARD","tileLevel":"2"}],"currentTilePath":""}
+			var currPubDashTileData={"currentTileDataArrayPD":[{"tileId":"17","tileType":"PUBLISH_DASHBOARD","tileLevel":"2"}],"currentTilePath":""}
+			currPubDashTileData.currentTilePath =entityName+"_"+restext.userName;
+			createElementForFormSubmit('currDashTileData',JSON.stringify(currDashTileData),commonForm);
+			createElementForFormSubmit('currPubDashTileData',JSON.stringify(currPubDashTileData),commonForm);
+			createElementForFormSubmit('listingPublishFlag',true,commonForm);
+		}
+		else
+			createElementForFormSubmit('listingPublishFlag',false,commonForm);
+		
+		commonChangeToEntityMenu("menuList2");
+	}else if(source=='LANDING'){
+		var appLicationName='Eureka';
+		
+		if(restext.type=="LANDING_DASHBOARD")
+			appLicationName='CPM';
+		//url='dynamicLandingController.exc?action=loadViewLandingPage&landingListingPageFlag=false&currentDashBoardId='
+		//+entityId+'&currentPage=Landing Page&mainTabName=Landing Page&backButtonFrom=landingListingPageFlag&applicationName='+appLicationName;
+		url='/centuryreports/loadViewLandingPage';
+		commonForm = createCommonForm(url);
+		createElementForFormSubmit('landingListingPageFlag',false,commonForm);
+		createElementForFormSubmit('currentDashBoardId',entityId,commonForm);
+		createElementForFormSubmit('currentPage','Landing Page',commonForm);
+		createElementForFormSubmit('mainTabName','Landing Page',commonForm);
+		createElementForFormSubmit('backButtonFrom','landingListingPageFlag',commonForm);
+		createElementForFormSubmit('applicationName',appLicationName,commonForm);
+				
+		createElementForFormSubmit('listingPublishFlag',publishFlag,commonForm);
+		createElementForFormSubmit('dashboardName',entityName,commonForm);
+		createElementForFormSubmit('currentTab',"PUBLISH_LANDING",commonForm);
+		if(publishFlag=="Y")
+		{		
+	var currDashTileData = {"currentTileDataArray":[{"tileId":"16","tileType":"LANDING_DASHBOARD","tileLevel":"2"}],"currentTilePath":""};
+	var currPubDashTileData = {"currentTileDataArrayPD":[{"tileId":"18","tileType":"PUBLISH_LANDING","tileLevel":"2"}],"currentTilePath":""};
+		currPubDashTileData.currentTilePath=entityName+"_"+restext.userName;
+		createElementForFormSubmit('currDashTileData',JSON.stringify(currDashTileData),commonForm);
+		createElementForFormSubmit('currPubDashTileData',JSON.stringify(currPubDashTileData),commonForm);
+	}
+		commonChangeToEntityMenu("menuList7");
+	}
+	document.body.appendChild(commonForm);
+	commonForm.submit();
+}
+})
+}
+
+function commonChangeToEntityMenu(menuItem){
+var searchEles = window.parent.document.getElementById('mainMenus').children; 
+                for(var i = 0; i < searchEles.length; i++) {
+                                if(searchEles[i].id == menuItem) {
+                                                searchEles[i].className="dropdown active";
+                                }else {
+                                                searchEles[i].className="dropdown";
+                                }
+                }
+ 
+	
+commonLeftSideNavigationMenu();	
+}
+
+function commonLeftSideNavigationMenu()
+{
+parent.document.getElementById("leftSideNavigationMenu").className = "leftSideNavigationMenu";
+parent.document.getElementById("leftNavigationContainertransition").className = "leftNavigationContainer";
+parent.document.getElementById("leftNavigationOverlaytransition").className = "leftNavigationOverlay transition";
+}
+
+    </script>
+<style type="text/css">
+.bg-white {
+    background-color: #182856!important;
+    height: 50px;
+	 padding-right: 5px !important;
+}
+ul.profile .btn {
+	display: block;
+	}
+.leftSideNavigationMenu {
+    margin-right: 0;
+}
+.nav > li > a:hover, .nav > li > a:focus {
+    background-color: rgba(255, 255, 255, 0.1) !important;
+}
+.user-menu > .dropdown-menu {
+    min-width: 225px;
+}
+.dropdown-item:focus, .dropdown-item:hover {
+    background-color: #ffffff;
+}
+.user .dropdown-menu {
+    left: auto !important;
+    right: 0 !important;
+    transform: translate3d(-0px, 50px, 0px) !important;
+    border-radius: 0;
+}
+.mainnav .dropdown-toggle::after, .user .dropdown-toggle::after{display:none;}
+
+.btn-primary.btn-apply {
+  color: #fff;background-color: #1976d2;border: 1px solid #1976d2; margin-left: 2px;
+}
+
+.btn-secondary.btn-reset {
+  color: #666;background-color: #fff !important;border-color: #ccc !important;
+}
+</style>
+</head>
+<body class="base-container base-container--header">
+<form method="post" name="submitFormData" id="submitFormData">
+  
+  <input type = "hidden" value='SuryaPrakash' name="fName" id="fName">
+  <input type = "hidden" value='Kappagantula' name="lName" id="lName">
+  <input type = "hidden" value='' name="gName" id="gName">
+  <input type = "hidden" value='P3314665' name="userID" id="userID">
+  <input type = "hidden" value='https://wireless-nsl.qa-uat.wtg.spectrum.net/cas/logout?service=https://wireless-nsl.qa-uat.wtg.spectrum.net/centuryreports' name="logoutURL" id="logoutURL">
+  <input type="hidden" id="dataSourceName" name="dataSourceName" value="CRPT_JNDI_NAME"/>
+  <div class="modal fade" id="myModal1" >
+    <div class="modal-dialog" >
+      <div class="modal-content">
+        <div class="modal-header">
+		<h4 class="modal-title" id="myModalLabel">Product Navigation</h4>
+          <button type="button" class="close" data-dismiss="modal" aria-label="Close"><span aria-hidden="true">&times;</span></button>
+          
+        </div>
+        <div class="alert alert-warning alert-dismissible" role="alert"><strong id="warningMSg">Navigating away from the application will result in loss of unsaved data. Please save any unsaved information before continuing. Click OK to continue or Cancel to go back</strong></div>
+        <div class="modal-footer">
+          <center>
+            <button type="button" class="btn btn-primary-navigation btn-sm btn-save" data-dismiss="modal" onclick="navigateProd();">OK</button>
+            <button type="button" class="btn btn-default btn-sm btn-clear" data-dismiss="modal">CANCEL</button>
+          </center>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="modal fade" id="noAccessModal" >
+    <div class="modal-dialog" >
+      <div class="modal-content">
+        <div class="modal-header">
+          <button type="button" class="close" data-dismiss="modal" aria-label="Close"><span aria-hidden="true">&times;</span></button>
+          <h4 class="modal-title" id="noAccessModalLabel">Product Navigation</h4>
+        </div>
+        <div class="alert alert-danger alert-dismissible" role="alert"><strong id="errorMSg">User does not have access</strong></div>
+        <div class="modal-footer">
+          <center>
+            <button type="button" class="btn btn-default btn-sm btn-clear" data-dismiss="modal">OK</button>
+          </center>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="d-flex flex-column flex-md-row align-items-center bg-white border-bottom shadow-sm px-md-4">
+    <div class="my-0 mr-md-auto">
+      <div id="leftSideNavigationMenu" class="leftSideNavigationMenu"> <span></span> <span></span> <span></span> </div>
+      <a href="javascript:loadHomePage();" class="navbar-brand" style="outline:none;"><img src="modular/centurylayout/img/logo1.png"></a> </div>
+    <nav class="my-2 my-md-0 mr-md-3">
+      <ul class="nav">
+        <li class="nav-item  user user-menu"> <a onclick="openHelpWindow();" role="button" class="nav-link help" data-toggle="dropdown" class="dropdown-toggle" title="Help" href="#"> </a> </li>
+        
+		
+		<li class="nav-item dropdown user" id = "settingsId">
+        <a class="nav-link dropdown-toggle language" href="#" id="navbarDropdownMenuLink"  data-toggle="dropdown" title="Time Zone" aria-haspopup="true" aria-expanded="false">
+         
+        </a>
+      
+		
+		  <div class="dropdown-menu dropdown-menu-default profile" aria-labelledby="navbarDropdownMenuLink" style= "width: 250px; padding: 15px;">
+            <label style="color: #5c6165; font-weight: 500; text-transform: uppercase;  font-size: 14px;">Set Time Standard</label>
+            <div>
+              <select name="timeStandard" id="timeStandard" class="form-control">
+                <option selected="" value="userTimeZone">User Time Zone</option>
+                <option value="universalTimeStandard">Universal Time Standard</option>
+              </select>
+            </div>
+            <div style="margin-top: 15px; text-align: center;">
+              <button type="button" class="buttonCls btn-secondary btn-reset" onclick="seTimeStandardGlobally('userTimeZone');">RESET</button>
+              <button type="button" class="buttonCls btn-primary btn-apply" onclick="seTimeStandardGlobally();">APPLY</button>
+            </div>
+          </div>
+		
+		
+		
+      </li>
+		
+		
+		
+		
+		
+	  
+	  
+	  
+        <li class="nav-item  user" id = "dataSourceId"></li>
+        <li class="nav-item  user" id = "applicationId" title="Century Product Navigation"></li>
+        <li class="nav-item dropdown user user-menu"    title="My Account"> <a class="nav-link dropdown-toggle user1" data-toggle="dropdown" href="#" role="button" aria-haspopup="true" aria-expanded="false"> </a>
+          <ul class="dropdown-menu profile">
+            <li class="dropdown-item" style="text-align: center; padding: 15px 0px 5px 0px"> <img style="border-radius: 50%;" src="modular/centurylayout/img/profile.jpg">
+              <h5>P3314665</h5>
+            </li>
+            <li class="dropdown-item clearfix"  style="padding: 15px;"> <a id="signoutLink" href="javascript:void(0)" onclick="Signout();" class="btn btn-danger btn-lg " role="button">Signout</a> </li>
+          </ul>
+        </li>
+      </ul>
+    </nav>
+  </div>
+  
+  <!-- /navbar -->
+  <div id="leftNavigationContainertransition" class="leftNavigationContainer">
+    <div class="subnavbar transition">
+      <div class="subnavbar-inner">
+        <div class="container">
+          <ul id="mainMenus" class="mainnav">
+            <!-- 
+		
+		 
+		 
+			
+			
+				<li class="dropdown" id="menuList1" role="presentation"> 
+			 
+		
+			  
+			 	<a href="javascript:;" onClick="javascript:changeMainMenuIframeURL('/centuryreports/loadMyReport',this);" class="dropdown-toggle" data-hover="dropdown" data-toggle="dropdown">
+				
+				 
+			
+			<i class="icon-report"></i>
+			
+            
+			
+			
+			
+			
+			
+			
+            
+			 
+		
+			
+			<span>My <br> Reports</span></a>
+			    <input type="hidden" name="resourceid" id="resourceid" value="Submenu_Myreports"/>
+			
+            
+
+			
+		
+        <ul role="menu" class="dropdown-menu dropdown-menu-default profile">
+        
+                
+                    
+
+						 <li><a href="#" onClick="javascript:changeSubMenuIframeURL('/centuryreports/loadMyReport',this);">My Reports</a></li>		
+				
+                   
+                
+                
+
+        
+			</ul>
+			</li>
+		
+		 
+		 
+			
+			
+				<li class="dropdown" id="menuList2" role="presentation"> 
+			 
+		
+			  
+			 	<a href="javascript:;" onClick="javascript:changeMainMenuIframeURL('/centuryreports/loadViewDashboardPage',this);" class="dropdown-toggle" data-hover="dropdown" data-toggle="dropdown">
+				
+				 
+			
+            
+			
+			
+			
+			
+			
+			
+            
+			
+			
+			 
+		
+			
+			<span>My <br> Dashboard</span></a>
+			    <input type="hidden" name="resourceid" id="resourceid" value="DYNAMIC_DASHBOARD"/>
+			
+            
+
+			
+		
+        <ul role="menu" class="dropdown-menu dropdown-menu-default profile">
+        
+                
+                    
+
+						 <li><a href="#" onClick="javascript:changeSubMenuIframeURL('/centuryreports/loadViewDashboardPage',this);">My <br> Dashboard</a></li>		
+				
+                   
+                
+                
+
+        
+                
+                    
+
+						 <li><a href="#" onClick="javascript:changeSubMenuIframeURL('/centuryreports/loadCreateDashboardPage',this);">Create Dashboard</a></li>		
+				
+                   
+                
+                
+
+        
+                
+                    
+
+						 <li><a href="#" onClick="javascript:changeSubMenuIframeURL('/centuryreports/loadPublishDashboardPage',this);">Publish Dashboard</a></li>		
+				
+                   
+                
+                
+
+        
+			</ul>
+			</li>
+		
+		 
+		 
+			
+			
+				<li class="dropdown" id="menuList3" role="presentation"> 
+			 
+		
+			  
+			 	<a href="javascript:;" onClick="javascript:changeMainMenuIframeURL('/centuryreports/loadCreateReport',this);" class="dropdown-toggle" data-hover="dropdown" data-toggle="dropdown">
+				
+				 
+			
+            
+			
+			<i class="icon-manage"></i>
+			
+			
+			
+			
+			
+			
+            
+			 
+		
+			
+			<span>Manage <br> Report</span></a>
+			    <input type="hidden" name="resourceid" id="resourceid" value="Submenu_Adhoc_Reports"/>
+			
+            
+
+			
+		
+        <ul role="menu" class="dropdown-menu dropdown-menu-default profile">
+        
+                
+                    
+
+						 <li><a href="#" onClick="javascript:changeSubMenuIframeURL('/centuryreports/loadCreateReport',this);">Create Report</a></li>		
+				
+                   
+                
+                
+
+        
+                
+                    
+
+						 <li><a href="#" onClick="javascript:changeSubMenuIframeURL('/centuryreports/loadInteractiveReport',this);">Interactive Report</a></li>		
+				
+                   
+                
+                
+
+        
+                
+                    
+
+						 <li><a href="#" onClick="javascript:changeSubMenuIframeURL('/centuryreports/loadCreateSuperReport',this);">Create Super Report</a></li>		
+				
+                   
+                
+                
+
+        
+                
+                    
+
+						 <li><a href="#" onClick="javascript:changeSubMenuIframeURL('/centuryreports/loadPublishReport',this);">Publish Report</a></li>		
+				
+                   
+                
+                
+
+        
+			</ul>
+			</li>
+		
+		 
+		 
+			
+			
+				<li class="dropdown" id="menuList4" role="presentation"> 
+			 
+		
+			  
+			 	<a href="javascript:;" onClick="javascript:changeMainMenuIframeURL('/centuryreports/scheduler',this);" class="dropdown-toggle" data-hover="dropdown" data-toggle="dropdown">
+				
+				 
+			
+            
+			
+			
+			
+			<i class="icon-scheduler"></i>
+			
+			
+			
+			
+            
+			 
+		
+			
+			<span>My <br> Scheduler</span></a>
+			    <input type="hidden" name="resourceid" id="resourceid" value="Submenu_Scheduler_Menu"/>
+			
+            
+
+			
+		
+        <ul role="menu" class="dropdown-menu dropdown-menu-default profile">
+        
+                
+                    
+
+						 <li><a href="#" onClick="javascript:changeSubMenuIframeURL('/centuryreports/scheduler',this);">Schedule via mail/sftp</a></li>		
+				
+                   
+                
+                
+
+        
+                
+                    
+
+						 <li><a href="#" onClick="javascript:changeSubMenuIframeURL('/centuryreports/loadSchedulerList',this);">Manage Scheduler</a></li>		
+				
+                   
+                
+                
+
+        
+			</ul>
+			</li>
+		
+		 
+		 
+			
+			
+				<li class="dropdown" id="menuList5" role="presentation"> 
+			 
+		
+			  
+			 	<a href="javascript:;" onClick="javascript:changeMainMenuIframeURL('/centuryreports/loadViewLandingPage',this);" class="dropdown-toggle" data-hover="dropdown" data-toggle="dropdown">
+				
+				 
+			
+            
+			
+			
+			
+			
+			
+			
+            
+			
+			
+			 
+		
+			
+			<span>Landing <br> Page</span></a>
+			    <input type="hidden" name="resourceid" id="resourceid" value="DYNAMIC_LANDINGPAGE"/>
+			
+            
+
+			
+		
+        <ul role="menu" class="dropdown-menu dropdown-menu-default profile">
+        
+                
+                    
+
+						 <li><a href="#" onClick="javascript:changeSubMenuIframeURL('/centuryreports/loadViewLandingPage',this);">View Landing Page</a></li>		
+				
+                   
+                
+                
+
+        
+                
+                    
+
+						 <li><a href="#" onClick="javascript:changeSubMenuIframeURL('/centuryreports/loadCreateLandingPage',this);">Create Landing Page </a></li>		
+				
+                   
+                
+                
+
+        
+                
+                    
+
+						 <li><a href="#" onClick="javascript:changeSubMenuIframeURL('/centuryreports/loadPublishLandingPage',this);">Publish Landing Page </a></li>		
+				
+                   
+                
+                
+
+        
+			</ul>
+			</li>
+		
+		 
+		 
+			
+			
+				<li class="dropdown" id="menuList6" role="presentation"> 
+			 
+		
+			  
+			 	<a href="javascript:;" onClick="javascript:changeMainMenuIframeURL('/centuryreports/loadMyAdminPage',this);" class="dropdown-toggle" data-hover="dropdown" data-toggle="dropdown">
+				
+				 
+			
+            
+			
+			
+			
+			
+			
+			
+            
+			
+			
+			 
+		
+			
+			<span>Admin <br> User</span></a>
+			    <input type="hidden" name="resourceid" id="resourceid" value="EUREKA_ADMIN_MENU"/>
+			
+            
+
+			
+		
+        <ul role="menu" class="dropdown-menu dropdown-menu-default profile">
+        
+                
+                    
+
+						 <li><a href="#" onClick="javascript:changeSubMenuIframeURL('/centuryreports/loadMyAdminPage',this);">Admin User</a></li>		
+				
+                   
+                
+                
+
+        
+                
+                    
+
+						 <li><a href="#" onClick="javascript:changeSubMenuIframeURL('/centuryreports/loadMyAdminPageConfig',this);">Admin Config Menu</a></li>		
+				
+                   
+                
+                
+
+        
+                
+                    
+
+						 <li><a href="#" onClick="javascript:changeSubMenuIframeURL('/centuryreports/loadExportConfigPage',this);">Export Config</a></li>		
+				
+                   
+                
+                
+
+        
+                
+                    
+
+						 <li><a href="#" onClick="javascript:changeSubMenuIframeURL('/centuryreports/loadImportConfigPage',this);">Import Config</a></li>		
+				
+                   
+                
+                
+
+        
+                
+                    
+
+						 <li><a href="#" onClick="javascript:changeSubMenuIframeURL('/centuryreports/loadReferenceConfigPage',this);">Color Configuration</a></li>		
+				
+                   
+                
+                
+
+        
+			</ul>
+			</li>
+		
+		 
+		 
+			
+			
+				<li class="dropdown" id="menuList7" role="presentation"> 
+			 
+		
+			  
+			 	<a href="javascript:;" onClick="javascript:changeMainMenuIframeURL('/centuryreports/importExcel',this);" class="dropdown-toggle" data-hover="dropdown" data-toggle="dropdown">
+				
+				 
+			
+            
+			
+			
+			
+			
+			
+			
+			<i class="icon-database"></i>
+			
+            
+			 
+		
+			
+			<span>Import <br> Excel/CSV</span></a>
+			    <input type="hidden" name="resourceid" id="resourceid" value="Menu_ImportExcel"/>
+			
+            
+
+			
+		
+        <ul role="menu" class="dropdown-menu dropdown-menu-default profile">
+        
+			</ul>
+			</li>
+		
+        <li class="active"><a href="javascript:;"><i class="icon-report"></i><span>My<br>
+          REPORTS</span> </a> </li>
+        <li class="dropdown"><a href="javascript:;" class="dropdown-toggle" data-hover="dropdown" data-toggle="dropdown"><i class="icon-dashboard"></i><span>MY<br>
+          DASHBOARD</span> </a>
+          <ul class="dropdown-menu dropdown-menu-default profile">
+            <li> <a href="#"><i class="fa fa-tachometer text-info"></i> My Dashboard</a> </li>
+            <li> <a href="#"><i class="fa fa-floppy-o text-info"></i> Saved Reports</a> </li>
+            <li> <a href="#"><i class="fa fa-plus text-info"></i> Create Dashboard</a> </li>
+            <li> <a href="#"><i class="fa fa-list-alt text-info"></i> Manage Saved Reports</a> </li>
+            <li> <a href="#"><i class="fa fa-cogs text-info"></i> Manage Dashboard</a> </li>
+          </ul>
+        </li>
+        <li><a href="javascript:;"><i class="icon-manage"></i><span>Manage<br>
+          Reports</span> </a> </li>
+        <li><a href="javascript:;"><i class="icon-scheduler"></i><span>Manage<br>
+          Scheduler</span> </a> </li>
+        <li><a href="javascript:;"><i class="icon-canned"></i><span>Canned<br>
+          Reports</span> </a> </li>
+        <li><a href="javascript:;"><i class="icon-database"></i><span>Database<br>
+          Privileges</span> </a></li>
+        <li><a href="javascript:;"><i class="icon-more"></i></a></li>
+        <li><a href="javascript:;"><i class="icon-more"></i></a></li>
+		<li><i class="icon-more"></i></li>  -->
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div id="leftNavigationOverlaytransition" class="leftNavigationOverlay transition"></div>
+</form>
+<div class="toolbarOverlay"></div>
+<div id="recentAction" class="toolbarWhole" style="display:block; float: right;">
+  <div class="toolBar"> <a href="#" class="btn btn-primary" id="recentView" title="Recently Viewed" style="background-color: #182856; margin:5px;"><img src="modular/graphicalDashboard/img/recently-viewed.png"></span></a> <a href="#" class="btn btn-primary" id="recentAct" title="Recent Activities" style="background-color: #182856; margin:5px;"><img src="modular/graphicalDashboard/img/recent-activities.png"></img></a> </div>
+  <div class="panel panel-default" id="recentviewContent">
+    <div id="recentViewMask" style="display:none">
+      <center>
+        <div style='position: absolute; width: 100%; margin: 100px 0px; z-index: 1040;' >
+          <div class='loader'></div>
+          <span style='font-size:10px; color:#768696 ; text-transform:uppercase' >Please wait...</span></div>
+      </center>
+    </div>
+    <div class="panel-heading" style="background-color: #182856; padding: 5px;">Recently Viewed</div>
+    <div id="recentlyviewed" class="panel-body scrollbar"></div>
+  </div>
+  <div class="panel panel-default" id="recentactContent">
+    <div id="activityMask" style="display:none">
+      <center>
+        <div style='position: absolute; width: 100%; margin: 100px 0px; z-index: 1040;' >
+          <div class='loader'></div>
+          <span style='font-size:10px; color:#768696 ; text-transform:uppercase' >Please wait...</span></div>
+      </center>
+    </div>
+    <div class="panel-heading" style="background-color: #182856; padding: 5px;">Recent Activities</div>
+    <div id="recentActivities" class="panel-body scrollbar1"> </div>
+  </div>
+</div>
+
+<!-- Clear button  -->
+<div class="modal fade" id="clearSaveModal" tabindex="-1" role="dialog" aria-labelledby="myModalLabel" aria-hidden="true" data-keyboard="false" data-backdrop="static">
+  <div class=" modal-dialog modal-vertical-centered-e" style="text-transform:uppercase;height:26%">
+    <div id="maskId" style="display:none">
+      <center>
+        <div style='position: absolute; width: 100%; margin: 210px 42px;'>
+          <div class='loader'></div>
+          <span style='font-size:10px; color:white; text-transform:uppercase' >Please wait...</span></div>
+      </center>
+    </div>
+    
+    <!-- Modal content-->
+    <center>
+      <div class="modal-content" id="messageDiv">
+        <div class="modal-header modal-header1">
+          <button id="closeButtonId" type="button" class="close" data-dismiss="modal" style="display:none">&times;</button>
+          <span class="modal-title modal-title-t" id="titleId">CONFIRM?</span> </div>
+        <div class="modal-body">
+          <div class="alert alert-danger alert-dismissible" role="alert" id="bodyId" style="background-color : #f2dede;border-color : #ebccd1;color : #a94442;font-size:14px;height: 40px;"> <Strong id="errorDivIdAlert"> Do you want to clear the DashBoard?</Strong> </div>
+          <div>
+            <center>
+            <table cellpadding="1" style>
+              <tr>
+                <td><input type="button" id="yesButtonId" class="btn btn-primary2" value="yes" onclick = "" /></td>
+                <td>&nbsp;&nbsp; </td>
+                <td><input type="button" id="noButtonId" class="btn btn-primary2" data-dismiss="modal" value="No" /></td>
+                <td>&nbsp;&nbsp; </td>
+                <td><input type="button" id="okButtonId" class="btn btn-primary2" data-dismiss="modal" value="Ok" />
+                  </center></td>
+              </tr>
+            </table>
+          </div>
+        </div>
+      </div>
+    </center>
+  </div>
+</div>
+<!--Details modal pop-up -->
+<div class="modal" id="reportModalDetails" role="dialog" data-backdrop="static" data-keyboard="false" aria-hidden="true" style="position:fixed;z-index:9999;">
+  <div class="modal-dialog" style="text-transform:uppercase;  z-index: 1040;" > 
+    <!-- Modal content-->
+    
+    <div id="reportModalContent" class="modal-content"> 
+      <!-- flickr issues change1-->
+
+      <div id="reportModalHeader" class="modal-header modal-header1">
+	  	<span class="modal-title modal-title-t" id="reportTitleId">DASHBOARD DETAILS</span> 
+        <button id="closeButtonReportId" type="button" class="close" title="close" onclick="closeDetailsPopUp();" style="display:block">&times;</button>
+        <button id="previousReport" type="button" title="Previous Report" class="fa fa-arrow-left" onclick="gotoPrevious();" style="display: none; margin-right:10px;"></button>
+        </div>
+		<!--reportTitleId had inline css--> 
+      <div id="details" class="modal-body">
+        <section class="container-fluid wrap-thumb wrap-thumb1" style="position:relative;overflow-y:auto;height:100%">
+          <form class="form-horizontal">
+            <div class="row" id="entityName">
+              <label class="control-label col-sm-4" for="name">Name:</label>
+              <div class="col-sm-8"> </div>
+            </div>
+            <div class="row" id="createdBy">
+              <label class="control-label col-sm-4" for="createdby">Created By:</label>
+              <div class="col-sm-8"> </div>
+            </div>
+            <div class="row"  id="createdDate">
+              <label class="control-label col-sm-4" for="createddate">Created Date:</label>
+              <div class="col-sm-8"> </div>
+            </div>
+            <div class="row"  id="publishedTo">
+              <label class="control-label col-sm-4" for="publishedto">Published To:</label>
+              <div class="col-sm-8">
+                <div multiple="multiple" class="form-control scrollbar" name="listOfPubTo" id="listOfPubTo">
+                  <div class="list-group" id="user"> </div>
+                  <hr id="dividerId" class="divider"/>
+                  <div class="list-group" id="group"> </div>
+                </div>
+              </div>
+            </div>
+            <div class="row"  id="viewedBy">
+              <label class="control-label col-sm-4" for="viewedby">Viewed By:</label>
+              <div class="col-sm-8">
+                <div multiple="multiple" class="form-control scrollbar" name="listOfPubTo" id="listOfViewBy">
+                  <div class="list-group view-table" id="viewedUser"> </div>
+                </div>
+              </div>
+            </div>
+            <div class="row"  id="publishedBy">
+              <label class="control-label col-sm-4" for="publishedby">Published By:</label>
+              <div class="col-sm-8"> </div>
+            </div>
+            <div class="row"  id="modifiedDate">
+              <label class="control-label col-sm-4" for="modifieddate">Last Modified On:</label>
+              <div class="col-sm-8"> </div>
+            </div>
+          </form>
+        </section>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>
+</div>
+<!--<div id="mainPane">
+  <div id="breadcrumb">
+    <ul id="crumbs">
+      <li><a href="#">&nbsp;You are here</a></li>
+      <li><a href="#" id="b3">Main section</a></li>
+      <li><a href="#" id="b5">Sub section</a></li>
+    </ul>
+  </div>
+</div>-->
+<div id="container-head">
+  <iframe onload="iframeclick();" allowtransparency=true frameborder=0 name="RightFrame" id="RightFrame" 
+  scrolling=AUTO style="width:100%;height:100%;position:absolute"></iframe>
+</div>
+<input type="hidden" id="gSpot" name="gSpot" value = "" onFocus="spotToggle(this.value);">
+<!--<input type="text" id="gSpot" name="gSpot" value = "" onfocus="spotTog(this.value);" style="border:none; height:0px;width:0px;">
+<input type = "hidden" onFocus="spotTog(this.value);" value="" id="toAcces" style="border:none; height:0px;width:0px;" >-->
+<input type = "hidden" value='P3314665' name="userID" id="userID">
+<input type = "hidden" value='3600' name="sessionTime" id="sessionTime">
+<input type = "hidden" value='https://wireless-nsl.qa-uat.wtg.spectrum.net/cas/logout?service=https://wireless-nsl.qa-uat.wtg.spectrum.net/centuryreports' name="logOutURL" id="logOutURL">
+<input type = "hidden" value='Eureka' name="applicationFlag" id="applicationFlag">
+
+<div id='successMsgDiv' style="display:none;">
+		<div class="alert alert-success alert-dismissible" role="alert">
+		<h6>Your session is about to time out in 2 minutes<span id="out" style="display:none">120</span> </br>Would you like to continue?
+		</div>
+		<div class="row" style="margin-top:15px; padding-top:15px; border-top: 1px solid #F3F5F7;">
+		 <div class="col-md-12">
+			<div>
+			<center>
+			  <input type="button" id="loggedInButton" class="btn btn-primary btn-sm" value="Yes" onClick="sessionActivator();">
+			  <input type="button" id="loggedOutButton" class="btn btn-primary btn-sm" value="No" onClick="sessionDeactivator();">
+		   </center>
+		  </div>
+		</div>
+	  </div>
+	</div>
+</form> 
+<script type="text/javascript">
+  $(document).ready(function(){
+	  //debugger;
+	 var d=new Date();
+	 var currentTime = d.getTime();
+	 // var homepageUrl = "/centuryreports/loadHomePage&t="+currentTime;
+	 
+	 //$("#RightFrame").attr('src',homepageUrl);
+	 
+	//var homepageUrl = 'http://exinl5490-14:8070/centuryreports/loadHomePage&t='+currentTime; 
+	var homepageUrl = "/centuryreports/loadHomePage";
+	var form;
+	var RightFrameId = new Date().getTime();
+    form = document.createElement("form");
+    form.action = homepageUrl; 
+    form.target = "RightFrame";
+	form.id = RightFrameId;
+    document.body.appendChild(form);
+	document.getElementById(RightFrameId).method = "post";
+	form.submit(); 
+	  
+	 document.getElementById("container-head").style.top="50px";
+	 
+	//var chatHistoryHeight = $("#chatContainer").height() - $(".assistant").height() - $(".chat-message").height() - 180;
+     //$(".chat-history, .chatQueryEditor").css('max-height', chatHistoryHeight);
+     
+       /* $('.message-icon, #closeChat').click(function(){
+      $('.chat-wrap').fadeToggle(500);               
+        setTimeout( function () {
+           resetMinimizeChat();
+        }, 500); 
+        
+     });*/
+
+     $('#expandChat').click(function(){
+         if($(this).find("i").hasClass("fa-expand")){
+            $('#chatContainer').addClass("expandChat");
+            $(this).find("i").removeClass("fa-expand");
+            $(this).find("i").addClass("fa-compress");
+            //var chatHeight = $("#chatContainer").height() - $(".assistant").height() - 25;
+            //$(".chatDataRow").css('height', chatHeight);
+            //var chatHistoryHeight = $(".chat").height() - $(".chat-message").height() - 35;
+            //$(".chat-history, .chatQueryEditor").css('height', chatHistoryHeight);
+             //$(".chatQueryEditor").css('height', chatHistoryHeight-5);
+            
+            resizeChatContents();
+            resetMinimizeChat();
+         } else {
+            resetExpandChat();
+            resetMinimizeChat();
+         }
+      });
+
+     $('#minimizeChat').click(function(){
+        if($(this).find("i").hasClass("fa-minus")){
+           resetExpandChat();
+
+           $('#chatContainer').addClass("minimizeChat");
+           var chatTopPosition = $(window).height() - $(".assistant").height() - 5;
+           $('#chatContainer').css('top', chatTopPosition);
+           $(this).find("i").removeClass("fa-minus");
+           $(this).find("i").addClass("fa-chevron-up");
+           
+        } else {
+           resetMinimizeChat();
+        }
+     });
+
+     $("#question").keydown(function (e) {
+        if (e.keyCode == 13) {
+        	sendMessage();
+        }
+     });
+     
+     $("#answer").keydown(function (e) {
+         if (e.key === 'Enter') {
+        	 if(event.shiftKey)
+             {
+                   console.log('shift enter was pressed');
+                   loadChatGrid(true);
+             }
+         }
+      });
+     
+     
+     $("#reportName").keydown(function (e) {
+         if (e.keyCode == 13) {
+        	 createReport();
+         }
+      });
+
+     function resetExpandChat() {
+        $('#chatContainer').removeClass("expandChat");
+        $("#expandChat").find("i").removeClass("fa-compress");
+        $("#expandChat").find("i").addClass("fa-expand");
+        $(".chatDataRow").css('height', '');
+        $(".chat-history, .chatQueryEditor").css('height', '');
+        resizeChatContents();
+     }
+
+     function resetMinimizeChat(){
+        $('#chatContainer').removeClass("minimizeChat");
+        $('#chatContainer').css('top', '');
+        $("#minimizeChat").find("i").removeClass("fa-chevron-up");
+        $("#minimizeChat").find("i").addClass("fa-minus");
+     }
+     
+      $('#chatPreviewWindow .panel-collapse').on('show.bs.collapse', function () {
+         $(this).siblings('.panel-heading').addClass('active');
+         resizeChatContents();
+      });
+
+      $('#chatPreviewWindow .panel-collapse').on('hide.bs.collapse', function () {
+         $(this).siblings('.panel-heading').removeClass('active');
+         resizeChatContents();
+      });
+ });
+ 
+ 	 function openParentModal(){
+		 
+		 $('#homeMask').modal('show');
+	 }
+	 function closeParentModal(){
+		
+		 $('#homeMask').modal('hide');
+	 }
+var pageconfirmwindow = "";
+var sessionMinutes = 0;
+var timeoutSec = 0;
+var timeoutReminder = 0;
+var th;
+var loggedOutURL = document.getElementById("logOutURL").value;
+var out = $('#out');
+var timer;
+if(document.getElementById("sessionTime").value != "" && document.getElementById("sessionTime").value != null && 
+document.getElementById("sessionTime").value != 0 && document.getElementById("sessionTime").value != 'undefined') {
+	sessionMinutes = ~~(document.getElementById("sessionTime").value / 60);
+	timeoutReminder = parseInt(out.text()) || 0;
+	timeoutReminder = ~~(timeoutReminder / 60);
+	timeoutReminder = sessionMinutes - timeoutReminder;
+	timeoutReminder =  timeoutReminder * 60 * 1000;
+}
+
+window.onload = function loadSessionTimer() {
+	var activeAppicationFlag = document.getElementById('applicationFlag').value;
+	if(activeAppicationFlag == 'Eureka'){
+		console.info('loadSessionTimer ' + timeoutReminder);
+		timer = window.setTimeout('checkSessionTimeout()', timeoutReminder);
+		buildAppListDiv();
+	}else{
+		console.info('Session Time Out Skipped for FRAMEWORK :: ' + window.location.pathname)
+	}
+}
+
+function resetSessionTimer() {
+	console.info('resetSessionTimer ' + timeoutReminder);
+	window.clearTimeout(timer);
+	timer = window.setTimeout('checkSessionTimeout()', timeoutReminder);	
+}
+
+function iframeclick() {
+	document.getElementById("RightFrame").contentWindow.document.body.onclick = function() {
+		console.info('iframeclick ' + timeoutReminder);
+		window.clearTimeout(timer);
+		timer = window.setTimeout('checkSessionTimeout()', timeoutReminder);	
+	}
+}
+
+function sessionActivator()
+{		
+	if(timeoutSec <= 0) {
+		//window.location.href= loggedOutURL;
+		sessionDeactivator();
+	}
+	else {
+		Ext.Ajax.request({
+			   //method : 'POST',
+			   //url : 'HomePage.exc?action=sessionRefreshed&timeout='+sessionMinutes,
+			   url : 'sessionRefreshed',
+			   method: 'POST',
+			   params: {
+	             "timeout" : sessionMinutes
+	            },
+	            scope:this,
+				success : function(response){
+				//pageconfirmwindow.close();
+				pageconfirmwindow.hide();
+				clearInterval(th);
+				out.text('120');
+				window.setTimeout('checkSessionTimeout()', timeoutReminder);	 //start the timer again
+		   },
+		   failure : function(){
+				sessionDeactivator();
+		   }
+		  });
+	}
+}
+
+function sessionDeactivator() 
+{
+	//window.location.href= loggedOutURL;
+	document.getElementById("signoutLink").click();
+}
+
+function checkSessionTimeout()
+{
+	unMask('success');
+		th = setInterval(function() {
+		  var sec = parseInt(out.text()) || 0;
+		  if (!sec) {
+			clearInterval(th);
+			timeoutSec = 0;
+		  } else {
+			sec--;
+			out.text(sec);
+			timeoutSec = sec;
+			//console.info('sec '+sec);
+			//pageconfirmwindow.body.update(document.getElementById('successMsgDiv').innerHTML);
+			if(timeoutSec <= 0) {
+				//window.location.href= loggedOutURL;
+				sessionDeactivator();
+			}
+		  }
+		}, 1000);
+}
+
+var unMask = function (msg) {
+	if(msg == "success") {
+		mySavedWindow();
+	}
+}
+
+var mySavedWindow = function () {
+	//console.info('mysaved window'+!pageconfirmwindow);
+	if(!pageconfirmwindow)
+		{
+		pageconfirmwindow = new Ext.Window({
+			id: 'SessionWindow',
+			title: 'Session Timeout',
+			header: {
+				titlePosition: 2,
+				titleAlign: 'center'
+			},
+			layout      : 'fit',
+			width       : 600,
+			height      : 190,
+			closable	: false,
+			maximizable : false,
+			modal       : true,
+			html 		: document.getElementById('successMsgDiv').innerHTML
+		});
+		}
+		pageconfirmwindow.show();
+}
+
+</script>
+
+<!-- Message Icon -->
+      <div class="message-icon">
+         <i class="fa fa-comments" onclick="loadChatBotMenu();"></i>
+      </div>
+<!-- Message Window -->
+      <div id="chatContainer" class="container p-0 chat-wrap" style ="display: none;">
+      <div id="chatSpinnerWrapper" class="chatSpinnerWrapper chatSpinnerHide">
+		<div class="chatSpinner"></div>
+	</div>
+      
+         <div class="row clearfix">
+            <div class="col-lg-12">
+               <div class="assistant p-2 pl-3 pr-2 d-flex justify-content-sm-between align-items-sm-center">
+                  <h5 class="mb-0">
+                  Chat And Create Report</h6>
+                  <div class="actions">                
+                     <a href="javascript:void(0);" id="minimizeChat" class="btn btn-outline-secondary"><i class="fa fa-minus"></i></a>
+                     <!-- <a href="javascript:void(0);" id="expandChat" class="btn btn-outline-secondary"><i class="fa fa-expand"></i></a> -->
+                     <a href="javascript:void(0);" id="closeChat" class="btn btn-outline-secondary"><i class="fa fa-times"></i></a>
+                  </div>
+               </div>
+            </div>
+         </div>
+         <div class="row clearfix chatDataRow">
+			<!-- <div class="col-lg-5 chatHistoryCol pr-0 d-flex"> -->
+            <div class="col-lg-12 chatHistoryCol d-flex">
+               <div class="card chat-app no-radius-right">
+                  <div class="chat">
+                     <div class="chat-history" >
+                       <ul id="questionList" class="m-b-0">
+                        </ul> 
+                     </div>
+                     <div class="chat-message clearfix">
+                        <div class="input-group mb-0">
+                           <input type="text" id="question" class="form-control" placeholder="Enter text here...">
+                           <div class="input-group-prepend">
+                              <span class="input-group-text"><i class="fa fa-send" onclick="sendMessage()" ></i></span>
+                           </div>                                    
+                        </div>
+                     </div>
+                  </div>
+               </div>
+            </div>
+			<!-- <div class="col-lg-7 chatQueryEditCol pl-0 d-flex"> -->
+            <div class="col-lg-0 chatQueryEditCol pl-0 d-flex">
+               <!-- <div class="card chat-app no-radius-left">
+                  <div class="form-group chatQueryEditor mb-0">
+                  <div id="chatStatusAlert" class="alert alert-dismissible chatStatusAlert text-center" role="alert"></div>
+                     <textarea id="answer" class="form-contro query-editor p-3" id="" rows="3"></textarea>
+                     <div id="previewGrid" class="previewGrid">
+                        <table id="previewGridTbl"></table>
+                        <div id="previewGridPager"></div>
+                     </div>
+                     
+                  </div>
+                  <div class="chat-message clearfix">
+                        <div class="input-group mb-0">	
+                           <div class="input-group-prepend">
+                             <input type="text" id="reportName" class="form-control" placeholder="Enter Report Name here..." required> 
+                             <button style="margin-left: 16px;" class="btn btn-primary btn-sm btn-save open-modal" type="button" id="createReport" 
+							 data-toggle="modal" data-backdrop="static" onclick="createReport();" title="Create Report" disabled> 
+							 <i class="fa fa-save"></i></button>
+							 <button style="margin-left:8px;" class="btn btn-primary btn-sm" type="button" id="runReport" 
+                              onclick="formSubmit('viewCreated');" title="Run Report" disabled><i class="fa fa-play"></i></button>
+							<button style="margin-left:8px;" class="btn btn-primary btn-sm" type="button" id="chatFileUpload" 
+                              onclick="chatFileUpload();" title="SFTP Save"><i class="fa fa-download"></i></button>                               <button style="margin-left:8px;" class="btn btn-primary btn-sm" type="button" id="createMLProject" 
+                              onclick="createMLProject();" title="Create ML Project" disabled><i class="fa fa-clipboard"></i></button>
+							 <button style="margin-left:8px;" class="btn btn-primary btn-sm" type="button" id="navigateToML"
+                              onclick="navigateToML();" title="Open in New Tab" disabled><i class="fa fa-external-link"></i></button>
+                           </div>                              
+                        </div>
+                     </div>
+               </div> -->
+            </div>
+         </div>
+      </div>
+     
+</body>
+</html>

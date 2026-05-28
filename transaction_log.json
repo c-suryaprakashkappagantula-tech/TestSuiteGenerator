@@ -1,5 +1,71 @@
 [
   {
+    "timestamp": "2026-05-28 16:16:50",
+    "feature_id": "MWTGPROV-4379",
+    "pi": "Manual",
+    "tc_count": 6,
+    "step_count": 31,
+    "strategy": "Data-First",
+    "file_path": "C:\\Users\\P3314665\\Documents\\mcp-jira-server\\TestSuiteGenerator\\outputs\\MWTGPROV-4379_55.2_-_New_MVNO_-_Subscriber_Address_Mapping_Fix_in_Subscriber_Inquiry_API_20260528_161649.xlsx",
+    "file_name": "MWTGPROV-4379_55.2_-_New_MVNO_-_Subscriber_Address_Mapping_Fix_in_Subscriber_Inquiry_API_20260528_161649.xlsx",
+    "status": "SUCCESS"
+  },
+  {
+    "timestamp": "2026-05-26 13:19:15",
+    "feature_id": "MWTGPROV-4166",
+    "pi": "PI-54",
+    "tc_count": 8,
+    "step_count": 34,
+    "strategy": "Data-First",
+    "file_path": "C:\\Users\\P3314665\\Documents\\mcp-jira-server\\TestSuiteGenerator\\outputs\\MWTGPROV-4166_54.2_-_NSLNM_INTG_New_MVNO_-_Guarente'd_Delivery_flow_in_NBOP_not_working_20260526_131914.xlsx",
+    "file_name": "MWTGPROV-4166_54.2_-_NSLNM_INTG_New_MVNO_-_Guarente'd_Delivery_flow_in_NBOP_not_working_20260526_131914.xlsx",
+    "status": "SUCCESS"
+  },
+  {
+    "timestamp": "2026-05-26 12:51:47",
+    "feature_id": "MWTGPROV-4166",
+    "pi": "PI-54",
+    "tc_count": 8,
+    "step_count": 34,
+    "strategy": "Data-First",
+    "file_path": "C:\\Users\\P3314665\\Documents\\mcp-jira-server\\TestSuiteGenerator\\outputs\\MWTGPROV-4166_54.2_-_NSLNM_INTG_New_MVNO_-_Guarente'd_Delivery_flow_in_NBOP_not_working_20260526_125145.xlsx",
+    "file_name": "MWTGPROV-4166_54.2_-_NSLNM_INTG_New_MVNO_-_Guarente'd_Delivery_flow_in_NBOP_not_working_20260526_125145.xlsx",
+    "status": "SUCCESS"
+  },
+  {
+    "timestamp": "2026-05-26 12:27:04",
+    "feature_id": "MWTGPROV-4166",
+    "pi": "PI-54",
+    "tc_count": 8,
+    "step_count": 34,
+    "strategy": "Data-First",
+    "file_path": "C:\\Users\\P3314665\\Documents\\mcp-jira-server\\TestSuiteGenerator\\outputs\\MWTGPROV-4166_54.2_-_NSLNM_INTG_New_MVNO_-_Guarente'd_Delivery_flow_in_NBOP_not_working_20260526_122703.xlsx",
+    "file_name": "MWTGPROV-4166_54.2_-_NSLNM_INTG_New_MVNO_-_Guarente'd_Delivery_flow_in_NBOP_not_working_20260526_122703.xlsx",
+    "status": "SUCCESS"
+  },
+  {
+    "timestamp": "2026-05-26 11:17:57",
+    "feature_id": "MWTGPROV-4166",
+    "pi": "PI-54",
+    "tc_count": 8,
+    "step_count": 34,
+    "strategy": "Data-First",
+    "file_path": "C:\\Users\\P3314665\\Documents\\mcp-jira-server\\TestSuiteGenerator\\outputs\\MWTGPROV-4166_54.2_-_NSLNM_INTG_New_MVNO_-_Guarente'd_Delivery_flow_in_NBOP_not_working_20260526_111756.xlsx",
+    "file_name": "MWTGPROV-4166_54.2_-_NSLNM_INTG_New_MVNO_-_Guarente'd_Delivery_flow_in_NBOP_not_working_20260526_111756.xlsx",
+    "status": "SUCCESS"
+  },
+  {
+    "timestamp": "2026-05-26 11:13:48",
+    "feature_id": "MWTGPROV-4152",
+    "pi": "PI-54",
+    "tc_count": 60,
+    "step_count": 110,
+    "strategy": "Data-First",
+    "file_path": "C:\\Users\\P3314665\\Documents\\mcp-jira-server\\TestSuiteGenerator\\outputs\\MWTGPROV-4152_53.2_Integration_with_Syniverse_all_mvp_flowspart-2_20260526_111348.xlsx",
+    "file_name": "MWTGPROV-4152_53.2_Integration_with_Syniverse_all_mvp_flowspart-2_20260526_111348.xlsx",
+    "status": "SUCCESS"
+  },
+  {
     "timestamp": "2026-05-21 21:58:01",
     "feature_id": "MWTGPROV-4166",
     "pi": "PI-54",
@@ -481,72 +547,6 @@
     "strategy": "Data-First",
     "file_path": "C:\\Users\\P3314665\\Documents\\mcp-jira-server\\TestSuiteGenerator\\outputs\\MWTGPROV-4006_54.2_NBOP_to_hide_the_page_Port-in_status_for_TMO_only_20260515_171446.xlsx",
     "file_name": "MWTGPROV-4006_54.2_NBOP_to_hide_the_page_Port-in_status_for_TMO_only_20260515_171446.xlsx",
-    "status": "SUCCESS"
-  },
-  {
-    "timestamp": "2026-05-14 20:56:48",
-    "feature_id": "MWTGPROV-4006",
-    "pi": "PI-54",
-    "tc_count": 5,
-    "step_count": 26,
-    "strategy": "Data-First",
-    "file_path": "C:\\Users\\P3314665\\Documents\\mcp-jira-server\\TestSuiteGenerator\\outputs\\MWTGPROV-4006_54.2_NBOP_to_hide_the_page_Port-in_status_for_TMO_only_20260514_205646.xlsx",
-    "file_name": "MWTGPROV-4006_54.2_NBOP_to_hide_the_page_Port-in_status_for_TMO_only_20260514_205646.xlsx",
-    "status": "SUCCESS"
-  },
-  {
-    "timestamp": "2026-05-14 20:38:50",
-    "feature_id": "MWTGPROV-4006",
-    "pi": "PI-54",
-    "tc_count": 5,
-    "step_count": 26,
-    "strategy": "Data-First",
-    "file_path": "C:\\Users\\P3314665\\Documents\\mcp-jira-server\\TestSuiteGenerator\\outputs\\MWTGPROV-4006_54.2_NBOP_to_hide_the_page_Port-in_status_for_TMO_only_20260514_203847.xlsx",
-    "file_name": "MWTGPROV-4006_54.2_NBOP_to_hide_the_page_Port-in_status_for_TMO_only_20260514_203847.xlsx",
-    "status": "SUCCESS"
-  },
-  {
-    "timestamp": "2026-05-14 20:25:17",
-    "feature_id": "MWTGPROV-4006",
-    "pi": "PI-54",
-    "tc_count": 5,
-    "step_count": 26,
-    "strategy": "Data-First",
-    "file_path": "C:\\Users\\P3314665\\Documents\\mcp-jira-server\\TestSuiteGenerator\\outputs\\MWTGPROV-4006_54.2_NBOP_to_hide_the_page_Port-in_status_for_TMO_only_20260514_202516.xlsx",
-    "file_name": "MWTGPROV-4006_54.2_NBOP_to_hide_the_page_Port-in_status_for_TMO_only_20260514_202516.xlsx",
-    "status": "SUCCESS"
-  },
-  {
-    "timestamp": "2026-05-14 20:08:07",
-    "feature_id": "MWTGPROV-3943",
-    "pi": "Manual",
-    "tc_count": 17,
-    "step_count": 65,
-    "strategy": "Data-First",
-    "file_path": "C:\\Users\\P3314665\\Documents\\mcp-jira-server\\TestSuiteGenerator\\outputs\\MWTGPROV-3943_54.2_Retrieve_device_GETPOST_20260514_200805.xlsx",
-    "file_name": "MWTGPROV-3943_54.2_Retrieve_device_GETPOST_20260514_200805.xlsx",
-    "status": "SUCCESS"
-  },
-  {
-    "timestamp": "2026-05-14 19:58:25",
-    "feature_id": "MWTGPROV-3943",
-    "pi": "PI-54",
-    "tc_count": 18,
-    "step_count": 75,
-    "strategy": "Data-First",
-    "file_path": "C:\\Users\\P3314665\\Documents\\mcp-jira-server\\TestSuiteGenerator\\outputs\\MWTGPROV-3943_54.2_Retrieve_device_GETPOST_20260514_195823.xlsx",
-    "file_name": "MWTGPROV-3943_54.2_Retrieve_device_GETPOST_20260514_195823.xlsx",
-    "status": "SUCCESS"
-  },
-  {
-    "timestamp": "2026-05-14 19:48:18",
-    "feature_id": "MWTGPROV-3943",
-    "pi": "Manual",
-    "tc_count": 18,
-    "step_count": 75,
-    "strategy": "Data-First",
-    "file_path": "C:\\Users\\P3314665\\Documents\\mcp-jira-server\\TestSuiteGenerator\\outputs\\MWTGPROV-3943_54.2_Retrieve_device_GETPOST_20260514_194817.xlsx",
-    "file_name": "MWTGPROV-3943_54.2_Retrieve_device_GETPOST_20260514_194817.xlsx",
     "status": "SUCCESS"
   }
 ]

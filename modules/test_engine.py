@@ -36,6 +36,7 @@ class TestCase:
     story_linkage: str = ''
     label: str = ''
     category: str = 'Happy Path'
+    test_category: str = ''  # 8-category framework label (Cat1-Cat8)
 
 
 @dataclass
@@ -650,6 +651,7 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print, deep_mine_res
                     summary='TC%03d_%s_%s' % (_next_idx, jira.key, sg['title'][:90]),
                     description=_desc, preconditions=_precon,
                     story_linkage=jira.key, label=jira.key, category=sg['category'],
+                    test_category=sg.get('test_category', ''),
                     steps=_steps)
                 suite.test_cases.append(tc)
                 _next_idx += 1
@@ -705,6 +707,7 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print, deep_mine_res
                     summary='TC%03d_%s_%s' % (_next_idx, jira.key, sg['title'][:90]),
                     description=_desc, preconditions=_precon,
                     story_linkage=jira.key, label=jira.key, category=sg['category'],
+                    test_category=sg.get('test_category', ''),
                     steps=_steps)
                 suite.test_cases.append(tc)
                 _next_idx += 1
