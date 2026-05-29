@@ -2,13 +2,23 @@
 chalk_parser.py -- Extract PI links from TMO Testing Scope page,
 then extract feature-specific content from the selected PI page.
 Pattern reused from tmo_features_master_extractor_v2.py.
+
+V8.1: REST-first path added. Uses Confluence REST API when cookies are
+available, falls back to browser-based Playwright scraping on failure.
 """
-import re, time
+import re, time, sys
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple
+from pathlib import Path
 from .config import CHALK_BASE_URL, PAGE_LOAD_TIMEOUT_MS, NETWORK_IDLE_TIMEOUT_MS
 
+# Add shared module to path for REST client imports
+_SHARED_PATH = Path(__file__).resolve().parent.parent.parent / 'shared'
+if str(_SHARED_PATH) not in sys.path:
+    sys.path.insert(0, str(_SHARED_PATH))
+
 TMO_TESTING_SCOPE_URL = 'https://chalk.charter.com/spaces/MDA/pages/3007682647/TMO+Testing+Scope'
+TMO_TESTING_SCOPE_PAGE_ID = '3007682647'
 PI_PAT = re.compile(r'PI[-\s]?(\d+)', re.IGNORECASE)
 
 
@@ -47,6 +57,130 @@ class ChalkData:
 def _wait(page, timeout=NETWORK_IDLE_TIMEOUT_MS):
     try: page.wait_for_load_state('networkidle', timeout=timeout)
     except: pass
+
+
+# ============================================================
+# REST-FIRST WRAPPERS (V8.1 — try REST, fall back to browser)
+# ============================================================
+
+def discover_pi_links_rest(log=print, pi_range=range(46, 60)) -> Optional[List[PILink]]:
+    """Try to discover PI links via REST API (no browser needed).
+
+    Returns:
+        List of PILink objects if REST succeeds, None if it fails.
+    """
+    try:
+        from rest_clients import ChalkRestClient
+        client = ChalkRestClient(logger_fn=log)
+        if not client.health_check():
+            log('[CHALK-REST] Health check failed — will use browser')
+            return None
+
+        pi_pages = client.discover_pi_pages(pi_range)
+        if not pi_pages:
+            return None
+
+        return [PILink(label=p.label, url=p.url, number=p.number) for p in pi_pages]
+    except Exception as e:
+        log(f'[CHALK-REST] PI discovery failed: {e} — will use browser')
+        return None
+
+
+def discover_features_rest(page_id: str, log=print) -> Optional[List[Tuple[str, str]]]:
+    """Try to discover features on a PI page via REST API.
+
+    Args:
+        page_id: Confluence page ID for the PI page
+
+    Returns:
+        List of (feature_id, title) tuples if REST succeeds, None if it fails.
+    """
+    try:
+        from rest_clients import ChalkRestClient
+        client = ChalkRestClient(logger_fn=log)
+        features = client.discover_features_on_pi(page_id)
+        return features if features else None
+    except Exception as e:
+        log(f'[CHALK-REST] Feature discovery failed: {e} — will use browser')
+        return None
+
+
+def fetch_feature_rest(page_id: str, feature_id: str, log=print) -> Optional[ChalkData]:
+    """Try to fetch feature content via REST API.
+
+    Args:
+        page_id: Confluence page ID for the PI page
+        feature_id: Feature ID (e.g., 'MWTGPROV-4166')
+
+    Returns:
+        ChalkData object if REST succeeds, None if it fails.
+    """
+    try:
+        from rest_clients import ChalkRestClient
+        from rest_clients.chalk_data_extractor import extract_text_from_html, extract_tables_from_html
+
+        client = ChalkRestClient(logger_fn=log)
+        full_text, tables = client.fetch_feature_content(page_id, feature_id)
+
+        if not full_text:
+            return None
+
+        # Build ChalkData using the existing parser logic
+        data = ChalkData(feature_id=feature_id)
+        data.raw_text = full_text
+        data.tables = tables
+
+        # Parse the feature section (reuse existing logic)
+        lines = [ln.strip() for ln in full_text.split('\n') if ln.strip()]
+        if lines:
+            _parse_feature_from_lines(lines, data, feature_id, log)
+
+        if data.scenarios or data.scope:
+            log(f'[CHALK-REST] ✅ {feature_id}: {len(data.scenarios)} scenarios via REST')
+            return data
+        return None
+    except Exception as e:
+        log(f'[CHALK-REST] Feature fetch failed: {e} — will use browser')
+        return None
+
+
+def _parse_feature_from_lines(lines: List[str], data: ChalkData, feature_id: str, log=print):
+    """Parse feature content from text lines into ChalkData.
+
+    This is a thin wrapper that calls the existing _parse_feature_section logic
+    after locating the feature's section in the text.
+    """
+    fid = feature_id.upper()
+    feature_start = -1
+    feature_end = len(lines)
+
+    for i, ln in enumerate(lines):
+        if fid in ln.upper() and feature_start == -1:
+            feature_start = i
+            data.feature_title = ln.strip()
+            continue
+        if feature_start >= 0 and i > feature_start + 2:
+            ln_stripped = ln.strip()
+            m = re.match(r'^([A-Z][A-Z0-9]+-\d+)\b', ln_stripped)
+            if m and fid not in ln.upper():
+                feature_end = i
+                break
+
+    if feature_start == -1:
+        # Treat entire content as feature (same self-heal as browser path)
+        if len(lines) > 10:
+            feature_start = 0
+            feature_end = len(lines)
+            data.feature_title = feature_id
+        else:
+            return
+
+    feature_lines = lines[feature_start:feature_end]
+    _parse_feature_section(feature_lines, data, feature_id, log)
+
+    # Fallback: workflow table extraction
+    if not data.scenarios:
+        _parse_workflow_tables(feature_lines, data, fid, log)
 
 
 # ============================================================
