@@ -151,6 +151,7 @@ class TestCase:
     priority: str = 'P2'                         # "P1" | "P2" | "P3" — assigned by engine
     traceability: Optional[TraceabilityRecord] = None  # V8.0: links TC to data source
     dimension_values: Dict[str, str] = field(default_factory=dict)  # e.g., {"input_type": "IMEI"}
+    grounding_score: int = -1                    # 0–100 Grounding Score; -1 = not yet scored
 
 
 # ─── Test Suite (V8.0) ─────────────────────────────────────────────

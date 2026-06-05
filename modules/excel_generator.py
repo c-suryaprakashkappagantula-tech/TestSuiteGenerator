@@ -441,6 +441,28 @@ def _build_testcases_sheet(wb, suite: TestSuite, sheet_name=None, tc_subset=None
                 ws.cell(row=row, column=8, value=tc.story_linkage).alignment = _wrap
                 ws.cell(row=row, column=9, value=tc.label).alignment = _wrap
                 ws.cell(row=row, column=10, value=tc.story_linkage).alignment = _wrap
+                # Column 11: Grounding Score (colour-coded)
+                _gscore = getattr(tc, 'grounding_score', -1)
+                if _gscore == -1:
+                    # Score on-demand if not pre-scored
+                    try:
+                        from .grounding_scorer import score_tc as _score_tc
+                        _gscore = _score_tc(tc)
+                        tc.grounding_score = _gscore
+                    except Exception:
+                        _gscore = 0
+                _gcell = ws.cell(row=row, column=11, value='%d%%' % _gscore)
+                _gcell.alignment = _center
+                # Colour: green ≥80, yellow 60–79, red <60
+                if _gscore >= 80:
+                    _gcell.fill = PatternFill(start_color='C6EFCE', end_color='C6EFCE', fill_type='solid')
+                    _gcell.font = Font(name='Calibri', bold=True, size=11, color='375623')
+                elif _gscore >= 60:
+                    _gcell.fill = PatternFill(start_color='FFEB9C', end_color='FFEB9C', fill_type='solid')
+                    _gcell.font = Font(name='Calibri', bold=True, size=11, color='7D6608')
+                else:
+                    _gcell.fill = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
+                    _gcell.font = Font(name='Calibri', bold=True, size=11, color='9C0006')
             ws.cell(row=row, column=5, value=step.step_num).alignment = _wrap
             ws.cell(row=row, column=6, value=step.summary).alignment = _wrap
             ws.cell(row=row, column=7, value=step.expected).alignment = _wrap

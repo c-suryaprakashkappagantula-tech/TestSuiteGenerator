@@ -786,6 +786,15 @@ with right:
     if ss.get('result_path') and Path(ss['result_path']).exists():
         with output_area:
             info = ss.get('suite_info', {})
+            _grounding_pct = info.get('grounding_pct', -1)
+            _grounding_badge = info.get('grounding_badge', '')
+            _grounding_display = ('%s %g%%' % (_grounding_badge, _grounding_pct)) if _grounding_pct >= 0 else 'V8'
+            _grounding_color = (
+                'linear-gradient(90deg,#22c55e,#10b981)' if _grounding_pct >= 80
+                else 'linear-gradient(90deg,#f59e0b,#f97316)' if _grounding_pct >= 60
+                else 'linear-gradient(90deg,#ef4444,#dc2626)' if _grounding_pct >= 0
+                else 'linear-gradient(90deg,#f59e0b,#f97316)'
+            )
             st.markdown("""<div class='stats-row'>
                 <div class='stat-card' style='--accent: linear-gradient(90deg,#8b5cf6,#6366f1);'>
                     <div class='icon'>&#128203;</div>
@@ -796,10 +805,11 @@ with right:
                 <div class='stat-card' style='--accent: linear-gradient(90deg,#22c55e,#10b981);'>
                     <div class='icon'>&#128196;</div>
                     <div class='label'>Data Sources</div><div class='value'>%d</div></div>
-                <div class='stat-card' style='--accent: linear-gradient(90deg,#f59e0b,#f97316);'>
-                    <div class='icon'>&#9989;</div>
-                    <div class='label'>Engine</div><div class='value'>V8</div></div>
-            </div>""" % (info.get('tc_count', 0), info.get('step_count', 0), info.get('data_source_count', 0)),
+                <div class='stat-card' style='--accent: %s;'>
+                    <div class='icon'>&#127919;</div>
+                    <div class='label'>Grounding</div><div class='value'>%s</div></div>
+            </div>""" % (info.get('tc_count', 0), info.get('step_count', 0),
+                         info.get('data_source_count', 0), _grounding_color, _grounding_display),
             unsafe_allow_html=True)
 
             _dl_c1, _dl_c2 = st.columns([2, 1])
@@ -1713,11 +1723,22 @@ if run_btn:
                     out_path = output['out_path']
                     _data_source_count = len(suite.data_inventory.sources) if suite.data_inventory else 0
 
+                    # Compute grounding stats for badge display
+                    try:
+                        from modules.grounding_scorer import suite_grounding_pct, grounding_badge
+                        suite_grounding_pct_val = suite_grounding_pct(suite.test_cases)
+                        grounding_badge_val = grounding_badge(suite_grounding_pct_val)
+                    except Exception:
+                        suite_grounding_pct_val = -1
+                        grounding_badge_val = ''
+
                     ss['result_path'] = str(out_path)
                     ss['suite_info'] = {
                         'tc_count': output['tc_count'],
                         'step_count': output['total_steps'],
                         'data_source_count': _data_source_count,
+                        'grounding_pct': suite_grounding_pct_val,
+                        'grounding_badge': grounding_badge_val,
                     }
                     ss['last_feature_id'] = feature_id
                     ss['last_suite_id'] = output.get('suite_id', '')

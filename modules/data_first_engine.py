@@ -262,6 +262,16 @@ def build_test_suite_v8(
     else:
         log('[V8-ENGINE] Zero-generic validation PASSED')
 
+    # ── Grounding Gate: score every TC, drop those below threshold ──
+    from .grounding_scorer import gate_suite, suite_grounding_pct, grounding_badge, GATE_THRESHOLD
+    _gate_threshold = options.get('grounding_threshold', GATE_THRESHOLD)
+    log('[V8-ENGINE] Step 4b: Grounding gate (threshold=%d)...' % _gate_threshold)
+    suite.test_cases = gate_suite(suite.test_cases, threshold=_gate_threshold, log=log)
+    _grounding_pct = suite_grounding_pct(suite.test_cases)
+    _badge = grounding_badge(_grounding_pct)
+    log('[V8-ENGINE] %s Grounding: %.1f%% | %d TCs passed gate' % (
+        _badge, _grounding_pct, len(suite.test_cases)))
+
     # ── Build Routing Audit ──
     _api_tcs = sum(1 for tc in test_cases if tc.category != 'Negative' and classification.classification in ('api', 'hybrid'))
     _ui_tcs = sum(1 for tc in test_cases if classification.classification in ('ui', 'hybrid') and
