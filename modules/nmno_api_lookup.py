@@ -229,7 +229,12 @@ def parse_business_rules(table_data_json: str, section_name: str, section_url: s
 
 
 def _extract_error_code(rule: NMNOBusinessRule):
-    """Extract error code from error_details or rule_name fields."""
+    """Extract error code from error_details or rule_name fields.
+
+    Also cleans up concatenated error codes in error_details — when a Chalk table
+    cell contains two rules merged together like 'ERR12 - desc1ERR13 - desc2',
+    we keep only the first rule's text (matching the extracted error_code).
+    """
     # Look for ERR## pattern or HTTP status codes
     all_text = ' '.join([rule.error_details, rule.rule_name, rule.rule_description])
     err_match = re.search(r'(ERR\d+)', all_text, re.IGNORECASE)
@@ -240,6 +245,23 @@ def _extract_error_code(rule: NMNOBusinessRule):
         http_match = re.search(r'\b(4\d{2}|5\d{2}|3\d{2})\b', all_text)
         if http_match:
             rule.error_code = http_match.group(1)
+
+    # Clean concatenated error_details: split on second ERR occurrence
+    # e.g. "ERR12 - MDN expected length: 10ERR13- MDN expected length: 10"
+    # → keep only "ERR12 - MDN expected length: 10"
+    if rule.error_details and rule.error_code:
+        # Find all error code positions in the string
+        all_matches = list(re.finditer(r'ERR\d+', rule.error_details, re.IGNORECASE))
+        if len(all_matches) >= 2:
+            # Truncate at the start of the second error code
+            second_start = all_matches[1].start()
+            rule.error_details = rule.error_details[:second_start].rstrip('- \n')
+        # Also clean error_details if it's just repeating the code at start
+        if rule.error_details.upper().startswith(rule.error_code.upper()):
+            # Trim the redundant "ERR12 - " prefix from condition if present
+            suffix = rule.error_details[len(rule.error_code):].lstrip(' -–:')
+            if suffix:
+                rule.condition = rule.condition or suffix[:100]
 
 
 # ================================================================

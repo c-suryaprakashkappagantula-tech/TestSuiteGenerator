@@ -623,14 +623,26 @@ def _build_scenario_tc(
             if any(kw in step_low for kw in ['invoke', 'call', 'trigger', 'send', 'submit']):
                 _exp = 'API accepts the request and responds successfully'
             elif any(kw in step_low for kw in ['verify', 'validate', 'check', 'confirm']):
-                _exp = scenario.validation[:120] if scenario.validation else 'Verification passes as expected'
+                _val = scenario.validation or ''
+                _val_is_header = (
+                    'scenario #' in _val.lower()
+                    or _val.lower().startswith(('test scenario', 'validation', 'negative scenarios',
+                                                'edge scenarios', 'positive scenarios', 'regression scenarios'))
+                )
+                _exp = _val[:120] if _val and not _val_is_header else 'Verification passes as expected'
             elif any(kw in step_low for kw in ['login', 'navigate', 'open', 'launch']):
                 _exp = 'Portal/screen loads successfully and is ready for input'
             elif any(kw in step_low for kw in ['view', 'display', 'observe']):
                 _exp = 'Data displayed correctly matches expected values'
             else:
                 # Use the Chalk validation as the expected result, not a placeholder
-                _exp = scenario.validation[:120] if scenario.validation else 'Step completed successfully'
+                _val2 = scenario.validation or ''
+                _val2_is_header = (
+                    'scenario #' in _val2.lower()
+                    or _val2.lower().startswith(('test scenario', 'validation', 'negative scenarios',
+                                                 'edge scenarios', 'positive scenarios', 'regression scenarios'))
+                )
+                _exp = _val2[:120] if _val2 and not _val2_is_header else 'Step completed successfully'
             steps.append(TestStep(
                 step_num=i,
                 summary=hint,
@@ -639,12 +651,26 @@ def _build_scenario_tc(
             ))
         # Add final verification step with the actual validation from Chalk
         if scenario.validation and scenario.validation != scenario.title:
-            steps.append(TestStep(
-                step_num=len(steps) + 1,
-                summary='Verify expected result: %s' % scenario.title[:80],
-                expected=scenario.validation,
-                data_reference=scenario.source.source_id,
-            ))
+            # Guard: reject Chalk table header text that leaked into validation field
+            _val_clean = (scenario.validation or '').strip()
+            _table_headers = (
+                'scenario #' in _val_clean.lower()
+                or _val_clean.lower().startswith('test scenario')
+                or _val_clean.lower().startswith('validation')
+                or _val_clean.lower().startswith('negative scenarios')
+                or _val_clean.lower().startswith('edge scenarios')
+                or _val_clean.lower().startswith('positive scenarios')
+                or _val_clean.lower().startswith('regression scenarios')
+                or (len(_val_clean) < 20 and _val_clean.lower() in
+                    ('validation', 'expected result', 'test scenario', 'scenario'))
+            )
+            if not _table_headers:
+                steps.append(TestStep(
+                    step_num=len(steps) + 1,
+                    summary='Verify expected result: %s' % scenario.title[:80],
+                    expected=_val_clean[:200],
+                    data_reference=scenario.source.source_id,
+                ))
     elif scenario.api_spec:
         # Build steps from API spec
         spec = scenario.api_spec
