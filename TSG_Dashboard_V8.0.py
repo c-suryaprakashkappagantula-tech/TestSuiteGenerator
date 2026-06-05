@@ -525,7 +525,7 @@ with left:
                         from modules.chalk_parser import discover_features_rest, fetch_feature_rest
 
                         _rc = ChalkRestClient(logger_fn=lambda m: None)
-                        if _rc.health_check():
+                        if _rc.health_check_with_refresh():
                             _rest_ok = True
                     except Exception:
                         pass
@@ -1128,7 +1128,7 @@ if ss.get('_sync_running'):
         from modules.chalk_parser import discover_features_rest, fetch_feature_rest
 
         _rest_client = ChalkRestClient(logger_fn=_sync_msg)
-        if _rest_client.health_check():
+        if _rest_client.health_check_with_refresh():
             _rest_available = True
             _sync_msg('✅ REST API available — using fast-path (no browser needed)')
         else:
@@ -1491,7 +1491,7 @@ if run_btn:
                     if _shared_p not in sys.path:
                         sys.path.insert(0, _shared_p)
                     from rest_clients import ChalkRestClient as _CRC, JiraRestClient as _JRC
-                    _rest_ok = _CRC(logger_fn=lambda m: None).health_check()
+                    _rest_ok = _CRC(logger_fn=lambda m: None).health_check_with_refresh()
                     if not _rest_ok:
                         _rest_ok = _JRC(logger_fn=lambda m: None).health_check()
                 except Exception:
