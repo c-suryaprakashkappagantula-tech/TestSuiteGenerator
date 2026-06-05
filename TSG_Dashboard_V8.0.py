@@ -496,31 +496,73 @@ with left:
                     stats['feature_count'], chalk_count, stats['db_size_kb']))
             else:
                 with st.spinner('First run: fetching ALL PI features + Chalk data (one-time, cached to DB)...'):
+                    import re as _re_firstrun
+                    def _firstrun_page_id(url):
+                        m = _re_firstrun.search(r'/pages/(\d+)/', url)
+                        return m.group(1) if m else ''
+
+                    # Try REST-first path (no browser needed)
+                    _rest_ok = False
                     try:
-                        _pw = sync_playwright().start()
-                        _br = _pw.chromium.launch(headless=True, channel=get_browser_channel())
-                        _cx = _br.new_context(viewport={'width': 1920, 'height': 1080})
-                        _pg = _cx.new_page()
+                        _shared_p = str(Path(__file__).resolve().parent.parent / 'shared')
+                        if _shared_p not in sys.path:
+                            sys.path.insert(0, _shared_p)
+                        from rest_clients import ChalkRestClient
+                        from modules.chalk_parser import discover_features_rest, fetch_feature_rest
+
+                        _rc = ChalkRestClient(logger_fn=lambda m: None)
+                        if _rc.health_check():
+                            _rest_ok = True
+                    except Exception:
+                        pass
+
+                    try:
                         _all = {}
                         save_pi_pages(ss['pi_list'])
-                        for _pi_label, _pi_url in ss['pi_list']:
-                            _feats = discover_features_on_pi(_pg, _pi_url, log=lambda m: None)
-                            _all[_pi_label] = _feats
-                            save_features(_pi_label, _feats)
-                            for _fid, _ftitle in _feats:
-                                try:
-                                    _chalk = fetch_feature_from_pi(_pg, _pi_url, _fid, log=lambda m: None)
-                                    if _chalk and _chalk.scenarios:
-                                        save_chalk(_fid, _pi_label, _chalk)
-                                except:
-                                    pass
+
+                        if _rest_ok:
+                            # REST fast-path
+                            for _pi_label, _pi_url in ss['pi_list']:
+                                _pid = _firstrun_page_id(_pi_url)
+                                if not _pid:
+                                    continue
+                                _feats = discover_features_rest(_pid, log=lambda m: None)
+                                if _feats is None:
+                                    continue
+                                _all[_pi_label] = _feats
+                                save_features(_pi_label, _feats)
+                                for _fid, _ftitle in _feats:
+                                    try:
+                                        _chalk = fetch_feature_rest(_pid, _fid, log=lambda m: None)
+                                        if _chalk and _chalk.scenarios:
+                                            save_chalk(_fid, _pi_label, _chalk)
+                                    except:
+                                        pass
+                        else:
+                            # Browser fallback
+                            _pw = sync_playwright().start()
+                            _br = _pw.chromium.launch(headless=True, channel=get_browser_channel())
+                            _cx = _br.new_context(viewport={'width': 1920, 'height': 1080})
+                            _pg = _cx.new_page()
+                            for _pi_label, _pi_url in ss['pi_list']:
+                                _feats = discover_features_on_pi(_pg, _pi_url, log=lambda m: None)
+                                _all[_pi_label] = _feats
+                                save_features(_pi_label, _feats)
+                                for _fid, _ftitle in _feats:
+                                    try:
+                                        _chalk = fetch_feature_from_pi(_pg, _pi_url, _fid, log=lambda m: None)
+                                        if _chalk and _chalk.scenarios:
+                                            save_chalk(_fid, _pi_label, _chalk)
+                                    except:
+                                        pass
+                            _cx.close(); _br.close(); _pw.stop()
+
                         ss['all_pi_features'] = _all
-                        _cx.close(); _br.close(); _pw.stop()
                         if ss['selected_pi']:
                             ss['pi_features'] = _all.get(ss['selected_pi'], [])
                         st.rerun()
                     except Exception as _e:
-                        st.error('Feature fetch failed: %s. Use Manual mode.' % _e)
+                        st.error('Feature fetch failed: %s. Use Manual mode or run preload_db.py first.' % _e)
                         for _obj in ('_cx', '_br', '_pw'):
                             try: locals()[_obj].close() if _obj != '_pw' else locals()[_obj].stop()
                             except: pass
@@ -1052,76 +1094,178 @@ if ss.get('_sync_running'):
         _sync_lines.append('[%s] %s' % (ts_short(), msg))
         view = '\n'.join(reversed(_sync_lines[-200:]))
         _sync_log.markdown("<div class='cli-box'><pre>%s</pre></div>" % escape(view), unsafe_allow_html=True)
+        time.sleep(0.05)  # Yield to Streamlit renderer so UI updates are visible
 
     _sync_header.markdown("<div class='cli-header'>>> Syncing from Chalk (%s)...</div>" % _sync_scope, unsafe_allow_html=True)
 
+    # ── Helper: extract page_id from Chalk URL ──
+    import re as _re_sync
+    def _sync_extract_page_id(url):
+        m = _re_sync.search(r'/pages/(\d+)/', url)
+        return m.group(1) if m else ''
+
+    # ── REST-FIRST SYNC PATH ──
+    _rest_available = False
     try:
-        _sync_msg('Launching browser...')
-        pw = sync_playwright().start()
-        browser = pw.chromium.launch(headless=True, channel=get_browser_channel())
-        ctx = browser.new_context(viewport={'width': 1920, 'height': 1080})
-        page = ctx.new_page()
-        _sync_msg('Browser launched')
+        _shared_path = str(Path(__file__).resolve().parent.parent / 'shared')
+        if _shared_path not in sys.path:
+            sys.path.insert(0, _shared_path)
+        from rest_clients import ChalkRestClient
+        from modules.chalk_parser import discover_features_rest, fetch_feature_rest
 
-        _sync_msg('Discovering PI pages (auto-detecting new PIs)...')
-        pi_links = discover_pi_links(page, log=lambda m: None)
-        _new_pi_list = [(p.label, p.url) for p in pi_links]
-
-        _old_labels = set(label for label, url in ss.get('pi_list', []))
-        _new_labels = set(label for label, url in _new_pi_list)
-        _added_pis = _new_labels - _old_labels
-        if _added_pis:
-            _sync_msg('NEW PIs detected: %s' % ', '.join(sorted(_added_pis)))
-
-        ss['pi_list'] = _new_pi_list
-        save_pi_pages(ss['pi_list'])
-        _sync_msg('Found %d PIs%s' % (len(ss['pi_list']),
-            ' (NEW: %s)' % ', '.join(sorted(_added_pis)) if _added_pis else ''))
-
-        if _sync_scope == 'Specific Iteration(s)' and _specific_pis:
-            _pis_to_sync = [(label, url) for label, url in ss['pi_list'] if label in _specific_pis]
-            _sync_msg('Syncing %d specific PI(s): %s' % (len(_pis_to_sync), ', '.join(_specific_pis)))
+        _rest_client = ChalkRestClient(logger_fn=_sync_msg)
+        if _rest_client.health_check():
+            _rest_available = True
+            _sync_msg('✅ REST API available — using fast-path (no browser needed)')
         else:
-            _pis_to_sync = ss['pi_list']
-            _sync_msg('Syncing ALL %d PIs' % len(_pis_to_sync))
+            _sync_msg('⚠️ REST health check failed — falling back to browser')
+    except Exception as _rest_err:
+        _sync_msg(f'⚠️ REST client unavailable ({_rest_err}) — using browser')
 
-        _all = ss.get('all_pi_features', {})
-        _chalk_count = 0
-        _total_feats = 0
-        for _pi_idx, (_pi_label, _pi_url) in enumerate(_pis_to_sync, 1):
-            _sync_msg('[%d/%d] Scanning %s...' % (_pi_idx, len(_pis_to_sync), _pi_label))
-            _feats = discover_features_on_pi(page, _pi_url, log=lambda m: None)
-            _all[_pi_label] = _feats
-            save_features(_pi_label, _feats)
-            _total_feats += len(_feats)
+    try:
+        if _rest_available:
+            # ── REST SYNC (no browser) ──
+            # Discover PI pages via REST
+            _sync_msg('Discovering PI pages via REST...')
+            _pi_pages = _rest_client.discover_pi_pages(pi_range=range(46, 60))
+            if _pi_pages:
+                _new_pi_list = [(p.label, p.url) for p in _pi_pages]
+                _old_labels = set(label for label, url in ss.get('pi_list', []))
+                _new_labels = set(label for label, url in _new_pi_list)
+                _added_pis = _new_labels - _old_labels
+                if _added_pis:
+                    _sync_msg('NEW PIs detected: %s' % ', '.join(sorted(_added_pis)))
+                ss['pi_list'] = _new_pi_list
+                save_pi_pages(ss['pi_list'])
+                _sync_msg('Found %d PIs via REST%s' % (len(ss['pi_list']),
+                    ' (NEW: %s)' % ', '.join(sorted(_added_pis)) if _added_pis else ''))
+            else:
+                _sync_msg('REST PI discovery returned empty — using existing PI list')
 
-            _pi_chalk = 0
-            for _fi, (_fid, _ftitle) in enumerate(_feats, 1):
-                try:
-                    _chalk = fetch_feature_from_pi(page, _pi_url, _fid, log=lambda m: None)
-                    if _chalk and _chalk.scenarios:
-                        save_chalk(_fid, _pi_label, _chalk)
-                        _chalk_count += 1
-                        _pi_chalk += 1
-                except:
-                    pass
-            _sync_msg('[%d/%d] %s: %d features, %d with Chalk data' % (
-                _pi_idx, len(_pis_to_sync), _pi_label, len(_feats), _pi_chalk))
+            if _sync_scope == 'Specific Iteration(s)' and _specific_pis:
+                _pis_to_sync = [(label, url) for label, url in ss['pi_list'] if label in _specific_pis]
+                _sync_msg('Syncing %d specific PI(s): %s' % (len(_pis_to_sync), ', '.join(_specific_pis)))
+            else:
+                _pis_to_sync = ss['pi_list']
+                _sync_msg('Syncing ALL %d PIs via REST' % len(_pis_to_sync))
 
-        ss['all_pi_features'] = _all
-        if ss['selected_pi'] and ss['selected_pi'] in _all:
-            ss['pi_features'] = _all[ss['selected_pi']]
+            _all = ss.get('all_pi_features', {})
+            _chalk_count = 0
+            _total_feats = 0
+            for _pi_idx, (_pi_label, _pi_url) in enumerate(_pis_to_sync, 1):
+                _page_id = _sync_extract_page_id(_pi_url)
+                if not _page_id:
+                    _sync_msg('[%d/%d] %s: ⚠️ No page_id — skipping' % (_pi_idx, len(_pis_to_sync), _pi_label))
+                    continue
+
+                _sync_msg('[%d/%d] %s (REST)...' % (_pi_idx, len(_pis_to_sync), _pi_label))
+                _feats = discover_features_rest(_page_id, log=_sync_msg)
+                if _feats is None:
+                    _sync_msg('[%d/%d] %s: REST feature discovery failed — skipping' % (_pi_idx, len(_pis_to_sync), _pi_label))
+                    continue
+
+                _all[_pi_label] = _feats
+                save_features(_pi_label, _feats)
+                _total_feats += len(_feats)
+                _sync_msg('[%d/%d] %s: Found %d features — fetching Chalk data...' % (_pi_idx, len(_pis_to_sync), _pi_label, len(_feats)))
+
+                _pi_chalk = 0
+                for _fi, (_fid, _ftitle) in enumerate(_feats, 1):
+                    try:
+                        _chalk = fetch_feature_rest(_page_id, _fid, log=lambda m: None)
+                        if _chalk and _chalk.scenarios:
+                            save_chalk(_fid, _pi_label, _chalk)
+                            _chalk_count += 1
+                            _pi_chalk += 1
+                            if _fi % 3 == 0 or _fi == len(_feats):
+                                _sync_msg('[%d/%d] %s: %d/%d features processed...' % (_pi_idx, len(_pis_to_sync), _pi_label, _fi, len(_feats)))
+                    except:
+                        pass
+                _sync_msg('[%d/%d] %s: %d features, %d with Chalk data ✅' % (
+                    _pi_idx, len(_pis_to_sync), _pi_label, len(_feats), _pi_chalk))
+
+            ss['all_pi_features'] = _all
+            if ss['selected_pi'] and ss['selected_pi'] in _all:
+                ss['pi_features'] = _all[ss['selected_pi']]
+            else:
+                ss['selected_pi'] = None
+                ss['selected_pi_url'] = ''
+                ss['pi_features'] = []
+
+            _done_msg = 'DONE (REST): %d PIs synced | %d features | %d with Chalk data' % (
+                len(_pis_to_sync), _total_feats, _chalk_count)
+            _sync_msg(_done_msg)
+            _sync_header.markdown("<div class='cli-header'>>> Sync complete! (REST fast-path)</div>", unsafe_allow_html=True)
+            ss['logs'] = _sync_lines
+
         else:
-            ss['selected_pi'] = None
-            ss['selected_pi_url'] = ''
-            ss['pi_features'] = []
-        ctx.close(); browser.close(); pw.stop()
+            # ── BROWSER FALLBACK SYNC ──
+            _sync_msg('Launching browser...')
+            pw = sync_playwright().start()
+            browser = pw.chromium.launch(headless=True, channel=get_browser_channel())
+            ctx = browser.new_context(viewport={'width': 1920, 'height': 1080})
+            page = ctx.new_page()
+            _sync_msg('Browser launched')
 
-        _done_msg = 'DONE: %d PIs synced | %d features | %d with Chalk data' % (
-            len(_pis_to_sync), _total_feats, _chalk_count)
-        _sync_msg(_done_msg)
-        _sync_header.markdown("<div class='cli-header'>>> Sync complete!</div>", unsafe_allow_html=True)
-        ss['logs'] = _sync_lines
+            _sync_msg('Discovering PI pages (auto-detecting new PIs)...')
+            pi_links = discover_pi_links(page, log=lambda m: None)
+            _new_pi_list = [(p.label, p.url) for p in pi_links]
+
+            _old_labels = set(label for label, url in ss.get('pi_list', []))
+            _new_labels = set(label for label, url in _new_pi_list)
+            _added_pis = _new_labels - _old_labels
+            if _added_pis:
+                _sync_msg('NEW PIs detected: %s' % ', '.join(sorted(_added_pis)))
+
+            ss['pi_list'] = _new_pi_list
+            save_pi_pages(ss['pi_list'])
+            _sync_msg('Found %d PIs%s' % (len(ss['pi_list']),
+                ' (NEW: %s)' % ', '.join(sorted(_added_pis)) if _added_pis else ''))
+
+            if _sync_scope == 'Specific Iteration(s)' and _specific_pis:
+                _pis_to_sync = [(label, url) for label, url in ss['pi_list'] if label in _specific_pis]
+                _sync_msg('Syncing %d specific PI(s): %s' % (len(_pis_to_sync), ', '.join(_specific_pis)))
+            else:
+                _pis_to_sync = ss['pi_list']
+                _sync_msg('Syncing ALL %d PIs' % len(_pis_to_sync))
+
+            _all = ss.get('all_pi_features', {})
+            _chalk_count = 0
+            _total_feats = 0
+            for _pi_idx, (_pi_label, _pi_url) in enumerate(_pis_to_sync, 1):
+                _sync_msg('[%d/%d] Scanning %s...' % (_pi_idx, len(_pis_to_sync), _pi_label))
+                _feats = discover_features_on_pi(page, _pi_url, log=lambda m: None)
+                _all[_pi_label] = _feats
+                save_features(_pi_label, _feats)
+                _total_feats += len(_feats)
+
+                _pi_chalk = 0
+                for _fi, (_fid, _ftitle) in enumerate(_feats, 1):
+                    try:
+                        _chalk = fetch_feature_from_pi(page, _pi_url, _fid, log=lambda m: None)
+                        if _chalk and _chalk.scenarios:
+                            save_chalk(_fid, _pi_label, _chalk)
+                            _chalk_count += 1
+                            _pi_chalk += 1
+                    except:
+                        pass
+                _sync_msg('[%d/%d] %s: %d features, %d with Chalk data' % (
+                    _pi_idx, len(_pis_to_sync), _pi_label, len(_feats), _pi_chalk))
+
+            ss['all_pi_features'] = _all
+            if ss['selected_pi'] and ss['selected_pi'] in _all:
+                ss['pi_features'] = _all[ss['selected_pi']]
+            else:
+                ss['selected_pi'] = None
+                ss['selected_pi_url'] = ''
+                ss['pi_features'] = []
+            ctx.close(); browser.close(); pw.stop()
+
+            _done_msg = 'DONE: %d PIs synced | %d features | %d with Chalk data' % (
+                len(_pis_to_sync), _total_feats, _chalk_count)
+            _sync_msg(_done_msg)
+            _sync_header.markdown("<div class='cli-header'>>> Sync complete!</div>", unsafe_allow_html=True)
+            ss['logs'] = _sync_lines
 
     except Exception as e:
         _sync_msg('ERROR: %s' % str(e)[:200])
@@ -1153,35 +1297,100 @@ if ss.get('_jira_sync_running'):
         _jsync_lines.append('[%s] %s' % (ts_short(), msg))
         view = '\n'.join(reversed(_jsync_lines[-200:]))
         _jsync_log.markdown("<div class='cli-box'><pre>%s</pre></div>" % escape(view), unsafe_allow_html=True)
+        time.sleep(0.05)  # Yield to Streamlit renderer so UI updates are visible
 
     _jsync_header.markdown("<div class='cli-header'>>> Syncing Jira data for %d features...</div>" % len(_jira_features), unsafe_allow_html=True)
 
+    # ── REST-FIRST JIRA SYNC ──
+    _jira_rest_available = False
     try:
-        _jsync_msg('Launching browser for Jira fetch...')
-        pw = sync_playwright().start()
-        browser = pw.chromium.launch(headless=True, channel=get_browser_channel())
-        ctx = browser.new_context(viewport={'width': 1920, 'height': 1080})
-        page = ctx.new_page()
-        _jsync_msg('Browser launched')
+        _shared_p_jira = str(Path(__file__).resolve().parent.parent / 'shared')
+        if _shared_p_jira not in sys.path:
+            sys.path.insert(0, _shared_p_jira)
+        from rest_clients import JiraRestClient
+        from modules.jira_fetcher import fetch_jira_issue_rest
 
+        _jira_rc = JiraRestClient(logger_fn=_jsync_msg)
+        if _jira_rc.health_check():
+            _jira_rest_available = True
+            _jsync_msg('✅ Jira REST API available — using fast-path (no browser needed)')
+        else:
+            _jsync_msg('⚠️ Jira REST health check failed — falling back to browser')
+    except Exception as _jira_rest_err:
+        _jsync_msg(f'⚠️ Jira REST client unavailable ({_jira_rest_err}) — using browser')
+
+    try:
         _jira_ok = 0
         _jira_fail = 0
         _jira_total = len(_jira_features)
+        _jira_rest_failures = []  # Features that failed REST, need browser
 
-        for _ji, (_jfid, _jtitle) in enumerate(_jira_features, 1):
-            try:
-                _jsync_msg('[%d/%d] Fetching Jira: %s — %s' % (_ji, _jira_total, _jfid, _jtitle[:40]))
-                jira = fetch_jira_issue(page, _jfid, log=lambda m: None)
-                save_jira(jira)
-                _jsync_msg('[%d/%d] ✅ %s' % (_ji, _jira_total, _jfid))
-                _jira_ok += 1
-            except Exception as _je:
-                _jsync_msg('[%d/%d] ❌ %s: FAILED — %s' % (_ji, _jira_total, _jfid, str(_je)[:80]))
-                _jira_fail += 1
+        if _jira_rest_available:
+            # ── REST SYNC (no browser) ──
+            for _ji, (_jfid, _jtitle) in enumerate(_jira_features, 1):
+                try:
+                    _jsync_msg('[%d/%d] Fetching Jira (REST): %s — %s' % (_ji, _jira_total, _jfid, _jtitle[:40]))
+                    jira = fetch_jira_issue_rest(_jfid, log=lambda m: None)
+                    if jira and jira.summary:
+                        save_jira(jira)
+                        _jsync_msg('[%d/%d] ✅ %s (REST)' % (_ji, _jira_total, _jfid))
+                        _jira_ok += 1
+                    else:
+                        _jsync_msg('[%d/%d] ⚠️ %s: REST returned empty — queued for browser' % (_ji, _jira_total, _jfid))
+                        _jira_rest_failures.append((_jfid, _jtitle))
+                except Exception as _je:
+                    _jsync_msg('[%d/%d] ⚠️ %s: REST failed — queued for browser' % (_ji, _jira_total, _jfid))
+                    _jira_rest_failures.append((_jfid, _jtitle))
 
-        ctx.close(); browser.close(); pw.stop()
-        _jsync_msg('JIRA SYNC COMPLETE: %d/%d succeeded | %d failed' % (_jira_ok, _jira_total, _jira_fail))
-        _jsync_header.markdown("<div class='cli-header'>>> Jira sync complete! %d/%d features</div>" % (_jira_ok, _jira_total), unsafe_allow_html=True)
+            # Browser fallback for REST failures
+            if _jira_rest_failures:
+                _jsync_msg(f'Launching browser for {len(_jira_rest_failures)} REST failures...')
+                pw = sync_playwright().start()
+                browser = pw.chromium.launch(headless=True, channel=get_browser_channel())
+                ctx = browser.new_context(viewport={'width': 1920, 'height': 1080})
+                page = ctx.new_page()
+
+                for _ji2, (_jfid2, _jtitle2) in enumerate(_jira_rest_failures, 1):
+                    try:
+                        _jsync_msg('[%d/%d] Fetching Jira (browser): %s' % (_ji2, len(_jira_rest_failures), _jfid2))
+                        jira = fetch_jira_issue(page, _jfid2, log=lambda m: None)
+                        save_jira(jira)
+                        _jsync_msg('[%d/%d] ✅ %s (browser)' % (_ji2, len(_jira_rest_failures), _jfid2))
+                        _jira_ok += 1
+                    except Exception as _je2:
+                        _jsync_msg('[%d/%d] ❌ %s: FAILED — %s' % (_ji2, len(_jira_rest_failures), _jfid2, str(_je2)[:80]))
+                        _jira_fail += 1
+
+                ctx.close(); browser.close(); pw.stop()
+            else:
+                _jira_fail = 0
+
+            _method = 'REST' if not _jira_rest_failures else 'REST + Browser'
+        else:
+            # ── BROWSER-ONLY SYNC ──
+            _jsync_msg('Launching browser for Jira fetch...')
+            pw = sync_playwright().start()
+            browser = pw.chromium.launch(headless=True, channel=get_browser_channel())
+            ctx = browser.new_context(viewport={'width': 1920, 'height': 1080})
+            page = ctx.new_page()
+            _jsync_msg('Browser launched')
+
+            for _ji, (_jfid, _jtitle) in enumerate(_jira_features, 1):
+                try:
+                    _jsync_msg('[%d/%d] Fetching Jira: %s — %s' % (_ji, _jira_total, _jfid, _jtitle[:40]))
+                    jira = fetch_jira_issue(page, _jfid, log=lambda m: None)
+                    save_jira(jira)
+                    _jsync_msg('[%d/%d] ✅ %s' % (_ji, _jira_total, _jfid))
+                    _jira_ok += 1
+                except Exception as _je:
+                    _jsync_msg('[%d/%d] ❌ %s: FAILED — %s' % (_ji, _jira_total, _jfid, str(_je)[:80]))
+                    _jira_fail += 1
+
+            ctx.close(); browser.close(); pw.stop()
+            _method = 'Browser'
+
+        _jsync_msg('JIRA SYNC COMPLETE (%s): %d/%d succeeded | %d failed' % (_method, _jira_ok, _jira_total, _jira_fail))
+        _jsync_header.markdown("<div class='cli-header'>>> Jira sync complete! %d/%d features (%s)</div>" % (_jira_ok, _jira_total, _method), unsafe_allow_html=True)
         ss['logs'] = _jsync_lines
 
     except Exception as e:
@@ -1245,14 +1454,37 @@ if run_btn:
 
         with redirect_stdout(logger):
             try:
-                # ── Block 0: Browser Launch ──
+                # ── Block 0: REST health check — browser only opened if needed ──
                 pipe = Pipeline(log=logger)
-                logger.set('Launching browser...')
-                pw = sync_playwright().start()
-                browser = pw.chromium.launch(headless=not headed, channel=get_browser_channel())
-                context = browser.new_context(accept_downloads=True, viewport={'width': 1920, 'height': 1080})
-                page = context.new_page()
-                exit_items.append('Browser launched')
+
+                # Check if REST is available (Chalk + Jira)
+                _rest_ok = False
+                try:
+                    _shared_p = str(Path(__file__).resolve().parent.parent / 'shared')
+                    if _shared_p not in sys.path:
+                        sys.path.insert(0, _shared_p)
+                    from rest_clients import ChalkRestClient as _CRC, JiraRestClient as _JRC
+                    _rest_ok = _CRC(logger_fn=lambda m: None).health_check()
+                    if not _rest_ok:
+                        _rest_ok = _JRC(logger_fn=lambda m: None).health_check()
+                except Exception:
+                    pass
+
+                # Open browser only if REST is unavailable (cache miss scenario)
+                pw = None
+                browser = None
+                context = None
+                page = None
+                if not _rest_ok:
+                    logger.set('REST unavailable — launching browser...')
+                    pw = sync_playwright().start()
+                    browser = pw.chromium.launch(headless=not headed, channel=get_browser_channel())
+                    context = browser.new_context(accept_downloads=True, viewport={'width': 1920, 'height': 1080})
+                    page = context.new_page()
+                    exit_items.append('Browser launched (REST unavailable)')
+                else:
+                    logger.set('REST available — browser-free mode')
+                    exit_items.append('REST mode (no browser)')
 
                 # ── BATCH LOOP ──
                 _batch_count = len(_features_to_run)
@@ -1485,8 +1717,16 @@ if run_btn:
                     print('[BATCH] Error on %s: %s' % (feature_id, str(_ex)[:200]), flush=True)
                     traceback.print_exc()
 
-                # ── END BATCH LOOP — close browser ──
-                context.close(); browser.close(); pw.stop()
+                # ── END BATCH LOOP — close browser if it was opened ──
+                if context:
+                    try: context.close()
+                    except Exception: pass
+                if browser:
+                    try: browser.close()
+                    except Exception: pass
+                if pw:
+                    try: pw.stop()
+                    except Exception: pass
 
                 # ── Finalize ──
                 elapsed = time.time() - t0
