@@ -74,6 +74,16 @@ def generate_excel(suite: TestSuite, log=print) -> Path:
         log('[EXCEL] Building Data Sources sheet (V8.0)...')
         _build_data_sources_sheet(wb, suite)
 
+    # ── Sheet 6 (V8.0): Coverage Scorecard ──
+    _scorecard = getattr(suite, '_coverage_scorecard', None)
+    if _scorecard is not None:
+        log('[EXCEL] Building Coverage Scorecard sheet...')
+        try:
+            from .coverage_scorecard import build_scorecard_excel_sheet
+            build_scorecard_excel_sheet(wb, _scorecard)
+        except Exception as _sc_err:
+            log('[EXCEL] Coverage Scorecard sheet skipped: %s' % str(_sc_err)[:60])
+
     # Remove default empty sheet if exists
     if 'Sheet' in wb.sheetnames:
         del wb['Sheet']
@@ -432,6 +442,9 @@ def _build_testcases_sheet(wb, suite: TestSuite, sheet_name=None, tc_subset=None
         # Clean summary: replace old global TC number with per-sheet number
         import re as _re2
         clean_summary = _re2.sub(r'^TC\d+_', 'TC%02d_' % sheet_idx, tc.summary)
+        # Add NEW tag for auto-diff identified new TCs
+        if getattr(tc, '_is_new', False):
+            clean_summary = '🆕 ' + clean_summary
         for si, step in enumerate(tc.steps):
             if si == 0:
                 ws.cell(row=row, column=1, value=sheet_sno).alignment = _wrap

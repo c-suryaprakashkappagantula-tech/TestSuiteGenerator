@@ -812,6 +812,28 @@ with right:
                          info.get('data_source_count', 0), _grounding_color, _grounding_display),
             unsafe_allow_html=True)
 
+            # ── Auto-diff changelog ──
+            _diff = info.get('diff_report')
+            if _diff and (_diff.get('new', 0) + _diff.get('changed', 0) + _diff.get('removed', 0)) > 0:
+                _diff_parts = []
+                if _diff.get('new'): _diff_parts.append('**+%d new**' % _diff['new'])
+                if _diff.get('changed'): _diff_parts.append('~%d changed' % _diff['changed'])
+                if _diff.get('removed'): _diff_parts.append('-%d removed' % _diff['removed'])
+                st.info('📊 vs previous run: %s | %d unchanged' % (
+                    ', '.join(_diff_parts), _diff.get('matched', 0)))
+
+            # ── Coverage Scorecard risk badge ──
+            _sc_risk = info.get('scorecard_risk', '')
+            _sc_badge = info.get('scorecard_badge', '')
+            if _sc_risk:
+                _sc_color = {'HIGH': 'error', 'MEDIUM': 'warning', 'LOW': 'success'}.get(_sc_risk, 'info')
+                if _sc_color == 'error':
+                    st.error('%s Coverage Risk: %s — see Coverage Scorecard sheet in Excel' % (_sc_badge, _sc_risk))
+                elif _sc_color == 'warning':
+                    st.warning('%s Coverage Risk: %s — see Coverage Scorecard sheet in Excel' % (_sc_badge, _sc_risk))
+                else:
+                    st.success('%s Coverage Risk: %s' % (_sc_badge, _sc_risk))
+
             _dl_c1, _dl_c2 = st.columns([2, 1])
             with _dl_c1:
                 st.download_button('📥 Download: %s (%d TCs)' % (
@@ -1739,6 +1761,9 @@ if run_btn:
                         'data_source_count': _data_source_count,
                         'grounding_pct': suite_grounding_pct_val,
                         'grounding_badge': grounding_badge_val,
+                        'diff_report': output.get('diff_report'),
+                        'scorecard_risk': getattr(output.get('scorecard'), 'overall_risk', ''),
+                        'scorecard_badge': getattr(output.get('scorecard'), 'headline_badge', ''),
                     }
                     ss['last_feature_id'] = feature_id
                     ss['last_suite_id'] = output.get('suite_id', '')

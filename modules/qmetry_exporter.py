@@ -93,7 +93,9 @@ def _write_qmetry_row(ws, row, tc, labels, desc, step_sum, step_exp, suite, fold
     ws.cell(row=row, column=3, value=tc.preconditions).font = _nf     # Precondition
     ws.cell(row=row, column=3).alignment = _wrap; ws.cell(row=row, column=3).border = _bdr
     ws.cell(row=row, column=4).border = _bdr                          # Status (empty)
-    ws.cell(row=row, column=5).border = _bdr                          # Priority (empty)
+    _tc_priority = getattr(tc, 'priority', '') or 'P2'
+    ws.cell(row=row, column=5, value=_tc_priority).font = _nf         # Priority
+    ws.cell(row=row, column=5).border = _bdr
     ws.cell(row=row, column=6, value=labels).font = _nf               # Labels
     ws.cell(row=row, column=6).border = _bdr
     ws.cell(row=row, column=7, value=step_sum).font = _nf             # Step Summary

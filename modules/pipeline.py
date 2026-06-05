@@ -200,8 +200,67 @@ def block_jira_fetch(page, feature_id, log=print):
 
             return {'jira': jira, 'warnings': warnings, 'att_paths': att_paths}
 
-    # ── Fallback: live fetch via browser ──
-    log('[PIPELINE] Jira DB cache miss or stale for %s — fetching via browser' % feature_id)
+    # ── Fallback: REST-first, then browser ──
+    log('[PIPELINE] Jira DB cache miss or stale for %s — trying REST...' % feature_id)
+
+    # Try REST API first (no browser needed)
+    from .jira_fetcher import fetch_jira_issue_rest, download_attachments_rest
+    jira = fetch_jira_issue_rest(feature_id, log=log)
+
+    if jira and jira.summary:
+        log('[PIPELINE] ✅ Jira fetched via REST for %s' % feature_id)
+        warnings = validate_jira_issue(jira, log=log)
+        try:
+            save_jira(jira)
+            log('[PIPELINE] Jira data saved to DB for %s' % feature_id)
+        except Exception as e:
+            log('[PIPELINE] Jira DB save warning: %s' % str(e)[:60])
+
+        # Download attachments via REST
+        att_paths = []
+        if jira.attachments:
+            att_paths = download_attachments_rest(jira, log=log)
+            log('[PIPELINE] Downloaded %d attachments (REST)' % len(att_paths))
+
+        # Download subtask attachments via REST
+        if jira.subtasks:
+            from .config import ATTACHMENTS
+            from pathlib import Path
+            from rest_clients import JiraRestClient
+            _jira_client = JiraRestClient(logger_fn=lambda m: None)
+            subtask_att_count = 0
+            for st in jira.subtasks:
+                st_attachments = st.get('attachments', [])
+                if not st_attachments:
+                    continue
+                st_key = st.get('key', 'unknown')
+                for att in st_attachments:
+                    fname = att.get('filename', '')
+                    url = att.get('url', '')
+                    if not fname or not url:
+                        continue
+                    size = att.get('size', 0)
+                    if size > 10 * 1024 * 1024:
+                        continue
+                    ext = Path(fname).suffix.lower()
+                    if ext not in ('.docx', '.xlsx', '.pdf', '.txt', '.html', '.zip', '.csv'):
+                        continue
+                    save_path = ATTACHMENTS / ('%s_%s' % (st_key, fname))
+                    if save_path.exists():
+                        att_paths.append(save_path)
+                        subtask_att_count += 1
+                        continue
+                    if _jira_client.download_attachment(url, save_path):
+                        att_paths.append(save_path)
+                        subtask_att_count += 1
+                        log('[PIPELINE]   Subtask %s: downloaded %s (REST)' % (st_key, fname))
+            if subtask_att_count:
+                log('[PIPELINE] Downloaded %d subtask attachments (REST)' % subtask_att_count)
+
+        return {'jira': jira, 'warnings': warnings, 'att_paths': att_paths}
+
+    # ── Final fallback: live fetch via browser ──
+    log('[PIPELINE] REST failed for %s — fetching via browser' % feature_id)
     jira = fetch_jira_issue(page, feature_id, log=log)
     warnings = validate_jira_issue(jira, log=log)
 
@@ -286,29 +345,62 @@ def block_chalk_db(feature_id, pi_label, log=print):
 
 
 def block_chalk_live(page, feature_id, pi_url, pi_label, pi_list, log=print):
-    """Block 3: Fetch Chalk data from live page (fallback when DB misses)."""
-    from .chalk_parser import fetch_feature_from_pi, ChalkData
+    """Block 3: Fetch Chalk data from live page (fallback when DB misses).
+    V8.1: REST-first — tries REST API before browser scraping."""
+    from .chalk_parser import fetch_feature_from_pi, fetch_feature_rest, ChalkData
     from .database import save_chalk
+    import re as _re_chalk
 
-    # Try selected PI
-    chalk = fetch_feature_from_pi(page, pi_url, feature_id, log=log)
-    if chalk and chalk.scenarios:
-        save_chalk(feature_id, pi_label, chalk)
-        log('[PIPELINE] Chalk live hit (%s): %d scenarios' % (pi_label, len(chalk.scenarios)))
-        return {'chalk': chalk, 'source': '%s (live)' % pi_label}
+    def _page_id_from_url(url):
+        m = _re_chalk.search(r'/pages/(\d+)/', url)
+        return m.group(1) if m else ''
 
-    # Scan all PIs
-    for sl, su in pi_list:
-        if sl == pi_label:
-            continue
-        try:
-            sc = fetch_feature_from_pi(page, su, feature_id, log=lambda m: None)
-            if sc and sc.scenarios:
-                save_chalk(feature_id, sl, sc)
-                log('[PIPELINE] Chalk found on %s: %d scenarios' % (sl, len(sc.scenarios)))
-                return {'chalk': sc, 'source': '%s (scanned)' % sl}
-        except:
-            pass
+    # ── REST-FIRST PATH ──
+    _pid = _page_id_from_url(pi_url)
+    if _pid:
+        chalk = fetch_feature_rest(_pid, feature_id, log=log)
+        if chalk and chalk.scenarios:
+            save_chalk(feature_id, pi_label, chalk)
+            log('[PIPELINE] Chalk REST hit (%s): %d scenarios' % (pi_label, len(chalk.scenarios)))
+            return {'chalk': chalk, 'source': '%s (REST)' % pi_label}
+
+        # REST didn't find it on selected PI — scan all PIs via REST
+        for sl, su in pi_list:
+            if sl == pi_label:
+                continue
+            _spid = _page_id_from_url(su)
+            if not _spid:
+                continue
+            try:
+                sc = fetch_feature_rest(_spid, feature_id, log=lambda m: None)
+                if sc and sc.scenarios:
+                    save_chalk(feature_id, sl, sc)
+                    log('[PIPELINE] Chalk REST found on %s: %d scenarios' % (sl, len(sc.scenarios)))
+                    return {'chalk': sc, 'source': '%s (REST scanned)' % sl}
+            except:
+                pass
+
+    # ── BROWSER FALLBACK ──
+    if page:
+        log('[PIPELINE] REST miss — trying browser fallback...')
+        chalk = fetch_feature_from_pi(page, pi_url, feature_id, log=log)
+        if chalk and chalk.scenarios:
+            save_chalk(feature_id, pi_label, chalk)
+            log('[PIPELINE] Chalk live hit (%s): %d scenarios' % (pi_label, len(chalk.scenarios)))
+            return {'chalk': chalk, 'source': '%s (live)' % pi_label}
+
+        # Scan all PIs via browser
+        for sl, su in pi_list:
+            if sl == pi_label:
+                continue
+            try:
+                sc = fetch_feature_from_pi(page, su, feature_id, log=lambda m: None)
+                if sc and sc.scenarios:
+                    save_chalk(feature_id, sl, sc)
+                    log('[PIPELINE] Chalk found on %s: %d scenarios' % (sl, len(sc.scenarios)))
+                    return {'chalk': sc, 'source': '%s (scanned)' % sl}
+            except:
+                pass
 
     log('[PIPELINE] Chalk not found on any PI for %s' % feature_id)
     return {'chalk': ChalkData(feature_id=feature_id), 'source': 'not found'}
@@ -394,12 +486,57 @@ def block_generate_output(suite, feature_id, pi, strategy, jira=None, chalk=None
     """Block 6: Generate Excel + Feature Doc, save to DB, log transaction."""
     from .excel_generator import generate_excel
     from .doc_generator import generate_feature_doc
-    from .database import save_test_suite, log_generation_db
+    from .database import save_test_suite, log_generation_db, load_latest_suite, get_suite_history
     from .transaction_log import log_generation
+
+    # ── Auto-diff: load previous suite file before overwriting DB ──
+    diff_report = None
+    try:
+        _history = get_suite_history(feature_id, limit=2)
+        if len(_history) >= 1:
+            _prev = _history[0]
+            _prev_path = _prev.get('file_path', '')
+            if _prev_path and Path(_prev_path).exists():
+                from .diff_engine import compare_suites as _compare
+                diff_report = _compare(Path(_prev_path), suite, feature_id, log=log)
+                if diff_report:
+                    log('[DIFF] vs previous: +%d new, ~%d changed, -%d removed' % (
+                        diff_report['new'], diff_report['changed'], diff_report['removed']))
+                    # Tag NEW TCs on the suite object so Excel can mark them
+                    new_summaries = set()
+                    for d in diff_report.get('details', []):
+                        if d.startswith('NEW: '):
+                            new_summaries.add(d[5:].strip()[:120])
+                    for tc in suite.test_cases:
+                        if any((tc.summary or '')[:120].startswith(ns[:60]) for ns in new_summaries):
+                            tc._is_new = True
+    except Exception as _diff_err:
+        log('[DIFF] Auto-diff skipped: %s' % str(_diff_err)[:80])
 
     # Defensive: ensure groups dict is stable before Excel generation
     if hasattr(suite, 'groups') and suite.groups:
         suite.groups = dict(suite.groups)  # snapshot to avoid iteration issues
+
+    # ── Attach diff report and scorecard to suite for Excel generation ──
+    suite._diff_report = diff_report
+
+    # ── Compute and attach Coverage Scorecard ──
+    try:
+        from .coverage_scorecard import compute_scorecard
+        from .integration_contract import resolve_operation as _rop
+        _contract = None
+        if jira:
+            _ctx = ('%s %s' % (jira.summary or '', jira.description or '')).lower()
+            _contract = _rop(jira.summary or '', description=_ctx)
+        _nmno = getattr(suite, '_nmno_result', None)
+        scorecard = compute_scorecard(suite, jira=jira, contract=_contract, nmno_result=_nmno, log=log)
+        suite._coverage_scorecard = scorecard
+        from .coverage_scorecard import format_scorecard_text
+        log('[SCORECARD]\n' + format_scorecard_text(scorecard))
+    except Exception as _sc_err:
+        log('[SCORECARD] Skipped: %s' % str(_sc_err)[:80])
+        scorecard = None
+        suite._coverage_scorecard = None
 
     out_path = generate_excel(suite, log=log)
     total_steps = sum(len(tc.steps) for tc in suite.test_cases)
@@ -424,4 +561,6 @@ def block_generate_output(suite, feature_id, pi, strategy, jira=None, chalk=None
     return {
         'out_path': out_path, 'doc_path': doc_path, 'suite_id': suite_id,
         'tc_count': len(suite.test_cases), 'total_steps': total_steps,
+        'diff_report': diff_report,
+        'scorecard': scorecard,
     }
