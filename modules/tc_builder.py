@@ -867,6 +867,7 @@ def _build_negative_tc(
     api_context = api_context or {}
     endpoint = api_context.get('endpoint', '')    # Empty if no real endpoint known — no slug fallback
     method = api_context.get('method', 'POST')
+    _ep_display = _display_endpoint(endpoint, method, feature_name)
 
     # ── Use Business Rule data if available ──
     if business_rule is not None:
@@ -906,9 +907,9 @@ def _build_negative_tc(
             ),
             TestStep(
                 step_num=3,
-                summary='Send %s request to %s' % (method, endpoint),
+                summary='Send %s request to %s' % (method, _ep_display),
                 expected='Request is sent to the API endpoint',
-                data_reference='Endpoint: %s %s' % (method, endpoint),
+                data_reference='Endpoint: %s %s' % (method, _ep_display),
             ),
             TestStep(
                 step_num=4,
@@ -979,9 +980,9 @@ def _build_negative_tc(
             ),
             TestStep(
                 step_num=2,
-                summary='Send %s request to %s with error-triggering data' % (method, endpoint),
+                summary='Send %s request to %s with error-triggering data' % (method, _ep_display),
                 expected='Request sent to API endpoint',
-                data_reference='Endpoint: %s %s' % (method, endpoint),
+                data_reference='Endpoint: %s %s' % (method, _ep_display),
             ),
             TestStep(
                 step_num=3,
@@ -1494,8 +1495,29 @@ def _humanize_dim_name(dim_name: str) -> str:
         'channel': 'Channel',
         'error_code': 'Error Code',
         'line_state': 'Line State',
+        'precondition': 'Precondition',
+        'nav_path': 'Navigation Path',
+        'action_point': 'Action',
+        'page_name': 'Page',
     }
     return mapping.get(dim_name, dim_name.replace('_', ' ').title())
+
+
+def _display_endpoint(endpoint: str, method: str = 'POST', feature_name: str = '') -> str:
+    """Return a clean endpoint display string — never produces trailing whitespace.
+
+    If endpoint is empty, returns a descriptive fallback like 'NSL API endpoint'
+    so steps never say 'Send POST request to ' (trailing space).
+    """
+    ep = (endpoint or '').strip()
+    if ep:
+        return ep
+    # Fallback: derive from feature_name if available
+    if feature_name:
+        # Convert "Reset Plan" → "reset-plan API endpoint"
+        slug = feature_name.lower().replace(' ', '-')[:30]
+        return '/nsl/provisioning/... (%s API)' % slug
+    return 'NSL API endpoint'
 
 
 def _build_dimension_summary(feature_name: str, dim_name: str, value: str, feature_id: str) -> str:

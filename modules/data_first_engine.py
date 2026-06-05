@@ -84,17 +84,18 @@ def build_test_suite_v8(
         classification.api_keywords_found[:3], classification.ui_keywords_found[:3]))
 
     # ── Step 0a: CR/Bug Fix Detection ──
-    # CR/bug fix tickets have narrow scope — they should NOT get channel/device
-    # expansion, raw Jira text mining, or NBOP UI knowledge injection.
-    # Delegate to the old engine's CR-specific path which produces proper
-    # defect reproduction TCs.
+    # CR/bug fix tickets ALWAYS use the CR-specific engine path.
+    # This is a hard rule — no override based on Chalk scenario count.
+    # Chalk can have 15 scenarios for a CR fix (4389 is proof) — that does NOT
+    # mean it should get channel/device expansion. The "- CR -" in the title
+    # is the definitive signal.
     _is_cr = is_cr_or_bug(
         summary=jira.summary if jira else '',
         issue_type=jira.issue_type if jira and hasattr(jira, 'issue_type') else '',
         description=jira.description if jira and hasattr(jira, 'description') else '',
     )
     if _is_cr:
-        log('[V8-ENGINE] *** CR/Bug fix detected — delegating to CR-specific engine ***')
+        log('[V8-ENGINE] *** CR/Bug fix detected — delegating to CR-specific engine (no override) ***')
         return _build_cr_suite_v8(jira, chalk, parsed_docs, options, deep_mine_result, log)
 
     # ── Step 0b: NMNO API Lookup (if API or hybrid) ──
@@ -160,6 +161,22 @@ def build_test_suite_v8(
             pi=jira.pi if jira and hasattr(jira, 'pi') else '',
         )
 
+    # ── FIX 4: V7 supplementary mining for low-dimension tickets ──
+    # When dimension extraction yields < 5 testable items, call V7's
+    # _build_from_jira_only and subtask mining as supplementary source.
+    _v7_supplement_tcs = []
+    if dimension_set.data_inventory.total_testable_items < 5:
+        log('[V8-ENGINE] Low testable items (%d) — invoking V7 supplementary mining...' %
+            dimension_set.data_inventory.total_testable_items)
+        try:
+            from .test_engine import _build_from_jira_only, _extract_feature_name
+            _v7_feature_name = _extract_feature_name(feature_title, feature_id)
+            _v7_supplement_tcs = _build_from_jira_only(jira, _v7_feature_name, log=log)
+            if _v7_supplement_tcs:
+                log('[V8-ENGINE]   V7 mining produced %d supplementary TCs' % len(_v7_supplement_tcs))
+        except Exception as _v7_err:
+            log('[V8-ENGINE]   V7 supplementary mining failed: %s — continuing' % str(_v7_err)[:100])
+
     # ── Step 2: Combination Planning ──
     log('[V8-ENGINE] Step 2: Planning smart combinations...')
     combination_plan = plan_combinations(dimension_set, log=log)
@@ -176,6 +193,38 @@ def build_test_suite_v8(
         nmno_result=nmno_result,
         log=log,
     )
+
+    # ── FIX 4 (cont.): Merge V7 supplementary TCs with V8 output, dedup ──
+    if _v7_supplement_tcs:
+        # Deduplicate: remove V7 TCs whose summary overlaps >60% with V8 TCs
+        import re as _re_v7
+        _v8_summaries_norm = set()
+        for _tc in test_cases:
+            _norm = _re_v7.sub(r'^TC\d+_[A-Z]+-\d+[_ -]*', '', _tc.summary).strip().lower()
+            _norm = _re_v7.sub(r'\s+', ' ', _norm)
+            _v8_summaries_norm.add(_norm)
+
+        _merged_count = 0
+        for _v7_tc in _v7_supplement_tcs:
+            _v7_norm = _re_v7.sub(r'^TC\d+_[A-Z]+-\d+[_ -]*', '', _v7_tc.summary).strip().lower()
+            _v7_norm = _re_v7.sub(r'\s+', ' ', _v7_norm)
+            # Check word overlap with each V8 TC
+            _v7_words = set(_re_v7.findall(r'\b\w{4,}\b', _v7_norm))
+            _is_dup = False
+            for _v8_norm in _v8_summaries_norm:
+                _v8_words = set(_re_v7.findall(r'\b\w{4,}\b', _v8_norm))
+                if _v7_words and _v8_words:
+                    _overlap = len(_v7_words & _v8_words) / max(len(_v7_words), len(_v8_words), 1)
+                    if _overlap > 0.60:
+                        _is_dup = True
+                        break
+            if not _is_dup:
+                test_cases.append(_v7_tc)
+                _v8_summaries_norm.add(_v7_norm)
+                _merged_count += 1
+        if _merged_count:
+            log('[V8-ENGINE]   Merged %d unique V7 supplementary TCs (deduped %d)' % (
+                _merged_count, len(_v7_supplement_tcs) - _merged_count))
 
     # ── Step 4: Validation ──
     log('[V8-ENGINE] Step 4: Validating zero-generic compliance...')
@@ -597,7 +646,7 @@ def _apply_custom_instructions(
                 )
                 dimension_set.scenarios.append(ExtractedScenario(
                     title=desc[:120],
-                    validation='As per custom instruction',
+                    validation='Verify that %s' % desc[:100] if not desc.lower().startswith('verify') else desc[:120],
                     category='Happy Path',
                     source=tr,
                 ))
