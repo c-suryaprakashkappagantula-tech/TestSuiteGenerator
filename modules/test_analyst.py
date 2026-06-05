@@ -988,6 +988,168 @@ def _line_state_thinking(fname, ctx, existing):
 # PUBLIC API: State-Transition Matrix (callable from dimension_extractor)
 # ================================================================
 
+# ================================================================
+# PUBLIC API: State-Transition Matrix (callable from dimension_extractor)
+# ================================================================
+
+
+def generate_partial_failure_matrix(
+    feature_name: str,
+    feature_id: str,
+    contract=None,
+    log=print,
+) -> list:
+    """D2 — Downstream Partial-Failure Generator.
+
+    For each system in the contract must_call chain, generates one TC that
+    fails at exactly that system and asserts the compensation/consistency outcome.
+
+    Pattern: "NSL DB OK → EMM fails" — what should the system do?
+    The test asserts:
+      1. Prior systems in the chain completed (observable via Century Report)
+      2. The failing system returned an error
+      3. No partial state leaked (NSL DB should be consistent with what rolled back)
+      4. Transaction History records the failure reason
+
+    Args:
+        feature_name: Short feature name (e.g., "Reset Plan")
+        feature_id: Jira feature ID (e.g., "MWTGPROV-4020")
+        contract: Optional OperationContract
+        log: Logger function
+
+    Returns:
+        List of ExtractedScenario objects (one per failure point in the chain).
+    """
+    if not contract or not contract.must_call:
+        return []
+
+    try:
+        from .data_models_v8 import ExtractedScenario
+        from .traceability import create_traceability
+        from .integration_contract import EXTERNAL_SYSTEMS
+    except ImportError:
+        return []
+
+    fname = feature_name
+    must_call_chain = contract.must_call  # ordered list of system keys
+
+    # System display names and verification methods
+    _sys_meta = {
+        'apollo_ne':         ('Apollo NE',  'NE Portal / Century Report'),
+        'tmo':               ('TMO',         'TMO Genesis Portal / Century Report'),
+        'itmbo':             ('ITMBO',       'Century Report'),
+        'emm':               ('EMM',         'Century Report'),
+        'kafka':             ('KAFKA/BI',    'KAFKA topic / BI dashboard'),
+        'syniverse':         ('Syniverse',   'Century Report'),
+        'connection_manager':('Connection Manager', 'Century Report'),
+        'mediation':         ('Mediation',   'SFTP / PRR output'),
+    }
+
+    scenarios = []
+    source_id = 'Partial-Failure-Matrix-%s' % feature_id
+
+    for failure_idx, failing_system in enumerate(must_call_chain):
+        # Systems that succeed before the failing one
+        systems_before = must_call_chain[:failure_idx]
+        # The system that fails
+        fail_name, fail_verify = _sys_meta.get(failing_system, (failing_system.upper(), 'Century Report'))
+
+        if not systems_before:
+            # First system fails immediately
+            title = 'Negative: Verify %s handles %s failure at first step' % (fname, fail_name)
+            before_desc = 'No prior systems in chain'
+            compensation = (
+                'Operation aborted cleanly. NSL DB not updated. '
+                'Transaction History records %s failure with error code.' % fail_name
+            )
+        else:
+            before_names = ', '.join(
+                _sys_meta.get(s, (s.upper(), ''))[0] for s in systems_before
+            )
+            title = 'Negative: Verify %s partial failure — %s succeeds, %s fails' % (
+                fname, before_names, fail_name)
+            before_desc = '%s call(s) succeeded' % before_names
+            compensation = (
+                '%s call(s) completed. %s returned error. '
+                'NSL compensates: rolls back or marks transaction FAILED. '
+                'No partial state leaks to downstream consumers. '
+                'Transaction History records exact failure point.' % (before_names, fail_name)
+            )
+
+        steps_hint = []
+        if systems_before:
+            steps_hint.append(
+                'Set up environment so %s will succeed but %s will fail (mock/simulate failure)' % (
+                    ', '.join(_sys_meta.get(s, (s.upper(), ''))[0] for s in systems_before), fail_name)
+            )
+        else:
+            steps_hint.append('Set up environment so %s will fail immediately' % fail_name)
+
+        steps_hint += [
+            'Trigger %s operation via API with valid Active subscriber' % fname,
+            'Verify %s returned error / did not complete' % fail_name,
+            'Verify no partial state leaked — check NSL DB consistency',
+            'Verify Transaction History records failure at %s with correct reason code' % fail_name,
+            'Verify prior systems are not left in inconsistent state (%s)' % (before_desc or 'N/A'),
+        ]
+
+        try:
+            tr = create_traceability(
+                source_type='Business Rule',
+                source_id=source_id,
+                extracted_text='Partial-failure chain: %s fails at %s' % (fname, fail_name),
+                confidence=0.85,
+            )
+        except Exception:
+            continue
+
+        scenarios.append(ExtractedScenario(
+            title=title,
+            validation=compensation,
+            category='Negative',
+            source=tr,
+            steps_hint=steps_hint,
+        ))
+
+    # Add the cross-system consistency assertion (A7 from roadmap)
+    if len(must_call_chain) >= 2:
+        all_systems = ', '.join(
+            _sys_meta.get(s, (s.upper(), ''))[0] for s in must_call_chain
+        )
+        try:
+            tr_consist = create_traceability(
+                source_type='Business Rule',
+                source_id=source_id,
+                extracted_text='Cross-system consistency: all systems consistent after %s' % fname,
+                confidence=0.85,
+            )
+            scenarios.append(ExtractedScenario(
+                title='Verify cross-system consistency after successful %s (NSL DB == %s)' % (
+                    fname, ' == '.join(
+                        _sys_meta.get(s, (s.upper(), ''))[0] for s in must_call_chain[:3]
+                    )
+                ),
+                validation=(
+                    'All downstream systems mutually consistent: NSL DB, %s — '
+                    'same data, same state, no orphaned records.' % all_systems
+                ),
+                category='Happy Path',
+                source=tr_consist,
+                steps_hint=[
+                    'Execute %s with valid Active subscriber' % fname,
+                    'Verify NSL DB shows updated state',
+                    'Verify %s all reflect the same updated state' % all_systems,
+                    'Verify Century Report shows all outbound calls with success status',
+                    'Verify Transaction History records COMPLETED with all system acknowledgements',
+                ],
+            ))
+        except Exception:
+            pass
+
+    log('[D2-PARTIAL-FAIL] Generated %d partial-failure TCs for %s' % (len(scenarios), fname))
+    return scenarios
+
+
 def generate_state_transition_matrix(
     feature_name: str,
     feature_id: str,

@@ -387,7 +387,47 @@ def extract_dimensions(
         except Exception as _stm_err:
             log('[DIM-EXTRACT]   D1 State Matrix skipped: %s' % str(_stm_err)[:80])
 
-    # Rebuild data_inventory with state matrix included
+    # ── 9. D2: Downstream Partial-Failure injection (API + hybrid features) ──
+    # For each system in the must_call chain, generate one TC that fails at that system
+    if _classification in ('api', 'hybrid', '') and _is_provisioning:
+        try:
+            from .test_analyst import generate_partial_failure_matrix
+
+            # Re-use the contract already resolved for D1
+            _pf_contract = _contract if '_contract' in dir() else None
+            if _pf_contract is None:
+                from .integration_contract import resolve_operation as _rop
+                _pf_contract = _rop(_feature_title, description=_ctx_check)
+
+            if _pf_contract and _pf_contract.must_call:
+                _pf_scenarios = generate_partial_failure_matrix(
+                    feature_name=_feature_title_short if '_feature_title_short' in dir()
+                               else re.sub(r'\[.*?\]\s*', '', _feature_title).strip()[:40] or _feature_id,
+                    feature_id=_feature_id,
+                    contract=_pf_contract,
+                    log=log,
+                )
+                _pf_existing = {s.title.lower().strip() for s in scenarios}
+                _pf_added = 0
+                for _sc in _pf_scenarios:
+                    if _sc.title.lower().strip() not in _pf_existing:
+                        scenarios.append(_sc)
+                        _pf_existing.add(_sc.title.lower().strip())
+                        _pf_added += 1
+                if _pf_added:
+                    log('[DIM-EXTRACT]   D2 Partial Failure: %d failure-chain TCs injected' % _pf_added)
+                    sources_checked.append(DataSourceEntry(
+                        source_name='Partial-Failure-Matrix',
+                        source_type='chalk',
+                        items_extracted=_pf_added,
+                        items_detail=['%d failure points in %s chain' % (
+                            len(_pf_contract.must_call), _feature_id)],
+                        status='success',
+                    ))
+        except Exception as _pf_err:
+            log('[DIM-EXTRACT]   D2 Partial Failure skipped: %s' % str(_pf_err)[:80])
+
+    # Rebuild data_inventory with D1 + D2 included
     data_inventory = _build_data_inventory(sources_checked)
 
     log('[DIM-EXTRACT] Extraction complete: %d dimensions, %d scenarios, %d negative specs' % (
