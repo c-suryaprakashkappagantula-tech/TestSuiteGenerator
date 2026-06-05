@@ -335,6 +335,61 @@ def extract_dimensions(
     # ── 7. Build data inventory ──
     data_inventory = _build_data_inventory(sources_checked)
 
+    # ── 8. D1: State-Transition Matrix injection (API + hybrid features) ──
+    # For API/hybrid features, generate the full 7-state matrix as scenarios
+    # This ensures line-state coverage is never missed regardless of what Chalk has
+    _classification = (classification or '').lower()
+    if _classification in ('api', 'hybrid', ''):
+        try:
+            from .test_analyst import generate_state_transition_matrix
+            from .integration_contract import resolve_operation
+            import re as _re_stm
+
+            _feature_id = jira.key if jira else ''
+            _feature_title = jira.summary if jira else ''
+            _desc = (jira.description if jira and hasattr(jira, 'description') else '') or ''
+
+            # Only inject if this looks like a provisioning/line-state operation
+            _provisioning_kws = [
+                'activate', 'deactivate', 'hotline', 'suspend', 'restore', 'reset',
+                'change sim', 'change device', 'change rateplan', 'swap mdn', 'port-in',
+                'port-out', 'reconnect', 'provisioning', 'change feature',
+            ]
+            _ctx_check = ('%s %s' % (_feature_title, _desc)).lower()
+            _is_provisioning = any(kw in _ctx_check for kw in _provisioning_kws)
+
+            if _is_provisioning:
+                _contract = resolve_operation(_feature_title, description=_ctx_check)
+                _state_tcs = generate_state_transition_matrix(
+                    feature_name=_re_stm.sub(r'\[.*?\]\s*', '', _feature_title).strip()[:40] or _feature_id,
+                    feature_id=_feature_id,
+                    contract=_contract,
+                    nmno_result=nmno_result,
+                    log=log,
+                )
+                # Only add state-matrix scenarios not already present
+                _existing_titles = {s.title.lower().strip() for s in scenarios}
+                _added = 0
+                for _sc in _state_tcs:
+                    if _sc.title.lower().strip() not in _existing_titles:
+                        scenarios.append(_sc)
+                        _existing_titles.add(_sc.title.lower().strip())
+                        _added += 1
+                if _added:
+                    log('[DIM-EXTRACT]   D1 State Matrix: %d state-transition TCs injected' % _added)
+                    sources_checked.append(DataSourceEntry(
+                        source_name='State-Transition-Matrix',
+                        source_type='chalk',
+                        items_extracted=_added,
+                        items_detail=['%d states × %s' % (_added, _feature_id)],
+                        status='success',
+                    ))
+        except Exception as _stm_err:
+            log('[DIM-EXTRACT]   D1 State Matrix skipped: %s' % str(_stm_err)[:80])
+
+    # Rebuild data_inventory with state matrix included
+    data_inventory = _build_data_inventory(sources_checked)
+
     log('[DIM-EXTRACT] Extraction complete: %d dimensions, %d scenarios, %d negative specs' % (
         len(dimensions), len(scenarios), len(negative_specs)))
     log('[DIM-EXTRACT]   Total testable items: %d' % data_inventory.total_testable_items)

@@ -259,27 +259,13 @@ def _core_qa_thinking(fname, ftype, ctx, existing):
             'reasoning': 'Basic sanity — does the feature work on the primary channel?',
         })
 
-    # Q2: "What if someone does it twice?" — real scenario, not theoretical
-    if 'duplicate' not in existing and 'twice' not in existing and 'idempoten' not in existing:
-        s.append({
-            'title': 'Verify %s rejects duplicate request for same MDN within processing window.' % fname,
-            'description': 'Trigger %s for an MDN, then immediately trigger again before first completes. '
-                           'Second request should be rejected or queued, not create duplicate records.' % fname,
-            'category': 'Edge Case',
-            'test_category': 'Cat4-EdgeCase',
-            'reasoning': 'Duplicate requests happen in production from retries and network glitches.',
-        })
+    # Q2: SUPPRESSED — Charter never tests duplicate request/idempotency
+    # if 'duplicate' not in existing and 'twice' not in existing and 'idempoten' not in existing:
+    #     s.append({...})
 
-    # Q3: "What does the data look like after?" — the most important check
-    if 'data integrity' not in existing and 'db state' not in existing:
-        s.append({
-            'title': 'Verify NSL DB state is consistent after successful %s.' % fname,
-            'description': 'After %s, query NSL DB directly. Verify no orphaned records, '
-                           'no mismatched foreign keys, all timestamps correct.' % fname,
-            'category': 'Happy Path',
-            'test_category': 'Cat1-HappyPath',
-            'reasoning': 'Inconsistent DB state is the #1 production bug. Every operation must leave clean data.',
-        })
+    # Q3: SUPPRESSED — Charter never does DB consistency checks in manual testing
+    # if 'data integrity' not in existing and 'db state' not in existing:
+    #     s.append({...})
 
     return s
 
@@ -291,16 +277,9 @@ def _core_qa_thinking(fname, ftype, ctx, existing):
 def _api_crud_thinking(fname, ctx, existing):
     s = []
 
-    # "What does the API response actually contain?"
-    if 'response' not in existing or 'payload' not in existing:
-        s.append({
-            'title': 'Verify %s API response payload contains all required fields.' % fname,
-            'description': 'Verify %s response includes transactionId, rootTransactionId, status, '
-                           'timestamp, and all fields per API spec. No null values for required fields.' % fname,
-            'category': 'Happy Path',
-            'test_category': 'Cat1-HappyPath',
-            'reasoning': 'Downstream consumers parse the response. Missing fields break integrations silently.',
-        })
+    # SUPPRESSED — Charter never validates raw API response payload structure
+    # if 'response' not in existing or 'payload' not in existing:
+    #     s.append({...})
 
     # "What if TMO takes too long to respond?"
     if 'timeout' not in existing and 'tmo' not in existing:
@@ -883,43 +862,275 @@ def _lifecycle_thinking(fname, lifecycle, ctx, existing):
 # ================================================================
 
 def _line_state_thinking(fname, ctx, existing):
-    """Generate scenarios based on line states that should block the operation."""
+    """D1 — State-Transition Matrix Generator.
+
+    Generates one TC per applicable line state × the operation.
+    Covers the full 7-state matrix: Active, Suspended, Hotlined,
+    Pending Port-out, Pending Port-in, Cancelled, Pre-active.
+
+    For each state, determines expected behaviour (Allow/Reject) based on
+    the operation contract, and pulls documented error codes from the NMNO DB.
+    """
     s = []
 
-    # These are the REAL negative scenarios — not "invalid input" but specific business states
-    LINE_STATES = [
-        ('not in active status', 'not active', 'not in active',
-         'Negative: Verify %s rejected when line is not in Active status.' % fname,
-         'Trigger %s for a line that is NOT Active (e.g., New, Pending). '
-         'Verify rejection with appropriate error code.' % fname),
-        ('pending port-out', 'port-out', 'pending port',
-         'Negative: Verify %s rejected for MDN with pending Port-Out.' % fname,
-         'Trigger %s for an MDN that has a pending Port-Out request. '
-         'Verify rejection — cannot modify a line being ported out.' % fname),
-        ('wearable line', 'wearable', 'smartwatch',
-         'Verify %s behavior for wearable/smartwatch line.' % fname,
-         'Trigger %s for a wearable line (not primary phone line). '
-         'Verify operation handles wearable-specific constraints.' % fname),
+    # ── Full 7-state matrix ──
+    # (state_label, state_key, typical_behaviour, fallback_error_code)
+    FULL_STATE_MATRIX = [
+        ('Active',              'active',         'allow',  ''),
+        ('Suspended',           'suspended',      'reject', 'ERR_INVALID_STATE'),
+        ('Hotlined',            'hotlined',       'reject', 'ERR_INVALID_STATE'),
+        ('Pending Port-Out',    'pending port',   'reject', 'ERR_PORT_PENDING'),
+        ('Pending Port-In',     'pending port-in','reject', 'ERR_PORT_PENDING'),
+        ('Cancelled',           'cancelled',      'reject', 'ERR_INVALID_STATE'),
+        ('Pre-active',          'pre-active',     'reject', 'ERR_INVALID_STATE'),
     ]
 
-    for check_kw1, check_kw2, check_kw3, title, desc in LINE_STATES:
-        if check_kw1 not in existing and check_kw2 not in existing and check_kw3 not in existing:
-            cat = 'Negative' if 'Negative' in title else 'Edge Case'
+    # Try to get the operation contract to determine which states allow/reject
+    # and to pull real error codes from NMNO DB
+    from .integration_contract import resolve_operation
+    contract = resolve_operation(fname, description=ctx, ac_text=ctx)
+    req_state = (contract.required_line_state if contract else 'active').lower()
+
+    # Try to get error codes from NMNO DB for this operation
+    _nmno_state_codes = {}
+    try:
+        from .nmno_api_lookup import lookup_api_specs, extract_api_operation_name
+        import re as _re_nmno
+        _chalk_urls = _re_nmno.findall(r'https?://[^\s]+chalk[^\s]*', ctx)
+        _api_name = extract_api_operation_name(fname, _chalk_urls)
+        if _api_name:
+            _nmno = lookup_api_specs(_api_name, log=lambda m: None)
+            if _nmno and _nmno.business_rules:
+                for _br in _nmno.business_rules:
+                    # Match rules that mention line states
+                    _br_text = ('%s %s %s' % (
+                        _br.condition or '', _br.rule_description or '', _br.error_details or ''
+                    )).lower()
+                    for _state_label, _state_key, _, _ in FULL_STATE_MATRIX:
+                        if _state_key in _br_text or _state_label.lower() in _br_text:
+                            if _br.error_code and _br.error_code not in ('', 'N/A'):
+                                _nmno_state_codes[_state_key] = _br.error_code
+    except Exception:
+        pass  # NMNO lookup is best-effort
+
+    # Generate one TC per state
+    for state_label, state_key, default_behaviour, fallback_code in FULL_STATE_MATRIX:
+        # Determine expected behaviour for this state × operation
+        if req_state == 'any':
+            behaviour = 'allow'
+        elif req_state in state_key or state_key in req_state:
+            behaviour = 'allow'
+        elif state_key == 'active' and req_state not in ('suspended', 'hotlined', 'cancelled'):
+            behaviour = 'allow'
+        else:
+            behaviour = 'reject'
+
+        # Get real error code if available
+        error_code = _nmno_state_codes.get(state_key, fallback_code)
+
+        # Skip if already covered in existing scenarios
+        _check_kws = [state_key, state_label.lower()]
+        if any(kw in existing for kw in _check_kws):
+            continue
+
+        if behaviour == 'allow':
+            # Happy path for the required state
+            if state_key == req_state or req_state == 'any':
+                s.append({
+                    'title': 'Verify %s succeeds for line in %s state.' % (fname, state_label),
+                    'description': (
+                        'Trigger %s for a TMO subscriber line in %s state. '
+                        'Verify the operation completes successfully and all downstream systems are updated.' % (fname, state_label)
+                    ),
+                    'category': 'Happy Path',
+                    'reasoning': 'State-transition matrix: %s state should allow %s.' % (state_label, fname),
+                    'test_category': 'Cat1-HappyPath',
+                    'precondition': 'TMO subscriber line in %s state in SIT environment.' % state_label,
+                })
+        else:
+            # Negative: this state should reject the operation
+            error_suffix = (' with error %s' % error_code) if error_code else ''
             s.append({
-                'title': title,
-                'description': desc,
-                'category': cat,
-                'reasoning': 'Line state validation — the system must check line status before proceeding.',
+                'title': 'Negative: Verify %s rejected for line in %s state%s.' % (
+                    fname, state_label, error_suffix),
+                'description': (
+                    'Trigger %s for a TMO subscriber line in %s state. '
+                    'Verify the operation is rejected%s. No partial state changes.' % (
+                        fname, state_label,
+                        ' with error code %s' % error_code if error_code else ' with appropriate error'
+                    )
+                ),
+                'category': 'Negative',
+                'reasoning': 'State-transition matrix: %s state must block %s.' % (state_label, fname),
+                'test_category': 'Cat2-InputValidation',
+                'precondition': 'TMO subscriber line in %s state in SIT environment.' % state_label,
+                'expected_error': error_code or 'ERR_INVALID_STATE',
             })
+
+    # Add wearable state check (always relevant for provisioning operations)
+    if 'wearable' not in existing and 'smartwatch' not in existing:
+        s.append({
+            'title': 'Verify %s behavior for Wearable/Smartwatch line.' % fname,
+            'description': (
+                'Trigger %s for a wearable line (not primary phone). '
+                'Verify operation handles wearable-specific constraints correctly.' % fname
+            ),
+            'category': 'Edge Case',
+            'reasoning': 'Wearable lines have different provisioning rules. Must be explicitly validated.',
+            'test_category': 'Cat4-EdgeCase',
+            'precondition': 'Active TMO Wearable/Smartwatch subscriber line in SIT environment.',
+        })
 
     return s
 
 
 # ================================================================
-# VERIFICATION THINKING — what a QA checks AFTER the operation
-# This is the difference between "it worked" and "it REALLY worked"
+# PUBLIC API: State-Transition Matrix (callable from dimension_extractor)
 # ================================================================
 
+def generate_state_transition_matrix(
+    feature_name: str,
+    feature_id: str,
+    contract=None,
+    nmno_result=None,
+    log=print,
+) -> list:
+    """Generate a complete line-state × operation test matrix.
+
+    Returns a list of ExtractedScenario objects (one per state) ready for
+    direct injection into the DimensionSet.scenarios list.
+
+    Covers: Active, Suspended, Hotlined, Pending Port-Out, Pending Port-In,
+            Cancelled, Pre-active, Wearable (7 states + 1 device type).
+
+    Args:
+        feature_name: Short feature name (e.g., "Reset Plan")
+        feature_id: Jira feature ID (e.g., "MWTGPROV-4020")
+        contract: Optional OperationContract — determines allow/reject per state
+        nmno_result: Optional NMNOLookupResult — for real error codes
+        log: Logger function
+
+    Returns:
+        List of ExtractedScenario objects with steps_hint and validation set.
+    """
+    try:
+        from .data_models_v8 import ExtractedScenario
+        from .traceability import create_traceability
+    except ImportError:
+        return []
+
+    fname = feature_name
+    req_state = (contract.required_line_state if contract else 'active').lower()
+
+    # Pull error codes from NMNO result if available
+    _nmno_state_codes = {}
+    if nmno_result and nmno_result.business_rules:
+        for _br in nmno_result.business_rules:
+            _br_text = ('%s %s %s' % (
+                _br.condition or '', _br.rule_description or '', _br.error_details or ''
+            )).lower()
+            for _state_key in ('suspended', 'hotlined', 'pending port', 'cancelled', 'pre-active'):
+                if _state_key in _br_text:
+                    if _br.error_code and _br.error_code not in ('', 'N/A'):
+                        _nmno_state_codes[_state_key] = _br.error_code
+
+    FULL_STATE_MATRIX = [
+        ('Active',           'active',         'allow',  ''),
+        ('Suspended',        'suspended',       'reject', 'ERR_INVALID_STATE'),
+        ('Hotlined',         'hotlined',        'reject', 'ERR_INVALID_STATE'),
+        ('Pending Port-Out', 'pending port',    'reject', 'ERR_PORT_PENDING'),
+        ('Pending Port-In',  'pending port-in', 'reject', 'ERR_PORT_PENDING'),
+        ('Cancelled',        'cancelled',       'reject', 'ERR_INVALID_STATE'),
+        ('Pre-active',       'pre-active',      'reject', 'ERR_INVALID_STATE'),
+    ]
+
+    scenarios = []
+    source_id = 'State-Transition-Matrix-%s' % feature_id
+
+    for state_label, state_key, default_behaviour, fallback_code in FULL_STATE_MATRIX:
+        # Determine allow/reject from contract
+        if req_state == 'any':
+            behaviour = 'allow'
+        elif req_state in state_key or state_key in req_state:
+            behaviour = 'allow'
+        elif state_key == 'active' and req_state not in ('suspended', 'hotlined', 'cancelled'):
+            behaviour = 'allow'
+        else:
+            behaviour = 'reject'
+
+        error_code = _nmno_state_codes.get(state_key, fallback_code)
+
+        try:
+            tr = create_traceability(
+                source_type='Business Rule',
+                source_id=source_id,
+                extracted_text='State-transition matrix: %s state × %s' % (state_label, fname),
+                confidence=0.9,
+            )
+        except Exception:
+            continue
+
+        if behaviour == 'allow':
+            title = 'Verify %s succeeds for line in %s state' % (fname, state_label)
+            validation = ('Operation completes successfully. '
+                          'Line remains in %s state. All downstream systems updated.' % state_label)
+            category = 'Happy Path'
+            steps_hint = [
+                'Set up subscriber line in %s state in SIT environment' % state_label,
+                'Trigger %s operation via API' % fname,
+                'Verify operation completes with HTTP 200/202 and SUCC00',
+                'Verify downstream systems updated (NSL DB, Century Report, NBOP MIG tables)',
+            ]
+        else:
+            error_suffix = ' with error %s' % error_code if error_code else ''
+            title = 'Negative: Verify %s rejected for %s line%s' % (fname, state_label, error_suffix)
+            validation = ('Operation rejected%s. Line state unchanged. No partial updates.' % (
+                ' with error code %s' % error_code if error_code else ' with appropriate error'))
+            category = 'Negative'
+            steps_hint = [
+                'Set up subscriber line in %s state in SIT environment' % state_label,
+                'Trigger %s operation via API' % fname,
+                'Verify operation rejected%s' % (
+                    ' — response contains error code %s' % error_code if error_code else ' with error'),
+                'Verify line remains in %s state — no state change occurred' % state_label,
+            ]
+
+        scenarios.append(ExtractedScenario(
+            title=title,
+            validation=validation,
+            category=category,
+            source=tr,
+            steps_hint=steps_hint,
+        ))
+
+    # Wearable/Smartwatch edge case
+    try:
+        tr_wear = create_traceability(
+            source_type='Business Rule',
+            source_id=source_id,
+            extracted_text='Wearable/Smartwatch line state: %s' % fname,
+            confidence=0.85,
+        )
+        scenarios.append(ExtractedScenario(
+            title='Verify %s behavior for Wearable/Smartwatch line' % fname,
+            validation='Operation handles wearable-specific constraints. Correct error or success per wearable rules.',
+            category='Edge Case',
+            source=tr_wear,
+            steps_hint=[
+                'Set up Wearable/Smartwatch subscriber line in SIT environment',
+                'Trigger %s operation via API' % fname,
+                'Verify operation handles wearable rules (reject if not supported, succeed with correct parameters)',
+                'Verify no Phone-line logic applied to wearable',
+            ],
+        ))
+    except Exception:
+        pass
+
+    log('[D1-STATE-MATRIX] Generated %d state-transition TCs for %s' % (len(scenarios), fname))
+    return scenarios
+
+
+# ================================================================
 def _verification_thinking(fname, ctx, existing):
     """Post-operation verification scenarios.
     A real QA doesn't just check the API response — they check 5 systems."""
