@@ -246,6 +246,23 @@ def _extract_error_code(rule: NMNOBusinessRule):
         if http_match:
             rule.error_code = http_match.group(1)
 
+    # Guard: reject codes that look like labels rather than codes
+    # A valid error code: ERR12, 400, GENS-0001, etc. — NO spaces, short, has digits
+    if rule.error_code:
+        ec = rule.error_code.strip()
+        _is_label = (
+            ' ' in ec                          # has spaces → label, not code
+            or len(ec) > 25                    # too long for a code
+            or (len(ec.split()) > 2)           # multi-word
+            or ec.lower() in ('if not', 'if', 'when', 'not', 'none', 'n/a', 'return error')
+            or (not any(c.isdigit() for c in ec) and len(ec) > 10)  # no digits and long
+        )
+        if _is_label:
+            # Try to derive a short slug from the first 3 words of the condition
+            _source = rule.condition or rule.error_details or rule.rule_description or ''
+            _words = re.findall(r'\b[A-Za-z0-9_]{2,}\b', _source)
+            rule.error_code = '_'.join(_words[:4])[:30] if _words else ''
+
     # Clean concatenated error_details: split on second ERR occurrence
     # e.g. "ERR12 - MDN expected length: 10ERR13- MDN expected length: 10"
     # → keep only "ERR12 - MDN expected length: 10"

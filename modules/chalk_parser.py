@@ -545,7 +545,10 @@ def _parse_feature_section(lines, data: ChalkData, feature_id: str, log=print):
       Format B: N\tScenario\tValidation (numbered tab rows)
     """
     fid = feature_id.upper()
-    ts_pattern = re.compile(rf'TS_{fid}_(\d+)', re.IGNORECASE)
+    # Make hyphen optional in TS pattern — Chalk pages sometimes omit it
+    # e.g., TS_MWTGPROV4379_1 instead of TS_MWTGPROV-4379_1
+    _fid_flex = fid.replace('-', '-?')
+    ts_pattern = re.compile(rf'TS_{_fid_flex}_(\d+)', re.IGNORECASE)
     # Format B: lines starting with a number then tab
     numbered_row_pat = re.compile(r'^(\d+)\t(.+)', re.DOTALL)
 
@@ -861,6 +864,20 @@ def _parse_workflow_tables(lines, data, fid, log=print):
     if data.scenarios:
         log('[CHALK]   Extracted %d scenarios from workflow tables' % (idx - 1))
 
+def _is_section_header_text(text: str) -> bool:
+    """Return True if text looks like a Chalk section header row — not testable content."""
+    tl = (text or '').lower().strip()
+    return (
+        any(tl.startswith(h) for h in (
+            'scenario #', 'test scenario', 'validation',
+            'negative scenarios', 'positive scenarios', 'edge scenarios',
+            'regression scenarios', 'sno', 'scenario number',
+        ))
+        or 'scenario #' in tl
+        or tl in ('validation', 'test scenario', 'scenario')
+    )
+
+
 def _parse_ts_format(lines, data, fid, ts_pattern, log=print):
     """Parse Format A: TS_MWTGPROV-XXXX_N scenario blocks.
     Captures all text before first TS_ pattern as feature description."""
@@ -906,8 +923,13 @@ def _parse_ts_format(lines, data, fid, ts_pattern, log=print):
             if len(parts) >= 2:
                 current_scenario.title = parts[1].strip()
             else:
-                current_scenario.title = ln.replace(current_scenario.scenario_id, '').strip()
-            current_section = 'scenario'
+                # Scenario ID is alone on the line — title will come from next line
+                # The line might be "TS_MWTGPROV4379_1" (no hyphen) while scenario_id is "TS_MWTGPROV-4379_1"
+                remaining = ln.strip()
+                # Remove the TS_XXX_N pattern (with or without hyphen) from the line
+                remaining = ts_pattern.sub('', remaining).strip()
+                current_scenario.title = remaining  # May be empty — filled by next line
+            current_section = 'scenario_title_pending' if not current_scenario.title else 'scenario'
 
             # Check for validation and category in tab-separated parts
             for p in parts:
@@ -921,6 +943,18 @@ def _parse_ts_format(lines, data, fid, ts_pattern, log=print):
         if not current_scenario:
             continue
 
+        # If title is pending (scenario ID was alone on its line), grab first content line as title
+        if current_section == 'scenario_title_pending' and ln.strip():
+            ln_low_check = ln.lower().strip()
+            # Skip table headers that aren't real titles
+            if ln_low_check not in ('scenario #', 'test scenario', 'validation', 'pre-req', 'steps'):
+                current_scenario.title = ln.strip()
+                current_section = 'scenario'
+                # If this line starts with "Verify" it's both title and validation
+                if ln_low_check.startswith('verify '):
+                    current_scenario.validation = ln.strip()
+                continue
+
         # Parse scenario content
         ln_low = ln.lower().strip()
 
@@ -931,7 +965,28 @@ def _parse_ts_format(lines, data, fid, ts_pattern, log=print):
         elif ln_low.startswith('derivation rule:'):
             current_scenario.derivation_rule = ln.strip(); current_section = 'derivation'
         elif ln_low.startswith('step ') and ':' in ln:
-            current_scenario.steps.append(ln.strip()); current_section = 'steps'
+            # Tab-separated step lines: "Step N: action\tvalidation text"
+            # Split on first tab — text before tab is the step, after tab is validation
+            if '\t' in ln:
+                _step_parts = ln.split('\t', 1)
+                current_scenario.steps.append(_step_parts[0].strip())
+                # The tab-separated suffix is the validation column — capture it
+                _val_candidate = _step_parts[1].strip()
+                if _val_candidate and len(_val_candidate) > 15:
+                    # Only set as validation if it looks like a result description
+                    # (not a section header or another step)
+                    _vc_low = _val_candidate.lower()
+                    _is_header = any(_vc_low.startswith(h) for h in
+                        ('scenario #', 'test scenario', 'validation', 'negative scenarios',
+                         'positive scenarios', 'edge scenarios', 'regression scenarios', 'step '))
+                    if not _is_header:
+                        if not current_scenario.validation or current_scenario.validation == current_scenario.title:
+                            current_scenario.validation = _val_candidate
+                        else:
+                            current_scenario.validation += ' ' + _val_candidate
+            else:
+                current_scenario.steps.append(ln.strip())
+            current_section = 'steps'
         elif ln_low.startswith('variation') or ln.startswith(chr(8226)):
             current_scenario.variations.append(ln.strip()); current_section = 'variations'
         elif ln.startswith(chr(8226)) or ln.startswith('- '):
@@ -942,6 +997,17 @@ def _parse_ts_format(lines, data, fid, ts_pattern, log=print):
             current_scenario.cdr_input += '\n' + ln.strip()
         elif current_section == 'derivation' and not any(ln_low.startswith(p) for p in ['step', 'variation', 'note', 'pre-', 'cdr']):
             current_scenario.derivation_rule += '\n' + ln.strip()
+        elif current_section == 'steps' and ln.strip() and not ln_low.startswith('step '):
+            # After steps: remaining content is the validation/expected result
+            # (e.g., "Response contains: houseNo='123', streetName='Main Street'...")
+            if current_scenario.validation == current_scenario.title or not current_scenario.validation:
+                current_scenario.validation = ln.strip()
+            else:
+                current_scenario.validation += ' ' + ln.strip()
+            current_section = 'validation'
+        elif current_section == 'validation' and ln.strip():
+            # Continuation of validation text
+            current_scenario.validation += ' ' + ln.strip()
 
         # Check for validation/category in tab-separated content
         # ALWAYS overwrite validation with richer text (PRR output > title repeat)
@@ -951,6 +1017,8 @@ def _parse_ts_format(lines, data, fid, ts_pattern, log=print):
                 p_low = p.lower()
                 if any(cat in p_low for cat in ['happy path', 'edge case', 'negative', 'e2e', 'workflow']):
                     current_scenario.category = p.strip()
+                elif _is_section_header_text(p):
+                    continue  # never use section headers as validation
                 elif len(p) > 30 and any(kw in p_low for kw in ['prr output', 'from_country', 'to_country',
                         'call_type', 'treated as domestic', 'billing impact', 'correctly identifies',
                         'enriched', 'complete e2e', 'e2e roaming', 'cdr collected', 'distributed to amdocs',
@@ -974,7 +1042,8 @@ def _post_fix_validations(lines, data: ChalkData, fid: str):
                      'complete e2e', 'e2e roaming', 'cdr collected', 'passes through',
                      'without country code', 'file arrives within', 'amdocs receives']
 
-    ts_pattern = re.compile(rf'TS_{fid}_(\d+)', re.IGNORECASE)
+    _fid_flex = fid.replace('-', '-?')
+    ts_pattern = re.compile(rf'TS_{_fid_flex}_(\d+)', re.IGNORECASE)
 
     # Build a map: scenario_number -> all lines belonging to it (Point 5: use scenario number, not positional index)
     scenario_lines = {}
@@ -1008,6 +1077,18 @@ def _post_fix_validations(lines, data: ChalkData, fid: str):
 
         # Search this scenario's lines for rich validation text
         sc_lines = scenario_lines.get(num, [])
+
+        # Section headers that must NEVER be used as validation text
+        _SECTION_HEADERS = (
+            'scenario #', 'test scenario', 'validation',
+            'negative scenarios', 'positive scenarios', 'edge scenarios',
+            'regression scenarios', 'sno', 'scenario number',
+        )
+
+        def _is_header_text(text: str) -> bool:
+            tl = text.lower().strip()
+            return any(tl.startswith(h) for h in _SECTION_HEADERS) or 'scenario #' in tl
+
         for ln in sc_lines:
             # Check tab-separated parts
             if '\t' in ln:
@@ -1016,11 +1097,15 @@ def _post_fix_validations(lines, data: ChalkData, fid: str):
                     p_low = p.lower()
                     if p.startswith('Step '):  # skip step text
                         continue
+                    if _is_header_text(p):     # skip section headers
+                        continue
                     if len(p) > 25 and any(kw in p_low for kw in RICH_KEYWORDS):
                         sc.validation = p
                         break
             # Check standalone line
             else:
+                if _is_header_text(ln):        # skip section headers
+                    continue
                 ln_low = ln.lower()
                 if len(ln) > 25 and any(kw in ln_low for kw in RICH_KEYWORDS):
                     sc.validation = ln.strip()

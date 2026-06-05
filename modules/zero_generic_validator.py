@@ -47,13 +47,19 @@ GENERIC_STEP_PATTERNS = [
     re.compile(r'^Check the result$', re.IGNORECASE),
     re.compile(r'^Verify the result$', re.IGNORECASE),
     re.compile(r'^Perform the action$', re.IGNORECASE),
-    re.compile(r'^Verify expected result$', re.IGNORECASE),
+    re.compile(r'^Verify expected result', re.IGNORECASE),  # prefix match — catches "Verify expected result: ..." variants
     re.compile(r'^Execute the operation$', re.IGNORECASE),
     re.compile(r'^Validate the output$', re.IGNORECASE),
     re.compile(r'^Run the test$', re.IGNORECASE),
     re.compile(r'^Confirm the outcome$', re.IGNORECASE),
     re.compile(r'^Verify system behavior$', re.IGNORECASE),
     re.compile(r'^Check system response$', re.IGNORECASE),
+    re.compile(r'^Complete the primary operation successfully$', re.IGNORECASE),
+    re.compile(r'^Refer to subtask .* for details', re.IGNORECASE),
+    re.compile(r'^As per .* specification \(', re.IGNORECASE),
+    # Chalk section header contamination — these must never appear as step text or expected results
+    re.compile(r'Scenario #\s*Test Scenario', re.IGNORECASE),
+    re.compile(r'^(Negative|Positive|Edge|Regression) Scenarios\s*:', re.IGNORECASE),
 ]
 
 # Patterns indicating placeholder field references
@@ -167,7 +173,7 @@ def validate_suite(suite: TestSuite, log: Callable = print) -> ValidationResult:
         # ── Check 4: Expected results contain specific values ──
         for step in (tc.steps or []):
             expected_text = (step.expected or '').strip()
-            if expected_text and re.match(r'^Verify expected result\.?$', expected_text, re.IGNORECASE):
+            if expected_text and re.match(r'^Verify expected result', expected_text, re.IGNORECASE):
                 violation = 'TC %s Step %s: Non-specific expected result: "%s"' % (
                     tc_id, step.step_num, expected_text)
                 result.violations.append(violation)
