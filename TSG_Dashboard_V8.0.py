@@ -168,8 +168,22 @@ for k, v in defaults.items():
 # ================================================================
 # BANNER
 # ================================================================
-_db_stats = get_db_stats()
-_chalk_cached = get_chalk_cache_count()
+# Cache DB stats so every Streamlit rerun doesn't re-query SQLite
+@st.cache_data(ttl=60)
+def _cached_db_stats():
+    return get_db_stats()
+
+@st.cache_data(ttl=60)
+def _cached_chalk_count():
+    return get_chalk_cache_count()
+
+@st.cache_data(ttl=120)
+def _cached_load_all_features():
+    """Load all features from DB — cached for 2 minutes so PI selection is instant."""
+    return load_all_features()
+
+_db_stats = _cached_db_stats()
+_chalk_cached = _cached_chalk_count()
 _db_badge = 'DB: %d features | %d cached' % (_db_stats['feature_count'], _chalk_cached) if _db_stats['feature_count'] > 0 else 'DB: empty'
 st.markdown("""<div class='banner'>
   <div>
@@ -485,13 +499,13 @@ with left:
 
         # Load features: DB first (instant), Chalk scrape as fallback
         if not ss.get('all_pi_features'):
-            db_features = load_all_features()
+            db_features = _cached_load_all_features()
             if db_features and get_features_count() > 0:
                 ss['all_pi_features'] = db_features
                 if ss['selected_pi']:
                     ss['pi_features'] = db_features.get(ss['selected_pi'], [])
-                stats = get_db_stats()
-                chalk_count = get_chalk_cache_count()
+                stats = _cached_db_stats()
+                chalk_count = _cached_chalk_count()
                 st.caption('Loaded %d features (%d with full Chalk data) from DB cache (%dKB)' % (
                     stats['feature_count'], chalk_count, stats['db_size_kb']))
             else:
@@ -1333,6 +1347,11 @@ if ss.get('_jira_sync_running'):
                     jira = fetch_jira_issue_rest(_jfid, log=lambda m: None)
                     if jira and jira.summary:
                         save_jira(jira)
+                        # Backfill feature title from Jira summary if Chalk gave us "(no title)"
+                        if not _jtitle or _jtitle in ('(no title)', '(no title found on page)'):
+                            save_features(ss.get('selected_pi') or '', [(_jfid, jira.summary[:120])])
+                            ss['all_pi_features'] = None  # invalidate cache so dropdown refreshes
+                            _cached_load_all_features.clear()
                         _jsync_msg('[%d/%d] ✅ %s (REST)' % (_ji, _jira_total, _jfid))
                         _jira_ok += 1
                     else:
@@ -1355,6 +1374,10 @@ if ss.get('_jira_sync_running'):
                         _jsync_msg('[%d/%d] Fetching Jira (browser): %s' % (_ji2, len(_jira_rest_failures), _jfid2))
                         jira = fetch_jira_issue(page, _jfid2, log=lambda m: None)
                         save_jira(jira)
+                        if jira and jira.summary and (not _jtitle2 or _jtitle2 in ('(no title)', '(no title found on page)')):
+                            save_features(ss.get('selected_pi') or '', [(_jfid2, jira.summary[:120])])
+                            ss['all_pi_features'] = None
+                            _cached_load_all_features.clear()
                         _jsync_msg('[%d/%d] ✅ %s (browser)' % (_ji2, len(_jira_rest_failures), _jfid2))
                         _jira_ok += 1
                     except Exception as _je2:
@@ -1380,6 +1403,10 @@ if ss.get('_jira_sync_running'):
                     _jsync_msg('[%d/%d] Fetching Jira: %s — %s' % (_ji, _jira_total, _jfid, _jtitle[:40]))
                     jira = fetch_jira_issue(page, _jfid, log=lambda m: None)
                     save_jira(jira)
+                    if jira and jira.summary and (not _jtitle or _jtitle in ('(no title)', '(no title found on page)')):
+                        save_features(ss.get('selected_pi') or '', [(_jfid, jira.summary[:120])])
+                        ss['all_pi_features'] = None
+                        _cached_load_all_features.clear()
                     _jsync_msg('[%d/%d] ✅ %s' % (_ji, _jira_total, _jfid))
                     _jira_ok += 1
                 except Exception as _je:
