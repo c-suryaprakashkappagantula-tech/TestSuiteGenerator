@@ -353,9 +353,25 @@ def build_test_cases(
         nav_path = _get_nbop_nav_path(feature_name)
 
     # ── 1. Build TCs from independent dimensions (API path only) ──
+    # Structural/metadata dimensions are blocked — they are navigation context, not testable axes
+    _STRUCTURAL_DIMS_API = {
+        'precondition', 'nav_path', 'navigation', 'action_point',
+        'page_name', 'context', 'ordering_channel', 'portal_screen',
+    }
+
+    def _is_nav_val(val: str) -> bool:
+        s = str(val)
+        return '→' in s or '->' in s or s.lower().startswith('navigate to')
+
     if is_api_path:
         for dim in plan.independent_dimensions:
+            if dim.name.lower() in _STRUCTURAL_DIMS_API:
+                continue
+            if dim.values and all(_is_nav_val(v) for v in dim.values):
+                continue
             for value in dim.values:
+                if _is_nav_val(value):
+                    continue
                 tc = _build_dimension_tc(dim, value, jira, chalk, feature_name, deep_mine_result, api_context, feature_intent)
                 test_cases.append(tc)
         log('[TC-BUILD]   Built %d dimension TCs (API path)' % sum(
@@ -601,10 +617,32 @@ def _build_scenario_tc(
     steps = []
     if scenario.steps_hint:
         for i, hint in enumerate(scenario.steps_hint, 1):
+            # Derive a meaningful expected result from the step hint text —
+            # NEVER use the generic "Step N completed as per <key> specification" placeholder.
+            step_low = hint.lower()
+            if any(kw in step_low for kw in ['invoke', 'call', 'trigger', 'send', 'submit']):
+                _exp = 'API accepts the request and responds successfully'
+            elif any(kw in step_low for kw in ['verify', 'validate', 'check', 'confirm']):
+                _exp = scenario.validation[:120] if scenario.validation else 'Verification passes as expected'
+            elif any(kw in step_low for kw in ['login', 'navigate', 'open', 'launch']):
+                _exp = 'Portal/screen loads successfully and is ready for input'
+            elif any(kw in step_low for kw in ['view', 'display', 'observe']):
+                _exp = 'Data displayed correctly matches expected values'
+            else:
+                # Use the Chalk validation as the expected result, not a placeholder
+                _exp = scenario.validation[:120] if scenario.validation else 'Step completed successfully'
             steps.append(TestStep(
                 step_num=i,
                 summary=hint,
-                expected='Step %d completed as per %s specification' % (i, scenario.source.source_id),
+                expected=_exp,
+                data_reference=scenario.source.source_id,
+            ))
+        # Add final verification step with the actual validation from Chalk
+        if scenario.validation and scenario.validation != scenario.title:
+            steps.append(TestStep(
+                step_num=len(steps) + 1,
+                summary='Verify expected result: %s' % scenario.title[:80],
+                expected=scenario.validation,
                 data_reference=scenario.source.source_id,
             ))
     elif scenario.api_spec:
@@ -614,7 +652,7 @@ def _build_scenario_tc(
     elif api_context.get('_nmno_enriched'):
         # Build enriched API steps from NMNO context (Phase 2 enhancement)
         # Extract scenario-specific context for step alignment
-        endpoint = api_context.get('endpoint', '/api/v1/%s' % feature_name.lower().replace(' ', '-'))
+        endpoint = api_context.get('endpoint', '')    # Empty if no real endpoint known
         method = api_context.get('method', 'POST')
         scenario_title = scenario.title or ''
 
@@ -747,12 +785,15 @@ def _build_scenario_tc(
                          data_reference=scenario.source.source_id),
             ]
     else:
-        # Minimal steps from scenario title and validation
-        steps = [
-            TestStep(step_num=1, summary='Execute: %s' % scenario.title,
-                expected=scenario.validation or 'Operation completes successfully',
-                data_reference=scenario.source.source_id),
-        ]
+        # NO steps_hint, NO api_spec, NO NMNO context.
+        # Use get_step_chain() with the scenario content — never dump title as "Execute: <title>".
+        # This produces domain-specific steps (inquiry, notification, API, UI) based on the
+        # scenario's actual subject matter.
+        from .step_templates import get_step_chain as _get_chain
+        _ctx = (feature_name + ' ' + (scenario.validation or '')).lower()
+        _chain = _get_chain(scenario.title, scenario.validation, _ctx)
+        steps = [TestStep(step_num=i, summary=s, expected=e, data_reference=scenario.source.source_id)
+                 for i, (s, e) in enumerate(_chain, 1)]
 
     # Ensure at least one step
     if not steps:
@@ -783,7 +824,7 @@ def _build_scenario_tc(
             '3. Line Status: Active',
         ])
     else:
-        preconditions = 'As per %s specification (%s)' % (scenario.source.source_type, scenario.source.source_id)
+        preconditions = '1.\tActive TMO subscriber line in SIT environment\n2.\tAPI endpoint accessible\n3.\tLine Status: Active'
 
     return TestCase(
         summary=summary,
@@ -824,7 +865,7 @@ def _build_negative_tc(
     """
     feature_id = jira.key if jira else ''
     api_context = api_context or {}
-    endpoint = api_context.get('endpoint', '/api/v1/%s' % feature_name.lower().replace(' ', '-'))
+    endpoint = api_context.get('endpoint', '')    # Empty if no real endpoint known — no slug fallback
     method = api_context.get('method', 'POST')
 
     # ── Use Business Rule data if available ──
@@ -897,6 +938,23 @@ def _build_negative_tc(
                 condition = error_msg[:100]
             else:
                 condition = 'Error condition triggers %s' % error_code
+
+        # Guard: error_code must look like a real code (ERR123, 400, GENS-0001, etc.)
+        # If it looks like a condition fragment ("If not", "When", "not"), replace with
+        # a sanitized version derived from the condition text
+        _ec_looks_generic = (
+            not error_code
+            or len(error_code.strip()) < 3
+            or error_code.strip().lower() in ('if not', 'if', 'when', 'not', 'none', 'n/a')
+            or (len(error_code) < 10 and not any(c.isdigit() for c in error_code))
+        )
+        if _ec_looks_generic:
+            # Derive a short code from condition or error_msg
+            _ec_source = condition or error_msg or 'unknown'
+            # Take first meaningful words, max 30 chars
+            import re as _re_ec
+            _words = _re_ec.findall(r'\b[A-Za-z0-9_]{2,}\b', _ec_source)
+            error_code = '_'.join(_words[:4])[:30] if _words else 'invalid_input'
 
         summary = '%s_Negative_%s_%s' % (
             feature_id, feature_name.replace(' ', '_'), error_code,
@@ -1062,7 +1120,7 @@ def _build_clear_api_steps(
         method = value
     else:
         method = api_context.get('method', 'POST')  # POST is the primary/full API call
-    endpoint = api_context.get('endpoint', '/api/v1/%s' % feature_name.lower().replace(' ', '-'))
+    endpoint = api_context.get('endpoint', '')    # Empty if no real endpoint known — no slug fallback
 
     human_dim = _humanize_dim_name(dim_name)
 
@@ -1228,21 +1286,21 @@ def _build_itmbo_api_steps(
     method = 'POST'
     if deep_mine_result and deep_mine_result.api_specs:
         spec = deep_mine_result.api_specs[0]
-        endpoint = spec.endpoint or '/api/provisioning/v1/%s' % feature_name.lower().replace(' ', '-')
+        endpoint = spec.endpoint or ''
         method = spec.http_method or 'POST'
 
-    if not endpoint:
-        endpoint = '/api/provisioning/v1/%s' % feature_name.lower().replace(' ', '-')
+    # If still no endpoint from spec, leave it empty — steps reference the API name only
+    _endpoint_ref = endpoint if endpoint else ('%s API' % feature_name)
 
     steps = [
         TestStep(step_num=1,
             summary='Prepare %s request with %s=%s in payload' % (method, _humanize_dim_name(dim_name), value),
             expected='Request payload constructed with %s=%s' % (_humanize_dim_name(dim_name), value),
-            data_reference='%s %s' % (method, endpoint)),
+            data_reference='%s %s' % (method, _endpoint_ref)),
         TestStep(step_num=2,
-            summary='Send %s request to %s via ITMBO channel' % (method, endpoint),
+            summary='Send %s request to %s via ITMBO channel' % (method, _endpoint_ref),
             expected='API returns 200 OK with valid response',
-            data_reference='Endpoint: %s' % endpoint),
+            data_reference='Endpoint: %s' % _endpoint_ref),
         TestStep(step_num=3,
             summary='Verify response confirms %s processed for %s=%s' % (feature_name, _humanize_dim_name(dim_name), value),
             expected='Response body contains confirmation for %s with %s-specific data' % (feature_name, value),
@@ -1259,15 +1317,16 @@ def _build_api_spec_steps(
 ) -> List[TestStep]:
     """Build steps from an APISpec object."""
     method = spec.http_method or 'POST'
-    endpoint = spec.endpoint or '/api/v1/%s' % feature_name.lower().replace(' ', '-')
+    endpoint = spec.endpoint or ''
+    _endpoint_ref = endpoint if endpoint else ('%s API' % spec.api_name if spec.api_name else feature_name)
 
     steps = [
         TestStep(step_num=1,
-            summary='Prepare %s request to %s for scenario: %s' % (method, endpoint, scenario_title[:50]),
+            summary='Prepare %s request to %s for scenario: %s' % (method, _endpoint_ref, scenario_title[:50]),
             expected='Request payload prepared per API specification',
-            data_reference='%s %s' % (method, endpoint)),
+            data_reference='%s %s' % (method, _endpoint_ref)),
         TestStep(step_num=2,
-            summary='Send %s %s with required headers and payload' % (method, endpoint),
+            summary='Send %s %s with required headers and payload' % (method, _endpoint_ref),
             expected='API responds with expected status code',
             data_reference='API: %s' % spec.api_name),
         TestStep(step_num=3,
@@ -1552,11 +1611,14 @@ def _build_api_context(jira, deep_mine_result, feature_name: str) -> Dict:
     """Build API context from available data for step generation.
 
     Extracts: endpoint, method, request fields, response fields, api_name.
+    IMPORTANT: Never fall back to slugifying the feature title as an endpoint.
+    If no real API spec is available, leave endpoint empty — callers must handle
+    that case with domain-specific step templates, not generic slug endpoints.
     """
     ctx = {
-        'endpoint': '/api/provisioning/v1/%s' % feature_name.lower().replace(' ', '-'),
+        'endpoint': '',          # Empty = no known endpoint. Never slugify the feature title.
         'method': 'POST',
-        'api_name': feature_name.lower().replace(' ', '-'),
+        'api_name': '',          # Empty = unknown. Callers check for this.
         'request_fields': [],
         'response_fields': [],
         'source_system': 'ITMBO',
@@ -1613,21 +1675,65 @@ def _generate_dual_path_tcs(
       - This function generates the UI-path TCs with channel "NBOP"
 
     Deduplication is handled by the caller (build_test_cases).
+
+    GUARD: Only fires when the feature is a genuine NBOP UI feature where
+    NBOP navigation is the testing mechanism. Never fires for CR/mediation/
+    notification features that happen to have NBOP as a display channel.
     """
     dual_tcs: List[TestCase] = []
     feature_id = jira.key if jira else ''
+
+    # ── Hard gate: refuse to generate device-matrix UI TCs for non-UI features ──
+    # Mediation/CDR/notification/CR features have NBOP as a DISPLAY channel only,
+    # not a testing mechanism. Device-type matrix TCs are meaningless for them.
+    # Only generate dual-path TCs when the feature has explicit UI testing intent.
+    _has_ui_subtasks = bool(feature_intent.get('ui_subtasks'))
+    _has_api_subtasks = bool(feature_intent.get('api_subtasks'))
+    _is_pure_display = not _has_ui_subtasks and _has_api_subtasks
+    if _is_pure_display:
+        log('[TC-BUILD]   Dual-path skipped: no UI subtasks — feature uses NBOP for display only, not testing')
+        return []
+
+    # Also skip for mediation/notification/CR features by feature type
+    _jira_summary = (jira.summary if jira else '').lower()
+    _MEDIATION_SIGNALS = ['med, ', ', med,', 'nslnm, med', 'mediation', 'prr', 'cdr', 'dsource',
+                          'dsource', 'data source', 'usage detail', 'usage data',
+                          '- cr -', 'cr -', '- cr:', 'fix:', 'fix -', 'defect']
+    if any(sig in _jira_summary for sig in _MEDIATION_SIGNALS):
+        log('[TC-BUILD]   Dual-path skipped: mediation/CR feature — device matrix TCs do not apply')
+        return []
 
     # Get NBOP navigation path
     nav_path = _get_nbop_nav_path(feature_name)
 
     # For each independent dimension, generate a UI-path TC
     # (The dimension TCs already generated are API-path by default)
+    # ── Structural/metadata dimensions must NEVER become UI TCs ──
+    _STRUCTURAL_DIMS_UI = {
+        'precondition', 'nav_path', 'navigation', 'action_point',
+        'page_name', 'context', 'ordering_channel', 'portal_screen',
+    }
+
+    def _is_nav_value_ui(val: str) -> bool:
+        """True if value is a navigation path, not a testable identifier."""
+        s = str(val)
+        return '→' in s or '->' in s or s.lower().startswith('navigate to')
+
     for dim in plan.independent_dimensions:
-        # Skip dimensions that don't make sense for UI testing
+        # Skip negative dimensions — handled separately
         if dim.name in ('error_code', 'line_state'):
             continue  # Negative scenarios handled separately
+        # Skip structural/metadata dimensions — these are navigation context, not test axes
+        if dim.name.lower() in _STRUCTURAL_DIMS_UI:
+            continue
+        # Skip if all values look like navigation paths
+        if dim.values and all(_is_nav_value_ui(v) for v in dim.values):
+            continue
 
         for value in dim.values:
+            # Skip individual values that are navigation paths (e.g. "NBOP → Mobile Service Management")
+            if _is_nav_value_ui(value):
+                continue
             # Generate UI-path TC for this dimension value
             ui_tc = _build_ui_path_tc(
                 feature_id, feature_name, dim.name, value,
@@ -1650,56 +1756,71 @@ def _build_ui_path_tc(
 ) -> TestCase:
     """Build a UI-path TC with NBOP-specific navigation steps."""
     human_dim = _humanize_dim_name(dim_name)
+    _full_nav = nav_path or 'NBOP → Mobile Service Management'
 
+    # Build TC summary — e.g. "MWTGPROV-4020_NBOP_Validate Reset Plan Product=Phone"
     summary = '%s_NBOP_Validate %s %s=%s' % (feature_id, feature_name, human_dim, value)
 
     # Short intent-focused description
-    description = 'To validate %s displays correctly in NBOP portal for %s=%s' % (
+    description = 'To validate %s via NBOP portal for %s %s' % (
         feature_name, human_dim, value
     )
 
-    # Environment-specific preconditions (QMetry style)
+    # Environment-specific preconditions
+    if dim_name == 'product':
+        sub_state = 'Active TMO subscriber line with %s device type' % value
+    elif dim_name == 'line_state':
+        sub_state = 'TMO subscriber line in %s state' % value
+    else:
+        sub_state = 'Active TMO subscriber line in SIT environment'
+
     preconditions = '\n'.join([
-        '1. Active TMO MDN available in SIT environment with %s' % value,
-        '2. User logged into NBOP',
-        '3. Line Status: Active',
+        '1. %s' % sub_state,
+        '2. NBOP portal accessible (SIT environment)',
+        '3. Agent credentials with MNO_TMO permission',
     ])
 
-    # Build clear UI steps
-    if nav_path:
-        steps = [
-            TestStep(step_num=1,
-                summary='Login to NBOP portal with valid agent credentials',
-                expected='NBOP dashboard loaded successfully, agent session active',
-                data_reference='NBOP portal login'),
-            TestStep(step_num=2,
-                summary='Navigate to: %s' % nav_path,
-                expected='%s page/section loaded and ready for input' % feature_name,
-                data_reference='Navigation: %s' % nav_path),
-            TestStep(step_num=3,
-                summary='Search subscriber using %s=%s' % (human_dim, value),
-                expected='Subscriber found and profile loaded. %s information displayed.' % feature_name,
-                data_reference='Search by %s=%s' % (dim_name, value)),
-            TestStep(step_num=4,
-                summary='Verify %s results displayed correctly for %s=%s' % (feature_name, human_dim, value),
-                expected='%s data shown in subscriber profile with correct details for %s device/identifier' % (feature_name, value),
-                data_reference='UI verification: %s=%s via NBOP' % (dim_name, value)),
-        ]
+    # Build context-aware UI steps
+    # Step 3 describes what to DO with the subscriber, not "Search using {dim_name}={value}"
+    if dim_name == 'product':
+        step3_action = 'Search for TMO subscriber MDN with active %s device' % value
+        step3_expected = 'Subscriber found. Line profile loaded showing %s device.' % value
+        step4_action = 'Execute %s operation and verify result for %s' % (feature_name, value)
+        step4_expected = '%s completed successfully for %s device. NBOP Line Summary updated.' % (feature_name, value)
+    elif dim_name == 'input_type':
+        step3_action = 'Search for TMO subscriber using %s as the identifier' % value
+        step3_expected = 'Subscriber found via %s. Line profile loaded.' % value
+        step4_action = 'Execute %s and verify result' % feature_name
+        step4_expected = '%s completed. NBOP reflects correct post-operation state.' % feature_name
+    elif dim_name == 'line_state':
+        step3_action = 'Search for TMO subscriber MDN in %s state' % value
+        step3_expected = 'Subscriber found with line in %s state.' % value
+        step4_action = 'Attempt %s operation and verify rejection/error handling' % feature_name
+        step4_expected = 'Operation rejected with appropriate error for %s line state.' % value
     else:
-        steps = [
-            TestStep(step_num=1,
-                summary='Login to NBOP portal and search subscriber by MDN',
-                expected='Subscriber profile loaded in NBOP',
-                data_reference='NBOP portal'),
-            TestStep(step_num=2,
-                summary='Navigate to %s feature section with %s=%s' % (feature_name, human_dim, value),
-                expected='Feature section accessible, %s context applied' % value,
-                data_reference='%s=%s' % (dim_name, value)),
-            TestStep(step_num=3,
-                summary='Verify %s operation result displayed for %s=%s' % (feature_name, human_dim, value),
-                expected='Correct %s information shown in UI for %s' % (feature_name, value),
-                data_reference='NBOP UI: %s=%s' % (dim_name, value)),
-        ]
+        step3_action = 'Search for TMO subscriber MDN and load line profile'
+        step3_expected = 'Subscriber line profile loaded in NBOP portal.'
+        step4_action = 'Execute %s operation (%s: %s) and verify result' % (feature_name, human_dim, value)
+        step4_expected = '%s completed. NBOP reflects correct post-operation state for %s=%s.' % (feature_name, human_dim, value)
+
+    steps = [
+        TestStep(step_num=1,
+            summary='Login to NBOP portal with agent credentials (MNO_TMO permission required)',
+            expected='NBOP dashboard loaded. Agent session active.',
+            data_reference='NBOP portal login'),
+        TestStep(step_num=2,
+            summary='Navigate to: %s' % _full_nav,
+            expected='%s section loaded and ready.' % feature_name,
+            data_reference='Navigation: %s' % _full_nav),
+        TestStep(step_num=3,
+            summary=step3_action,
+            expected=step3_expected,
+            data_reference='%s=%s' % (dim_name, value)),
+        TestStep(step_num=4,
+            summary=step4_action,
+            expected=step4_expected,
+            data_reference='NBOP UI verification: %s=%s' % (dim_name, value)),
+    ]
 
     tr = create_traceability(
         source_type='Jira AC',
@@ -2453,8 +2574,13 @@ def _build_ui_scenario_tc_enriched(
                 expected = 'Navigation successful — target page/section loaded'
             elif 'login' in hint_text.lower() or 'log in' in hint_text.lower() or 'search' in hint_text.lower():
                 expected = 'Subscriber profile loaded successfully'
+            elif 'call' in hint_text.lower() and 'api' in hint_text.lower():
+                expected = 'API call returns expected response'
+            elif 'verify' in hint_text.lower() or 'check' in hint_text.lower() or 'validate' in hint_text.lower():
+                expected = 'Verification passes — result matches expected value'
             else:
-                expected = 'Step completed successfully'
+                # Use the hint text itself to derive a contextual expected result
+                expected = 'Expected outcome confirmed per scenario specification'
             steps.append(TestStep(
                 step_num=step_num,
                 summary=hint_text[:120],

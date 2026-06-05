@@ -110,22 +110,22 @@ def _pos(idx, fid, title, val, ctx):
     title_low = title.lower()
     if 'century' in title_low or 'service grouping' in title_low:
         steps = [
-            TestStep(1, 'Complete the primary operation successfully', 'Operation completed with SUCC00'),
+            TestStep(1, 'Execute the %s operation via API' % (ctx.split()[0] if ctx else 'primary'), 'API call succeeds with HTTP 200/202 and SUCC00'),
             TestStep(2, 'Navigate to Century Report / Service Grouping', 'Report accessible'),
             TestStep(3, 'Search using Root Transaction ID or MDN', 'Records found'),
             TestStep(4, 'Verify all fields match expected post-operation state', 'All data correct'),
         ]
     elif 'transaction history' in title_low:
         steps = [
-            TestStep(1, 'Complete the primary operation successfully', 'Operation completed'),
+            TestStep(1, 'Execute the %s operation via API to generate a transaction' % (ctx.split()[0] if ctx else 'primary'), 'API call succeeds with HTTP 200/202'),
             TestStep(2, 'Query Transaction History for the MDN', 'Transaction History accessible'),
             TestStep(3, 'Verify entry exists with correct timestamp, type, MDN, status', 'Entry found with correct details'),
             TestStep(4, 'Verify no duplicate or orphaned entries', 'Clean transaction log'),
         ]
     elif 'nbop' in title_low or 'portal' in title_low:
         steps = [
-            TestStep(1, 'Complete the primary operation successfully', 'Operation completed'),
-            TestStep(2, 'Login to NBOP Portal and navigate to subscriber details', 'Portal accessible'),
+            TestStep(1, 'Execute the %s operation via API' % (ctx.split()[0] if ctx else 'primary'), 'API call succeeds with HTTP 200/202 and SUCC00'),
+            TestStep(2, 'Login to NBOP Portal and search for the subscriber MDN', 'Portal accessible, subscriber found'),
             TestStep(3, 'Verify subscriber details reflect post-operation state', 'Portal shows correct data'),
             TestStep(4, 'Verify no stale/cached data displayed', 'Data is fresh and accurate'),
         ]
@@ -139,7 +139,7 @@ def _pos(idx, fid, title, val, ctx):
         ]
     elif 'cancel' in title_low or 'reversal' in title_low:
         steps = [
-            TestStep(1, 'Complete the primary operation successfully', 'Operation completed'),
+            TestStep(1, 'Execute the %s operation via API to create the initial transaction' % (ctx.split()[0] if ctx else 'primary'), 'Initial operation succeeds with HTTP 200/202'),
             TestStep(2, 'Trigger cancel/reversal with valid parameters', 'Cancel request sent'),
             TestStep(3, 'Verify system accepts cancellation and restores original state', 'Original state restored'),
             TestStep(4, 'Verify Century Report logs the cancellation', 'Cancellation audit trail complete'),

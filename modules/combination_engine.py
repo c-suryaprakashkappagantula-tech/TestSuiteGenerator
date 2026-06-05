@@ -44,6 +44,29 @@ def plan_combinations(
     """
     log('[COMBINE] Planning combinations...')
 
+    # ── Structural/metadata dimensions — NEVER produce TCs ──
+    # These are navigation/context metadata extracted from feature descriptions.
+    # Allowing them through produces garbage like:
+    #   "Validate Reset Plan Precondition=NBOP → Mobile Service Management"
+    #   "Search subscriber using nav_path=NBOP → Reset Line"
+    _STRUCTURAL_DIMS = {
+        'precondition', 'nav_path', 'navigation', 'action_point',
+        'page_name', 'context', 'ordering_channel', 'portal_screen',
+    }
+
+    # Also block any dimension whose value contains a navigation arrow
+    # (e.g., value = "NBOP → Mobile Service Management")
+    def _is_nav_value(val: str) -> bool:
+        return '→' in val or '->' in val or 'navigate to' in val.lower()
+
+    def _is_structural_dim(dim: 'Dimension') -> bool:
+        if dim.name.lower() in _STRUCTURAL_DIMS:
+            return True
+        # Block if ALL values look like navigation paths
+        if dim.values and all(_is_nav_value(str(v)) for v in dim.values):
+            return True
+        return False
+
     independent_dimensions: List[Dimension] = []
     crossed_dimensions: List[tuple] = []
     reduction_notes: List[str] = []
@@ -55,10 +78,16 @@ def plan_combinations(
     dim_by_name = {d.name: d for d in dimension_set.dimensions}
 
     for dim in dimension_set.dimensions:
+        if _is_structural_dim(dim):
+            log('[COMBINE]   SKIP structural dim: %s (values: %s)' % (dim.name, dim.values[:2]))
+            continue
         if dim.cross_with:
             for target_name in dim.cross_with:
                 if target_name in dim_by_name:
                     target_dim = dim_by_name[target_name]
+                    if _is_structural_dim(target_dim):
+                        log('[COMBINE]   SKIP structural cross target: %s' % target_name)
+                        continue
                     # Avoid duplicate crosses (A×B and B×A)
                     pair_key = tuple(sorted([dim.name, target_name]))
                     already_crossed = any(
@@ -77,6 +106,8 @@ def plan_combinations(
 
     # ── Step 2: Remaining dimensions are independent ──
     for dim in dimension_set.dimensions:
+        if _is_structural_dim(dim):
+            continue  # Already logged above
         if dim.name not in crossed_dim_names:
             independent_dimensions.append(dim)
             if len(dim.values) > 1:
