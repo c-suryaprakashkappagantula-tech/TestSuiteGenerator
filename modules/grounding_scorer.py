@@ -34,12 +34,13 @@ GATE_THRESHOLD = int(os.getenv('GROUNDING_GATE_THRESHOLD', '40'))
 
 # Source types that indicate real data extraction (not template/inferred)
 _AUTHORITATIVE_SOURCES = frozenset([
-    'Chalk Scenario',
-    'Business Rule',
-    'Jira AC',
-    'NBOP UI',
-    'Attachment',
-    'Subtask AC',
+    # Title-case (standard)
+    'Chalk Scenario', 'Business Rule', 'Jira AC', 'NBOP UI',
+    'Attachment', 'Subtask AC',
+    # Lowercase variants (dimension-derived TCs)
+    'chalk scenario', 'business rule', 'jira ac', 'nbop ui',
+    'attachment', 'subtask ac',
+    'chalk', 'jira', 'nbop', 'subtask',
 ])
 
 # Step text patterns that indicate template filler (0 grounding value)
@@ -118,7 +119,7 @@ def score_tc(tc) -> int:
     tr = getattr(tc, 'traceability', None)
     if tr:
         source_type = getattr(tr, 'source_type', '') or ''
-        if source_type in _AUTHORITATIVE_SOURCES:
+        if source_type.lower() in {s.lower() for s in _AUTHORITATIVE_SOURCES}:
             score += 20
         elif source_type:
             # Partial credit for known-but-lower sources

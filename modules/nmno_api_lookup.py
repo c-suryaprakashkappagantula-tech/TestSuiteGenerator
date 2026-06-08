@@ -258,10 +258,21 @@ def _extract_error_code(rule: NMNOBusinessRule):
             or (not any(c.isdigit() for c in ec) and len(ec) > 10)  # no digits and long
         )
         if _is_label:
-            # Try to derive a short slug from the first 3 words of the condition
+            # Try to derive a short slug from the condition/error_details words
             _source = rule.condition or rule.error_details or rule.rule_description or ''
             _words = re.findall(r'\b[A-Za-z0-9_]{2,}\b', _source)
-            rule.error_code = '_'.join(_words[:4])[:30] if _words else ''
+            _slug = '_'.join(_words[:4])[:30] if _words else ''
+            # Only use the slug if it looks like a real code (has uppercase/digits, no pure words)
+            if _slug and (any(c.isdigit() for c in _slug) or re.search(r'ERR|CODE|MSG', _slug.upper())):
+                rule.error_code = _slug
+            else:
+                # Derive from original code's key words (capitalize first letters)
+                _code_words = re.findall(r'\b[A-Za-z0-9]{2,}\b', ec)
+                if _code_words and len(_code_words) <= 3:
+                    # e.g. "Line Status validation" → "LINE_STATUS_VALIDATION"
+                    rule.error_code = '_'.join(w.upper() for w in _code_words[:3])[:30]
+                else:
+                    rule.error_code = ''  # no usable code — will generate generic negative
 
     # Clean concatenated error_details: split on second ERR occurrence
     # e.g. "ERR12 - MDN expected length: 10ERR13- MDN expected length: 10"

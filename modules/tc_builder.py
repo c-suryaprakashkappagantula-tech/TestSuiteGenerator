@@ -619,33 +619,60 @@ def _build_scenario_tc(
     # Build steps from scenario hints or api_spec
     steps = []
     if scenario.steps_hint:
+        _is_negative = scenario.category == 'Negative'
+        _rejection_msg = (scenario.validation or 'Operation rejected with appropriate error')[:120]
+        _success_msg = (scenario.validation or 'Operation completes successfully')[:120]
+
         for i, hint in enumerate(scenario.steps_hint, 1):
-            # Derive a meaningful expected result from the step hint text —
-            # NEVER use the generic "Step N completed as per <key> specification" placeholder.
+            # Derive step-appropriate expected result from the hint text
             step_low = hint.lower()
-            if any(kw in step_low for kw in ['invoke', 'call', 'trigger', 'send', 'submit']):
-                _exp = 'API accepts the request and responds successfully'
+            _is_last_step = (i == len(scenario.steps_hint))
+            _val = scenario.validation or ''
+            _val_is_header = (
+                'scenario #' in _val.lower()
+                or _val.lower().startswith(('test scenario', 'validation', 'negative scenarios',
+                                            'edge scenarios', 'positive scenarios', 'regression scenarios'))
+            )
+
+            if any(kw in step_low for kw in ['set up', 'precondition', 'prepare', 'configure']):
+                # Setup steps: expected = state is ready
+                if 'state in sit' in step_low or 'environment' in step_low:
+                    _state = hint.split('in SIT')[0].strip().split('Set up subscriber line in ')[-1].strip()
+                    _exp = 'Subscriber line is in the required state and ready for testing'
+                else:
+                    _exp = 'Test environment configured and ready'
+            elif any(kw in step_low for kw in ['trigger', 'invoke', 'call', 'submit']):
+                # Trigger step: for negative TCs just say "request submitted", not "accepted"
+                _exp = 'Request submitted to API endpoint' if _is_negative else 'API accepts the request and responds successfully'
+            elif any(kw in step_low for kw in ['send post', 'send get', 'send %s' % (api_context.get('method','') or 'post').lower()]):
+                _exp = 'Request submitted to API endpoint' if _is_negative else 'API returns HTTP 200/202 with success response'
+            elif any(kw in step_low for kw in ['verify operation rejected', 'verify.*rejected', 'verify.*error', 'rejected']):
+                # Verify rejection — use scenario validation
+                _exp = _rejection_msg if not _val_is_header else 'Operation rejected with appropriate error code'
+            elif any(kw in step_low for kw in ['verify operation completes', 'verify.*completes', 'verify.*succeed', 'verify downstream', 'verify.*updated', 'verify.*consistent']):
+                # Verify success
+                _exp = _success_msg if not _val_is_header else 'Operation completed successfully. Downstream systems updated.'
             elif any(kw in step_low for kw in ['verify', 'validate', 'check', 'confirm']):
-                _val = scenario.validation or ''
-                _val_is_header = (
-                    'scenario #' in _val.lower()
-                    or _val.lower().startswith(('test scenario', 'validation', 'negative scenarios',
-                                                'edge scenarios', 'positive scenarios', 'regression scenarios'))
-                )
-                _exp = _val[:120] if _val and not _val_is_header else 'Verification passes as expected'
+                # Generic verify — use validation but check category
+                if _is_negative:
+                    _exp = _rejection_msg if not _val_is_header else 'System rejects as expected with appropriate error'
+                else:
+                    _exp = _success_msg if not _val_is_header else 'Verification passes as expected'
+            elif any(kw in step_low for kw in ['verify line remains', 'no state change', 'unchanged']):
+                _exp = 'Line remains in original state — no state transition occurred'
             elif any(kw in step_low for kw in ['login', 'navigate', 'open', 'launch']):
                 _exp = 'Portal/screen loads successfully and is ready for input'
             elif any(kw in step_low for kw in ['view', 'display', 'observe']):
                 _exp = 'Data displayed correctly matches expected values'
             else:
-                # Use the Chalk validation as the expected result, not a placeholder
-                _val2 = scenario.validation or ''
-                _val2_is_header = (
-                    'scenario #' in _val2.lower()
-                    or _val2.lower().startswith(('test scenario', 'validation', 'negative scenarios',
-                                                 'edge scenarios', 'positive scenarios', 'regression scenarios'))
-                )
-                _exp = _val2[:120] if _val2 and not _val2_is_header else 'Step completed successfully'
+                # Fallback: use validation for last step, neutral for others
+                if _is_last_step and _val and not _val_is_header:
+                    _exp = _val[:120]
+                elif _is_negative:
+                    _exp = 'Step completed — continue to verification'
+                else:
+                    _exp = 'Step completed successfully'
+
             steps.append(TestStep(
                 step_num=i,
                 summary=hint,
@@ -836,7 +863,22 @@ def _build_scenario_tc(
                  expected=scenario.validation, data_reference=scenario.source.source_id)]
 
     # Transform raw AC text into a proper test scenario title
-    clean_title = _transform_to_scenario_title(scenario.title, feature_name)
+    # Skip transform for state-matrix/partial-failure titles — they're already clean
+    _is_generated_title = (
+        scenario.title.startswith('Verify ') or
+        scenario.title.startswith('Negative: Verify ') or
+        scenario.title.startswith('Negative: Verify New ')
+    )
+    if _is_generated_title:
+        # Just clean double prefixes and truncate
+        _raw_title = scenario.title.strip()
+        # Remove double "Verify" / "Negative: Verify Negative:" patterns
+        _raw_title = re.sub(r'^(Negative:\s+)(Verify\s+)(Negative:\s+)', r'\1\2', _raw_title)
+        _raw_title = re.sub(r'^Verify\s+Negative:\s+Verify\s+', 'Negative: Verify ', _raw_title)
+        _raw_title = re.sub(r'^Verify\s+Verify\s+', 'Verify ', _raw_title)
+        clean_title = _raw_title
+    else:
+        clean_title = _transform_to_scenario_title(scenario.title, feature_name)
     # Phase 4: Truncate at word boundary (no mid-word cuts), replace spaces with underscores
     clean_title_safe = clean_title.replace(' ', '_')
     if len(clean_title_safe) > 80:

@@ -408,17 +408,17 @@ def _build_testcases_sheet(wb, suite: TestSuite, sheet_name=None, tc_subset=None
     ws = wb.create_sheet(sheet_name or suite.feature_id)
     tcs = tc_subset if tc_subset else suite.test_cases
     ws.column_dimensions['A'].width = 6
-    ws.column_dimensions['B'].width = 48
-    ws.column_dimensions['C'].width = 55
-    ws.column_dimensions['D'].width = 48
+    ws.column_dimensions['B'].width = 62
+    ws.column_dimensions['C'].width = 70
+    ws.column_dimensions['D'].width = 55
     ws.column_dimensions['E'].width = 8
-    ws.column_dimensions['F'].width = 60
-    ws.column_dimensions['G'].width = 55
-    ws.column_dimensions['H'].width = 18
-    ws.column_dimensions['I'].width = 18
-    ws.column_dimensions['J'].width = 18
-    ws.column_dimensions['K'].width = 12
-    ws.column_dimensions['L'].width = 40
+    ws.column_dimensions['F'].width = 65
+    ws.column_dimensions['G'].width = 60
+    ws.column_dimensions['H'].width = 20
+    ws.column_dimensions['I'].width = 20
+    ws.column_dimensions['J'].width = 20
+    ws.column_dimensions['K'].width = 13
+    ws.column_dimensions['L'].width = 45
 
     # Row 1: Headers — bold white on soft navy (no feature description banner)
     ws.append(EXCEL_HEADERS)
