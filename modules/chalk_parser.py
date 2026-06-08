@@ -628,7 +628,9 @@ def _parse_numbered_format(lines, data, fid, numbered_row_pat, log=print):
                 data.scenarios.append(current_scenario)
 
             title = parts[0] if parts else rest
-            validation = parts[1] if len(parts) > 1 else ''
+            # Guard: reject table header text leaking into validation column
+            _raw_val = parts[1] if len(parts) > 1 else ''
+            validation = '' if _is_section_header_text(_raw_val) else _raw_val
 
             current_scenario = ChalkScenario(
                 scenario_id='TS_%s_%s' % (fid, num),
@@ -642,10 +644,13 @@ def _parse_numbered_format(lines, data, fid, numbered_row_pat, log=print):
         if current_scenario and current_section == 'scenario' and ln.strip():
             # If line doesn't start with a number+tab, it's continuation of previous
             if not numbered_row_pat.match(ln) and not ln_upper.startswith('SNO'):
+                _cont = ln.strip()
+                if _is_section_header_text(_cont):
+                    continue  # don't append section headers to validation
                 if current_scenario.validation:
-                    current_scenario.validation += ' ' + ln.strip()
+                    current_scenario.validation += ' ' + _cont
                 else:
-                    current_scenario.validation = ln.strip()
+                    current_scenario.validation = _cont
 
     # Last scenario
     if current_scenario:

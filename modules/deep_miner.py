@@ -494,12 +494,19 @@ def _extract_products_dimension(tables: List, raw_text: str) -> List[str]:
                         if val and val not in products and len(val) < 30:
                             products.append(val)
 
-    # Check text for product mentions
+    # Check text for product mentions — ONLY accept when near an explicit Product/Device label.
+    # Scanning all raw_text causes false positives from shared PI page content (other features).
     if not products:
-        for product in _KNOWN_PRODUCTS:
-            if re.search(r'\b' + re.escape(product) + r'\b', raw_text, re.IGNORECASE):
-                if product not in products:
-                    products.append(product)
+        # Only scan sections that have an explicit "Product:" or "Device Type:" label
+        product_label_pattern = re.compile(
+            r'(?:product|device\s+types?)\s*:\s*([^\n]{3,80})', re.IGNORECASE
+        )
+        for m in product_label_pattern.finditer(raw_text):
+            label_text = m.group(1)
+            for product in _KNOWN_PRODUCTS:
+                if re.search(r'\b' + re.escape(product) + r'\b', label_text, re.IGNORECASE):
+                    if product not in products:
+                        products.append(product)
 
     return products
 

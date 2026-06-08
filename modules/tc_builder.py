@@ -641,8 +641,11 @@ def _build_scenario_tc(
                     _exp = 'Subscriber line is in the required state and ready for testing'
                 else:
                     _exp = 'Test environment configured and ready'
-            elif any(kw in step_low for kw in ['trigger', 'invoke', 'call', 'submit']):
-                # Trigger step: for negative TCs just say "request submitted", not "accepted"
+            elif any(kw in step_low for kw in ['trigger', 'invoke', 'submit']):
+                # Trigger step (avoid matching 'call' inside words like 'specifically', 'recall')
+                _exp = 'Request submitted to API endpoint' if _is_negative else 'API accepts the request and responds successfully'
+            elif re.search(r'\b(call)\b', step_low):
+                # 'call' as a standalone word (API call, make a call)
                 _exp = 'Request submitted to API endpoint' if _is_negative else 'API accepts the request and responds successfully'
             elif any(kw in step_low for kw in ['send post', 'send get', 'send %s' % (api_context.get('method','') or 'post').lower()]):
                 _exp = 'Request submitted to API endpoint' if _is_negative else 'API returns HTTP 200/202 with success response'
@@ -680,13 +683,17 @@ def _build_scenario_tc(
                 data_reference=scenario.source.source_id,
             ))
         # Add final verification step with the actual validation from Chalk
-        # Only add when we used steps_hint AND the validation is meaningful (non-header, non-title)
+        # GUARD: Only append when steps_hint was empty or had generic content.
+        # If steps_hint provided 3+ real steps, those ARE the complete test — don't add filler.
         # Do NOT add for state-matrix / partial-failure scenarios — they already have concrete steps
         _is_generated_matrix = (scenario.source and
                                  getattr(scenario.source, 'source_id', '').startswith(
                                      ('State-Transition-Matrix', 'Partial-Failure-Matrix',
                                       'Idempotency-', 'Concurrency-', 'Field-Validation-Matrix')))
-        if scenario.validation and scenario.validation != scenario.title and not _is_generated_matrix:
+        _steps_hint_has_real_steps = len(scenario.steps_hint) >= 3
+        if (scenario.validation and scenario.validation != scenario.title
+                and not _is_generated_matrix
+                and not _steps_hint_has_real_steps):
             # Guard: reject Chalk table header text that leaked into validation field
             _val_clean = (scenario.validation or '').strip()
             _table_headers = (
@@ -701,12 +708,17 @@ def _build_scenario_tc(
                     ('validation', 'expected result', 'test scenario', 'scenario'))
             )
             if not _table_headers:
-                steps.append(TestStep(
-                    step_num=len(steps) + 1,
-                    summary='Verify expected result: %s' % scenario.title[:80],
-                    expected=_val_clean[:200],
-                    data_reference=scenario.source.source_id,
-                ))
+                # Skip if validation text is just a repeat of the title (adds no value)
+                _title_norm = re.sub(r'\s+', ' ', scenario.title.lower().strip())
+                _val_norm = re.sub(r'\s+', ' ', _val_clean.lower())
+                _is_title_repeat = (_val_norm == _title_norm or _val_norm.startswith(_title_norm[:40]))
+                if not _is_title_repeat:
+                    steps.append(TestStep(
+                        step_num=len(steps) + 1,
+                        summary='Verify expected result: %s' % scenario.title[:80],
+                        expected=_val_clean[:200],
+                        data_reference=scenario.source.source_id,
+                    ))
     elif scenario.api_spec:
         # Build steps from API spec
         spec = scenario.api_spec
@@ -879,27 +891,49 @@ def _build_scenario_tc(
         clean_title = _raw_title
     else:
         clean_title = _transform_to_scenario_title(scenario.title, feature_name)
-    # Phase 4: Truncate at word boundary (no mid-word cuts), replace spaces with underscores
+    # Phase 4: Replace spaces with underscores, then trim to fit a readable length.
+    # Budget: allow the title portion up to 100 chars (the feature_id prefix is separate).
+    # Trim at word boundary (last underscore) so names never cut mid-word.
     clean_title_safe = clean_title.replace(' ', '_')
-    if len(clean_title_safe) > 80:
-        # Find last underscore before position 80
-        cut_pos = clean_title_safe.rfind('_', 0, 80)
-        if cut_pos > 40:
+    _TITLE_MAX = 100  # title portion only — feature_id prefix adds ~15 more chars
+    if len(clean_title_safe) > _TITLE_MAX:
+        # Find last underscore at or before the limit
+        cut_pos = clean_title_safe.rfind('_', 0, _TITLE_MAX)
+        if cut_pos > 50:
             clean_title_safe = clean_title_safe[:cut_pos]
         else:
-            clean_title_safe = clean_title_safe[:80]
+            clean_title_safe = clean_title_safe[:_TITLE_MAX]
     summary = '%s_%s' % (feature_id, clean_title_safe)
 
     # Short intent-focused description
     description = 'To validate: %s' % scenario.title[:120]
 
     # Environment-specific preconditions
+    # For state-matrix/partial-failure TCs: derive actual line state from steps_hint[0]
+    # so TC14 (Suspended) doesn't say "Line Status: Active"
+    _derived_state = None
+    if scenario.steps_hint:
+        _hint0 = scenario.steps_hint[0].lower()
+        if 'set up subscriber line in' in _hint0 and 'state in sit' in _hint0:
+            # Extract e.g. "Suspended", "Hotlined", "Pre-active"
+            import re as _re2
+            _m = _re2.search(r'set up subscriber line in (.+?) state in sit', _hint0)
+            if _m:
+                _derived_state = _m.group(1).strip().title()
+
     if scenario.source.source_type == 'Subtask AC':
         preconditions = '\n'.join([
             '1. Active TMO MDN available in SIT environment',
             '2. User logged into NBOP' if 'nbop' in (scenario.source.source_id or '').lower() or 'ui' in (scenario.source.source_id or '').lower() else '2. API endpoint accessible',
             '3. Line Status: Active',
         ])
+    elif _derived_state and _derived_state.lower() != 'active':
+        # State-matrix negative TC — precondition must reflect the actual required line state
+        preconditions = (
+            '1.\tActive TMO subscriber line in SIT environment\n'
+            '2.\tAPI endpoint accessible\n'
+            '3.\tLine Status: %s' % _derived_state
+        )
     else:
         preconditions = '1.\tActive TMO subscriber line in SIT environment\n2.\tAPI endpoint accessible\n3.\tLine Status: Active'
 
@@ -1026,6 +1060,25 @@ def _build_negative_tc(
             or error_code.strip().lower() in ('if not', 'if', 'when', 'not', 'none', 'n/a')
             or (len(error_code) < 10 and not any(c.isdigit() for c in error_code))
         )
+        # Additional check: reject ALLCAPS_UNDERSCORE_SLUGS that are derived from plain text
+        # rather than real ERR codes. Real codes start with ERR, are numeric, or have digits.
+        import re as _re_ec
+        if not _ec_looks_generic:
+            _is_plain_slug = (
+                bool(_re_ec.match(r'^[A-Z][A-Z_]+$', error_code))   # pure alpha caps slug
+                and not _re_ec.match(r'^ERR', error_code, _re_ec.IGNORECASE)
+                and not any(c.isdigit() for c in error_code)
+            )
+            # Also reject multi-word mixed-case natural language strings (not real codes)
+            # e.g. "Line Status validation", "MDN not found" — these have spaces
+            _is_natural_language = (
+                ' ' in error_code
+                and not _re_ec.match(r'^ERR', error_code, _re_ec.IGNORECASE)
+                and not any(c.isdigit() for c in error_code)
+                and len(error_code.split()) > 1
+            )
+            if _is_plain_slug or _is_natural_language:
+                _ec_looks_generic = True
         if _ec_looks_generic:
             # Derive a short code from condition or error_msg
             _ec_source = condition or error_msg or 'unknown'
@@ -1544,14 +1597,15 @@ def _transform_to_scenario_title(raw_text: str, feature_name: str) -> str:
     if not text.lower().startswith(('verify ', 'validate ', 'for ')):
         text = 'Verify %s' % text
 
-    # ── Final truncation at 70 chars, word boundary ──
-    if len(text) > 70:
-        # Find last space before position 70
-        cut_pos = text.rfind(' ', 0, 70)
+    # ── Final truncation at 95 chars, word boundary ──
+    # (outer tc_builder budget is 100 — this pre-truncation leaves room for cleanup)
+    if len(text) > 95:
+        # Find last space before position 95
+        cut_pos = text.rfind(' ', 0, 95)
         if cut_pos > 30:
             text = text[:cut_pos]
         else:
-            text = text[:70]
+            text = text[:95]
 
     # Clean trailing punctuation/artifacts
     text = text.rstrip(' —-,.:')

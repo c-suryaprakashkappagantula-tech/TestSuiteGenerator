@@ -1305,13 +1305,15 @@ def _extract_dimensions_from_chalk(
     for spec in api_specs:
         spec_id = spec.api_name or 'unknown'
 
-        # ── Products from request/response fields or scenarios ──
+        # ── Products from request/response fields ONLY (not scenario titles) ──
+        # Scanning scenario titles causes false positives: "Phone" in an unrelated
+        # scenario's title (e.g. from a shared PI page) would generate Phone/Tablet/Wearable
+        # dimension TCs for every feature on that page.
         all_text = ' '.join([
             ' '.join(spec.request_fields),
             ' '.join(spec.response_fields),
             spec.request_sample or '',
             spec.response_sample or '',
-            ' '.join(s.get('title', '') for s in (spec.scenarios or [])),
         ])
         for product in KNOWN_PRODUCTS:
             if product.lower() in all_text.lower() and product not in products_found:
@@ -1769,30 +1771,44 @@ def _extract_dimensions_from_parsed_docs(
         if not doc or not hasattr(doc, 'paragraphs'):
             continue
 
+        # ── Skip evidence/result docs for product dimension extraction ──
+        # Unit testing docs, service grouping reports, test proofs contain product mentions
+        # in passing (e.g. "tested Phone device") — these should NOT drive dimension expansion.
+        # Only extract product dimensions from actual test plans / HLD / feature specs.
+        _filename_lower = (getattr(doc, 'filename', '') or '').lower()
+        _is_evidence_doc = any(kw in _filename_lower for kw in [
+            'unit testing', 'unit_testing', 'unit test',
+            'service grouping', 'service_grouping',
+            'test proof', 'test_proof', 'testproof',
+            'test result', 'test_result',
+            'sit_', 'uat_', 'retest',
+        ])
+
         all_text = ' '.join(doc.paragraphs or [])
         all_lower = all_text.lower()
 
-        # ── Extract products ──
-        for match in PRODUCT_PATTERN.finditer(all_text):
-            raw = match.group(1)
-            # Normalize to singular form
-            prod = raw
-            if prod.lower().endswith('es') and prod.lower() not in ('smartwatches',):
-                prod = prod[:-2]
-            elif prod.lower().endswith('s') and prod.lower() not in ('smartwatches',):
-                prod = prod[:-1]
-            # Handle special cases
-            if prod.lower() in ('smartwatche', 'smartwatches'):
-                prod = 'Smartwatch'
-            elif prod.lower() in ('phone', 'phones'):
-                prod = 'Phone'
-            elif prod.lower() in ('tablet', 'tablets'):
-                prod = 'Tablet'
-            elif prod.lower() in ('wearable', 'wearables'):
-                prod = 'Wearable'
-            elif prod.lower() in ('hotspot', 'hotspots'):
-                prod = 'Hotspot'
-            products_found.add(prod.capitalize() if prod[0].islower() else prod)
+        # ── Extract products (skip for evidence/result docs) ──
+        if not _is_evidence_doc:
+            for match in PRODUCT_PATTERN.finditer(all_text):
+                raw = match.group(1)
+                # Normalize to singular form
+                prod = raw
+                if prod.lower().endswith('es') and prod.lower() not in ('smartwatches',):
+                    prod = prod[:-2]
+                elif prod.lower().endswith('s') and prod.lower() not in ('smartwatches',):
+                    prod = prod[:-1]
+                # Handle special cases
+                if prod.lower() in ('smartwatche', 'smartwatches'):
+                    prod = 'Smartwatch'
+                elif prod.lower() in ('phone', 'phones'):
+                    prod = 'Phone'
+                elif prod.lower() in ('tablet', 'tablets'):
+                    prod = 'Tablet'
+                elif prod.lower() in ('wearable', 'wearables'):
+                    prod = 'Wearable'
+                elif prod.lower() in ('hotspot', 'hotspots'):
+                    prod = 'Hotspot'
+                products_found.add(prod.capitalize() if prod[0].islower() else prod)
 
         # ── Extract screens ──
         for screen in SCREEN_PATTERNS:

@@ -909,7 +909,13 @@ def _line_state_thinking(fname, ctx, existing):
                     for _state_label, _state_key, _, _ in FULL_STATE_MATRIX:
                         if _state_key in _br_text or _state_label.lower() in _br_text:
                             if _br.error_code and _br.error_code not in ('', 'N/A'):
-                                _nmno_state_codes[_state_key] = _br.error_code
+                                # Only accept real ERR-prefixed codes (e.g. ERR12, ERR_INVALID_STATE)
+                                # Reject ALLCAPS slugs like LINE_STATUS_VALIDATION derived from plain text
+                                import re as _re_ec
+                                _code = _br.error_code.strip()
+                                _is_real_code = bool(_re_ec.match(r'^ERR', _code, _re_ec.IGNORECASE))
+                                if _is_real_code:
+                                    _nmno_state_codes[_state_key] = _code
     except Exception:
         pass  # NMNO lookup is best-effort
 
@@ -1194,7 +1200,12 @@ def generate_state_transition_matrix(
             for _state_key in ('suspended', 'hotlined', 'pending port', 'cancelled', 'pre-active'):
                 if _state_key in _br_text:
                     if _br.error_code and _br.error_code not in ('', 'N/A'):
-                        _nmno_state_codes[_state_key] = _br.error_code
+                        # Only accept real ERR-prefixed codes (e.g. ERR12, ERR_INVALID_STATE)
+                        # Reject ALLCAPS slugs like LINE_STATUS_VALIDATION derived from plain text
+                        _code = _br.error_code.strip()
+                        _is_real_code = bool(re.match(r'^ERR', _code, re.IGNORECASE))
+                        if _is_real_code:
+                            _nmno_state_codes[_state_key] = _code
 
     FULL_STATE_MATRIX = [
         ('Active',           'active',         'allow',  ''),

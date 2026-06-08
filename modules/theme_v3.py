@@ -1,30 +1,26 @@
 """
-theme_v2.py — Premium UI theme for TSG Dashboard V8.0
-Glassmorphism + clean dark — readability-first, motion-calm.
+theme_v3.py — Sunset Ember theme for TSG Dashboard V9.0
+Warm amber/coral palette replacing the cool purple/blue of V8.
 
-Changes from previous version:
-  - Contrast pass: #64748b→#94a3b8, #94a3b8→#cbd5e1 on all body/caption text
-  - Font bump: base 14px, CLI 13px, badges 12px, sec-title 13px, exit-li 14px
-  - Reduced motion: rainbow/shimmer removed; one subtle glow retained;
-    @media prefers-reduced-motion kills all animations
-  - Section titles: solid #c4b5fd (readable purple), normal-case, 13px
-  - Banner title: 2-stop gradient (no washed-out bright stops)
-  - Panel opacity: glass bg 0.80, border 0.12 — panels pop from page bg
-  - stat-card label 12px, value glow softened
-  - CLI box 13px / #cbd5e1 base, semantic colours brightened
+Palette:
+  Page bg:      #0d0905  (near-black with warm undertone)
+  Accent-1:     #f97316  (amber-500 — primary warm accent)
+  Accent-2:     #ef4444  (red-500 — secondary / danger)
+  Accent-3:     #fbbf24  (yellow-400 — highlight / success)
+  Body text:    #fef3c7  (amber-100, ~9:1 on page bg)
+  Muted text:   #d97706  (amber-600, ~4.8:1 on page bg)
+  Caption:      #92400e  (amber-800, ~4.5:1 — captions / labels)
+
+Everything else (structure, motion rules, font sizes) is preserved from theme_v2.
 """
 
 CSS = """<style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap');
 
-/* ── Animations (minimal — one subtle fade + one accent glow) ── */
+/* ── Animations — same minimal set as V2 ── */
 @keyframes fadeSlideIn { from { opacity:0; transform:translateY(12px); } to { opacity:1; transform:translateY(0); } }
 @keyframes pulse       { 0%,100% { opacity:1; } 50% { opacity:0.55; } }
-@keyframes accentGlow  {
-    0%,100% { box-shadow: 0 0 16px rgba(139,92,246,0.25); }
-    50%      { box-shadow: 0 0 28px rgba(59,130,246,0.35); }
-}
 
 /* Accessibility: honour user preference */
 @media (prefers-reduced-motion: reduce) {
@@ -34,11 +30,11 @@ CSS = """<style>
 /* ── Base ── */
 html, body { margin:0; padding:0; scroll-behavior: smooth; }
 .stApp {
-    background: #0a0a0f;
+    background: #0d0905;
     background-image:
-        radial-gradient(ellipse at 20% 50%, rgba(139,92,246,0.07) 0%, transparent 50%),
-        radial-gradient(ellipse at 80% 20%, rgba(59,130,246,0.05) 0%, transparent 50%);
-    color: #e2e8f0;
+        radial-gradient(ellipse at 20% 50%, rgba(249,115,22,0.09) 0%, transparent 50%),
+        radial-gradient(ellipse at 80% 20%, rgba(239,68,68,0.06) 0%, transparent 50%);
+    color: #fef3c7;
     font-family: "Inter", -apple-system, sans-serif;
     font-size: 14px;
 }
@@ -46,28 +42,28 @@ html, body { margin:0; padding:0; scroll-behavior: smooth; }
 header[tabindex="-1"] { display:none !important; visibility:hidden !important; height:0 !important; }
 .block-container { padding-top: 0.5rem !important; max-width: 100% !important; }
 
-/* ── Glass Card — raised opacity so panels "pop" off the page ── */
+/* ── Glass Card ── */
 .glass {
-    background: rgba(15,15,25,0.82);
+    background: rgba(25,14,6,0.84);
     backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
-    border: 1px solid rgba(255,255,255,0.12);
+    border: 1px solid rgba(249,115,22,0.14);
     border-radius: 20px;
     padding: 18px 20px;
     margin-bottom: 12px;
-    box-shadow: 0 8px 32px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.06);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.40), inset 0 1px 0 rgba(251,191,36,0.05);
     animation: fadeSlideIn 0.4s ease-out;
     transition: border-color 0.25s ease, box-shadow 0.25s ease;
 }
 .glass:hover {
-    border-color: rgba(139,92,246,0.22);
-    box-shadow: 0 8px 32px rgba(0,0,0,0.45), 0 0 18px rgba(139,92,246,0.08);
+    border-color: rgba(249,115,22,0.28);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.50), 0 0 18px rgba(249,115,22,0.08);
 }
 
 /* ── Top Banner ── */
 .banner {
-    background: linear-gradient(135deg, rgba(139,92,246,0.14) 0%, rgba(59,130,246,0.09) 50%, rgba(236,72,153,0.08) 100%);
+    background: linear-gradient(135deg, rgba(249,115,22,0.15) 0%, rgba(239,68,68,0.10) 50%, rgba(251,191,36,0.08) 100%);
     backdrop-filter: blur(20px);
-    border: 1px solid rgba(139,92,246,0.22);
+    border: 1px solid rgba(249,115,22,0.25);
     border-radius: 24px;
     padding: 20px 28px;
     margin-bottom: 16px;
@@ -75,44 +71,44 @@ header[tabindex="-1"] { display:none !important; visibility:hidden !important; h
     animation: fadeSlideIn 0.35s ease-out;
     position: relative; overflow: hidden;
 }
-/* Single thin accent bar — no rainbow cycle */
+/* Warm accent bar */
 .banner::before {
     content: ""; position: absolute; top: 0; left: 0; right: 0; height: 2px;
-    background: linear-gradient(90deg, #8b5cf6, #3b82f6);
-    opacity: 0.7;
+    background: linear-gradient(90deg, #f97316, #fbbf24);
+    opacity: 0.8;
 }
-/* 2-stop gradient: both stops are readable against dark bg (min ~6:1) */
+/* Title: amber-to-yellow gradient — both stops ~8:1 on dark bg */
 .banner .title {
     font-weight: 900; font-size: 26px; letter-spacing: -0.5px;
-    background: linear-gradient(135deg, #c084fc 0%, #60a5fa 100%);
+    background: linear-gradient(135deg, #fb923c 0%, #fbbf24 100%);
     -webkit-background-clip: text; -webkit-text-fill-color: transparent;
 }
-.banner .sub  { color: #cbd5e1; font-size: 13px; font-weight: 500; margin-top: 3px; }
+.banner .sub  { color: #fcd34d; font-size: 13px; font-weight: 500; margin-top: 3px; }
 .banner .badge {
     display: inline-flex; align-items: center; gap: 6px;
-    background: rgba(139,92,246,0.15); border: 1px solid rgba(139,92,246,0.30);
+    background: rgba(249,115,22,0.15); border: 1px solid rgba(249,115,22,0.35);
     padding: 6px 14px; border-radius: 20px;
-    font-size: 12px; font-weight: 700; color: #c4b5fd;
+    font-size: 12px; font-weight: 700; color: #fed7aa;
 }
 
-/* ── Section Title — solid readable colour, normal-case, 13 px ── */
+/* ── Section Title ── */
 .sec-title {
     font-size: 13px; font-weight: 700;
-    color: #c4b5fd;
+    color: #fb923c;
     margin-bottom: 10px;
     display: flex; align-items: center; gap: 10px;
 }
 .sec-title .icon { font-size: 16px; }
 .sec-title::after {
     content: ""; flex: 1; height: 1px;
-    background: linear-gradient(90deg, rgba(139,92,246,0.3), transparent);
+    background: linear-gradient(90deg, rgba(249,115,22,0.35), transparent);
 }
 
-/* ── PI / Action Buttons ── */
+/* ── Buttons ── */
 .stButton > button {
-    background: linear-gradient(135deg, rgba(139,92,246,0.18), rgba(59,130,246,0.14)) !important;
-    color: #e2e8f0 !important;
-    border: 1px solid rgba(139,92,246,0.25) !important;
+    background: linear-gradient(135deg, rgba(249,115,22,0.18), rgba(239,68,68,0.14)) !important;
+    color: #fef3c7 !important;
+    border: 1px solid rgba(249,115,22,0.28) !important;
     padding: 0.35rem 0.6rem !important;
     border-radius: 12px !important;
     font-weight: 700 !important; font-size: 12px !important;
@@ -121,55 +117,54 @@ header[tabindex="-1"] { display:none !important; visibility:hidden !important; h
     transition: background 0.2s ease, box-shadow 0.2s ease !important;
 }
 .stButton > button:hover {
-    background: linear-gradient(135deg, rgba(139,92,246,0.35), rgba(59,130,246,0.25)) !important;
-    box-shadow: 0 6px 20px rgba(139,92,246,0.25) !important;
-    border-color: rgba(139,92,246,0.45) !important;
+    background: linear-gradient(135deg, rgba(249,115,22,0.38), rgba(239,68,68,0.28)) !important;
+    box-shadow: 0 6px 20px rgba(249,115,22,0.28) !important;
+    border-color: rgba(249,115,22,0.50) !important;
 }
 /* Primary button */
 .stButton > button[kind="primary"] {
-    background: linear-gradient(135deg, #7c3aed, #3b82f6) !important;
+    background: linear-gradient(135deg, #ea580c, #dc2626) !important;
     border: none !important;
     color: #fff !important;
     padding: 0.7rem 1.2rem !important;
     font-size: 14px !important;
-    box-shadow: 0 4px 15px rgba(124,58,237,0.3) !important;
+    box-shadow: 0 4px 15px rgba(234,88,12,0.35) !important;
 }
 .stButton > button[kind="primary"]:hover {
-    box-shadow: 0 8px 28px rgba(124,58,237,0.45) !important;
+    box-shadow: 0 8px 28px rgba(234,88,12,0.50) !important;
 }
 
 /* ── CLI Terminal ── */
 .cli-header {
-    font-weight: 700; color: #c4b5fd; letter-spacing: 0.2px;
-    background: linear-gradient(135deg, rgba(139,92,246,0.12), rgba(59,130,246,0.08));
-    border: 1px solid rgba(139,92,246,0.2);
+    font-weight: 700; color: #fed7aa; letter-spacing: 0.2px;
+    background: linear-gradient(135deg, rgba(249,115,22,0.12), rgba(239,68,68,0.08));
+    border: 1px solid rgba(249,115,22,0.22);
     border-radius: 12px; padding: 8px 14px; margin: 0 0 8px 0;
     display: flex; align-items: center; gap: 8px; font-size: 13px;
 }
 .cli-header::before { content: ""; width:8px; height:8px; border-radius:50%;
     background: #22c55e; animation: pulse 2s infinite; box-shadow: 0 0 6px rgba(34,197,94,0.4); }
 .cli-box {
-    background: rgba(8,8,18,0.88);
-    border: 1px solid rgba(139,92,246,0.14);
+    background: rgba(10,5,2,0.90);
+    border: 1px solid rgba(249,115,22,0.14);
     border-radius: 16px; padding: 14px 16px;
     height: 420px; min-height: 420px; max-height: 420px;
     overflow-y: auto; overflow-x: auto;
-    /* ↑ font-size 13px (up from 11.5px), base colour #cbd5e1 (up from #a5b4fc) */
     font-family: "JetBrains Mono", monospace; font-size: 13px; line-height: 1.65;
-    color: #cbd5e1;
-    box-shadow: inset 0 2px 10px rgba(0,0,0,0.45);
+    color: #fcd34d;
+    box-shadow: inset 0 2px 10px rgba(0,0,0,0.50);
 }
 .cli-box pre { margin: 0; white-space: pre-wrap; word-wrap: break-word; }
 .cli-box::-webkit-scrollbar { width: 6px; }
-.cli-box::-webkit-scrollbar-track { background: rgba(139,92,246,0.05); border-radius: 3px; }
-.cli-box::-webkit-scrollbar-thumb { background: rgba(139,92,246,0.3); border-radius: 3px; }
-.cli-box::-webkit-scrollbar-thumb:hover { background: rgba(139,92,246,0.5); }
+.cli-box::-webkit-scrollbar-track { background: rgba(249,115,22,0.05); border-radius: 3px; }
+.cli-box::-webkit-scrollbar-thumb { background: rgba(249,115,22,0.30); border-radius: 3px; }
+.cli-box::-webkit-scrollbar-thumb:hover { background: rgba(249,115,22,0.50); }
 
 /* ── Pipeline Status Strip ── */
 .pipeline-strip {
     display: flex; gap: 6px; flex-wrap: wrap; align-items: center;
-    background: rgba(15,15,28,0.80);
-    border: 1px solid rgba(99,102,241,0.18);
+    background: rgba(20,10,4,0.82);
+    border: 1px solid rgba(249,115,22,0.18);
     border-radius: 12px; padding: 8px 14px; margin-bottom: 8px;
     font-size: 12px; font-family: "Inter", sans-serif;
 }
@@ -179,17 +174,16 @@ header[tabindex="-1"] { display:none !important; visibility:hidden !important; h
     font-weight: 600; font-size: 12px;
 }
 .ps-stage.done    { background: rgba(34,197,94,0.12);  color: #4ade80; border: 1px solid rgba(34,197,94,0.25); }
-.ps-stage.running { background: rgba(59,130,246,0.12); color: #93c5fd; border: 1px solid rgba(59,130,246,0.25); animation: pulse 1.4s infinite; }
-.ps-stage.pending { background: rgba(100,116,139,0.10); color: #94a3b8; border: 1px solid rgba(100,116,139,0.18); }
+.ps-stage.running { background: rgba(249,115,22,0.14); color: #fdba74; border: 1px solid rgba(249,115,22,0.30); animation: pulse 1.4s infinite; }
+.ps-stage.pending { background: rgba(120,90,60,0.12);  color: #a8856a; border: 1px solid rgba(120,90,60,0.20); }
 .ps-stage.error   { background: rgba(239,68,68,0.12);  color: #fca5a5; border: 1px solid rgba(239,68,68,0.25); }
 
 /* ── Stats Row ── */
 .stats-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 12px 0; }
 .stat-card {
-    /* raised opacity (0.82 vs 0.60) */
-    background: rgba(15,15,28,0.82);
+    background: rgba(25,12,4,0.84);
     backdrop-filter: blur(16px);
-    border: 1px solid rgba(255,255,255,0.10);
+    border: 1px solid rgba(249,115,22,0.12);
     border-radius: 16px; padding: 16px; text-align: center;
     position: relative; overflow: hidden;
     animation: fadeSlideIn 0.5s ease-out;
@@ -199,29 +193,25 @@ header[tabindex="-1"] { display:none !important; visibility:hidden !important; h
     content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px;
     background: var(--accent); opacity: 0.85;
 }
-.stat-card:hover { transform: translateY(-3px); box-shadow: 0 10px 28px rgba(0,0,0,0.3); }
+.stat-card:hover { transform: translateY(-3px); box-shadow: 0 10px 28px rgba(0,0,0,0.35); }
 .stat-card .icon  { font-size: 24px; margin-bottom: 4px; }
-/* label: 12px (up from 10px), colour #94a3b8 (up from #64748b — was ~3:1, now ~4.5:1) */
-.stat-card .label { font-size: 12px; color: #94a3b8; font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px; }
-/* value: glow softened (was 0 0 20px .2 — blurs letter edges) */
-.stat-card .value { font-size: 28px; font-weight: 900; color: #f1f5f9; margin-top: 2px; }
+.stat-card .label { font-size: 12px; color: #b45309; font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px; }
+.stat-card .value { font-size: 28px; font-weight: 900; color: #fef9c3; margin-top: 2px; }
 
 /* ── Exit Report ── */
 .exit-report {
-    background: linear-gradient(135deg, rgba(34,197,94,0.08), rgba(59,130,246,0.05));
+    background: linear-gradient(135deg, rgba(34,197,94,0.08), rgba(249,115,22,0.05));
     border: 1px solid rgba(34,197,94,0.2);
     border-radius: 20px; padding: 18px 20px; margin-top: 12px;
     animation: fadeSlideIn 0.45s ease-out;
 }
 .exit-report.error {
-    background: linear-gradient(135deg, rgba(239,68,68,0.08), rgba(236,72,153,0.05));
+    background: linear-gradient(135deg, rgba(239,68,68,0.08), rgba(249,115,22,0.05));
     border-color: rgba(239,68,68,0.2);
 }
-/* solid colours — gradient clip looks cool but these are functional status headers */
 .exit-report h4 { margin: 0 0 10px 0; font-weight: 800; color: #4ade80; }
 .exit-report.error h4 { color: #f87171; }
-/* exit list: 14px (up from 13px), #cbd5e1 (up from #94a3b8) */
-.exit-report ul { margin: 0; padding-left: 20px; color: #cbd5e1; }
+.exit-report ul { margin: 0; padding-left: 20px; color: #fcd34d; }
 .exit-report li { margin: 4px 0; font-size: 14px; }
 
 /* ── Form Elements ── */
@@ -233,37 +223,35 @@ header[tabindex="-1"] { display:none !important; visibility:hidden !important; h
 .stCaption, [data-testid="stCaptionContainer"] p,
 .stSelectbox [data-testid="stMarkdownContainer"] p,
 .stRadio > div > div > label {
-    /* #c4b5fd — visible purple, ~5:1 on dark */
-    color: #c4b5fd !important; font-weight: 600 !important; font-size: 14px !important;
+    color: #fed7aa !important; font-weight: 600 !important; font-size: 14px !important;
 }
-/* Captions get slightly dimmer but still AA-compliant (#94a3b8 on #0a0a0f ≈ 4.5:1) */
 .stCaption, [data-testid="stCaptionContainer"] p {
-    color: #94a3b8 !important; font-size: 13px !important;
+    color: #b45309 !important; font-size: 13px !important;
 }
 .stTextInput input {
-    color: #1e1b4b !important; background: rgba(255,255,255,0.92) !important;
-    border: 1px solid rgba(139,92,246,0.2) !important;
+    color: #1c0a00 !important; background: rgba(255,245,235,0.94) !important;
+    border: 1px solid rgba(249,115,22,0.25) !important;
     border-radius: 12px !important; font-weight: 600 !important;
     font-size: 14px !important;
     transition: border-color 0.2s ease, box-shadow 0.2s ease !important;
 }
 .stTextInput input:focus {
-    border-color: rgba(139,92,246,0.5) !important;
-    box-shadow: 0 0 14px rgba(139,92,246,0.14) !important;
+    border-color: rgba(249,115,22,0.55) !important;
+    box-shadow: 0 0 14px rgba(249,115,22,0.14) !important;
 }
 .stCheckbox > label > div:first-child[data-checked="true"] {
-    background: linear-gradient(135deg, #7c3aed, #3b82f6) !important;
+    background: linear-gradient(135deg, #ea580c, #dc2626) !important;
     border-color: transparent !important;
 }
 .stDownloadButton > button {
-    background: rgba(139,92,246,0.1) !important;
-    border: 1px solid rgba(139,92,246,0.22) !important;
-    color: #c4b5fd !important;
+    background: rgba(249,115,22,0.12) !important;
+    border: 1px solid rgba(249,115,22,0.25) !important;
+    color: #fed7aa !important;
     border-radius: 12px !important; font-weight: 700 !important; font-size: 13px !important;
 }
 .stDownloadButton > button:hover {
-    background: rgba(139,92,246,0.2) !important;
-    box-shadow: 0 4px 14px rgba(139,92,246,0.2) !important;
+    background: rgba(249,115,22,0.22) !important;
+    box-shadow: 0 4px 14px rgba(249,115,22,0.22) !important;
     transform: translateY(-2px) !important;
 }
 

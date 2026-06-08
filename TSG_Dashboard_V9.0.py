@@ -37,7 +37,7 @@ from modules.chalk_parser import discover_pi_links, fetch_feature_from_pi, disco
 from modules.doc_parser import parse_file
 from modules.data_first_engine import build_test_suite_v8
 from modules.excel_generator import generate_excel
-from modules.theme_v2 import CSS
+from modules.theme_v3 import CSS
 from modules.transaction_log import log_generation, get_history
 from modules.pipeline import (Pipeline, PipelineError, block_jira_fetch, block_chalk_db,
                                block_chalk_live, block_parse_docs, block_build_suite_v8,
@@ -100,23 +100,23 @@ st.set_page_config(
 )
 st.markdown(CSS, unsafe_allow_html=True)
 
-# Force sidebar dark theme to match main dashboard
+# Force sidebar warm theme to match Sunset Ember main dashboard
 st.markdown("""<style>
 [data-testid="stSidebar"] {
-    background-color: #0f172a !important;
+    background-color: #150a03 !important;
 }
 [data-testid="stSidebar"] * {
-    color: #e2e8f0 !important;
+    color: #fef3c7 !important;
 }
 [data-testid="stSidebar"] .stMarkdown p, [data-testid="stSidebar"] .stMarkdown span {
-    color: #94a3b8 !important;
+    color: #b45309 !important;
 }
 [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 {
-    color: #e2e8f0 !important;
+    color: #fed7aa !important;
 }
 [data-testid="stSidebar"] [data-testid="stExpander"] {
-    background-color: rgba(30, 41, 59, 0.5) !important;
-    border: 1px solid rgba(99, 102, 241, 0.2) !important;
+    background-color: rgba(40, 18, 6, 0.6) !important;
+    border: 1px solid rgba(249, 115, 22, 0.22) !important;
     border-radius: 8px !important;
 }
 </style>""", unsafe_allow_html=True)
