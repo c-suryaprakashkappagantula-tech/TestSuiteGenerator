@@ -361,7 +361,7 @@ def extract_dimensions(
             if _is_provisioning:
                 _contract = resolve_operation(_feature_title, description=_ctx_check)
                 _state_tcs = generate_state_transition_matrix(
-                    feature_name=_re_stm.sub(r'\[.*?\]\s*', '', _feature_title).strip()[:40] or _feature_id,
+                    feature_name=_re_stm.sub(r'\[.*?\]\s*', '', _feature_title).strip().lstrip(':- ').strip()[:40] or _feature_id,
                     feature_id=_feature_id,
                     contract=_contract,
                     nmno_result=nmno_result,
@@ -401,8 +401,7 @@ def extract_dimensions(
 
             if _pf_contract and _pf_contract.must_call:
                 _pf_scenarios = generate_partial_failure_matrix(
-                    feature_name=_feature_title_short if '_feature_title_short' in dir()
-                               else re.sub(r'\[.*?\]\s*', '', _feature_title).strip()[:40] or _feature_id,
+                    feature_name=re.sub(r'\[.*?\]\s*', '', _feature_title).strip().lstrip(':- ').strip()[:40] or _feature_id,
                     feature_id=_feature_id,
                     contract=_pf_contract,
                     log=log,
@@ -430,7 +429,7 @@ def extract_dimensions(
     # ── 10. A1/A2/A3: Field validation + Idempotency + Concurrency ──
     # Only for API/hybrid provisioning features with a known endpoint
     if _classification in ('api', 'hybrid', '') and _is_provisioning:
-        _feat_short = re.sub(r'\[.*?\]\s*', '', _feature_title).strip()[:40] or _feature_id
+        _feat_short = re.sub(r'\[.*?\]\s*', '', _feature_title).strip().lstrip(':- ').strip()[:40] or _feature_id
         _existing_set = {s.title.lower().strip() for s in scenarios}
 
         try:

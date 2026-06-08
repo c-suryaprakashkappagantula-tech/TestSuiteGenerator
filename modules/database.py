@@ -238,13 +238,13 @@ def init_db():
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             feature_id      TEXT NOT NULL,
             tc_sno          TEXT NOT NULL,
-            action          TEXT NOT NULL,  -- 'keep' | 'drop' | 'edit'
+            action          TEXT NOT NULL,
             edited_summary  TEXT DEFAULT '',
             edited_preconditions TEXT DEFAULT '',
             priority_override TEXT DEFAULT '',
             note            TEXT DEFAULT '',
             created_at      TEXT DEFAULT (datetime('now','localtime')),
-            PRIMARY KEY (feature_id, tc_sno) ON CONFLICT REPLACE
+            UNIQUE(feature_id, tc_sno)
         );
         CREATE INDEX IF NOT EXISTS idx_override_fid ON tc_overrides(feature_id);
 

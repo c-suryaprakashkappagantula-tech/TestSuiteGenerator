@@ -653,7 +653,13 @@ def _build_scenario_tc(
                 data_reference=scenario.source.source_id,
             ))
         # Add final verification step with the actual validation from Chalk
-        if scenario.validation and scenario.validation != scenario.title:
+        # Only add when we used steps_hint AND the validation is meaningful (non-header, non-title)
+        # Do NOT add for state-matrix / partial-failure scenarios — they already have concrete steps
+        _is_generated_matrix = (scenario.source and
+                                 getattr(scenario.source, 'source_id', '').startswith(
+                                     ('State-Transition-Matrix', 'Partial-Failure-Matrix',
+                                      'Idempotency-', 'Concurrency-', 'Field-Validation-Matrix')))
+        if scenario.validation and scenario.validation != scenario.title and not _is_generated_matrix:
             # Guard: reject Chalk table header text that leaked into validation field
             _val_clean = (scenario.validation or '').strip()
             _table_headers = (
