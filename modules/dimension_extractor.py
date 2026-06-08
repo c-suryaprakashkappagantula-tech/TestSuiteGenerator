@@ -427,7 +427,65 @@ def extract_dimensions(
         except Exception as _pf_err:
             log('[DIM-EXTRACT]   D2 Partial Failure skipped: %s' % str(_pf_err)[:80])
 
-    # Rebuild data_inventory with D1 + D2 included
+    # ── 10. A1/A2/A3: Field validation + Idempotency + Concurrency ──
+    # Only for API/hybrid provisioning features with a known endpoint
+    if _classification in ('api', 'hybrid', '') and _is_provisioning:
+        _feat_short = re.sub(r'\[.*?\]\s*', '', _feature_title).strip()[:40] or _feature_id
+        _existing_set = {s.title.lower().strip() for s in scenarios}
+
+        try:
+            from .test_analyst import (generate_field_validation_matrix,
+                                       generate_idempotency_tcs,
+                                       generate_concurrency_tcs)
+
+            # A1: Field-level validation (only if we have request fields from NMNO)
+            _req_fields = []
+            _endpoint = ''
+            if nmno_result and nmno_result.api_specs:
+                _spec = nmno_result.api_specs[0]
+                _req_fields = getattr(_spec, 'request_fields', []) or []
+                _endpoint = getattr(_spec, 'endpoint', '') or ''
+
+            if _req_fields:
+                _a1_scenarios = generate_field_validation_matrix(
+                    _feat_short, _feature_id, _req_fields, _endpoint, log=log)
+                _a1_added = 0
+                for _sc in _a1_scenarios:
+                    if _sc.title.lower().strip() not in _existing_set:
+                        scenarios.append(_sc)
+                        _existing_set.add(_sc.title.lower().strip())
+                        _a1_added += 1
+                if _a1_added:
+                    log('[DIM-EXTRACT]   A1 Field Validation: %d TCs injected' % _a1_added)
+
+            # A2: Idempotency
+            _a2_scenarios = generate_idempotency_tcs(_feat_short, _feature_id, log=log)
+            _a2_added = sum(
+                1 for s in _a2_scenarios
+                if s.title.lower().strip() not in _existing_set
+                and not scenarios.append(s)  # append returns None → truthy via walrus workaround
+            )
+            # Cleaner loop
+            for _sc in _a2_scenarios:
+                if _sc.title.lower().strip() not in _existing_set:
+                    scenarios.append(_sc)
+                    _existing_set.add(_sc.title.lower().strip())
+            if _a2_scenarios:
+                log('[DIM-EXTRACT]   A2 Idempotency: %d TCs injected' % len(_a2_scenarios))
+
+            # A3: Concurrency
+            _a3_scenarios = generate_concurrency_tcs(_feat_short, _feature_id, log=log)
+            for _sc in _a3_scenarios:
+                if _sc.title.lower().strip() not in _existing_set:
+                    scenarios.append(_sc)
+                    _existing_set.add(_sc.title.lower().strip())
+            if _a3_scenarios:
+                log('[DIM-EXTRACT]   A3 Concurrency: %d TCs injected' % len(_a3_scenarios))
+
+        except Exception as _a123_err:
+            log('[DIM-EXTRACT]   A1/A2/A3 skipped: %s' % str(_a123_err)[:80])
+
+    # Rebuild data_inventory with D1 + D2 + A1/A2/A3 included
     data_inventory = _build_data_inventory(sources_checked)
 
     log('[DIM-EXTRACT] Extraction complete: %d dimensions, %d scenarios, %d negative specs' % (

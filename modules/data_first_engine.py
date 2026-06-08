@@ -109,6 +109,14 @@ def build_test_suite_v8(
             if nmno_result and (nmno_result.business_rules or nmno_result.api_specs):
                 log('[V8-ENGINE]   NMNO: %d Business Rules, %d API specs from TMO_API_Chalk' % (
                     len(nmno_result.business_rules), len(nmno_result.api_specs)))
+                # Seed test_data_pool from NMNO request_sample (Phase 4A)
+                try:
+                    from .test_data_injector import seed_from_nmno
+                    _seeded = seed_from_nmno(nmno_result, feature_id=feature_id)
+                    if _seeded:
+                        log('[V8-ENGINE]   Seeded %d test data values from NMNO samples' % _seeded)
+                except Exception:
+                    pass
             else:
                 log('[V8-ENGINE]   NMNO: No data found for "%s" — will use deep_mine fallback' % api_name)
         else:

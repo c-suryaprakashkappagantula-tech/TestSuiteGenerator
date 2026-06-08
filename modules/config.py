@@ -63,8 +63,8 @@ OS_PLATFORMS = ['iOS', 'Android']
 
 EXCEL_HEADERS = ['S.No', 'Summary', 'Description', 'Preconditions',
                  'Step #', 'Step Summary', 'Expected Result',
-                 'Story Linkages', 'Labels', 'References', 'Grounding %']
-MERGE_COLS = [1, 2, 3, 4, 8, 9, 10, 11]
+                 'Story Linkages', 'Labels', 'References', 'Grounding %', 'Test Data']
+MERGE_COLS = [1, 2, 3, 4, 8, 9, 10, 11, 12]
 
 NAVY = '0B1D39'
 LIGHT_BLUE = 'DCE6F1'

@@ -1645,3 +1645,267 @@ def _contract_driven_thinking(fname, contract, ctx, existing):
         })
 
     return s
+
+
+# ================================================================
+# A1: FIELD-LEVEL VALIDATION MATRIX
+# ================================================================
+
+def generate_field_validation_matrix(
+    feature_name: str,
+    feature_id: str,
+    request_fields: list = None,
+    endpoint: str = '',
+    log=print,
+) -> list:
+    """A1 — Field-level validation matrix generator.
+
+    For each request field, generates boundary-value / null / type-error TCs:
+      - null / empty value
+      - wrong type (string where number expected)
+      - too long (max_len + 1)
+      - too short (min_len - 1)
+      - special characters / injection attempt
+      - boundary +1 / -1 for numeric fields
+
+    Args:
+        feature_name: Short operation name
+        feature_id: Jira feature ID
+        request_fields: List of field names or dicts from NMNO
+        endpoint: API endpoint path
+        log: Logger function
+
+    Returns:
+        List of ExtractedScenario objects.
+    """
+    if not request_fields:
+        return []
+
+    try:
+        from .data_models_v8 import ExtractedScenario
+        from .traceability import create_traceability
+    except ImportError:
+        return []
+
+    fname = feature_name
+    source_id = 'Field-Validation-Matrix-%s' % feature_id
+    scenarios = []
+
+    # Field variants to test per field
+    _VARIANTS = [
+        ('null',    'null/empty',     'null or empty value',    'ERR_MISSING_FIELD'),
+        ('long',    'too long',       'value exceeding max length', 'ERR_INVALID_LENGTH'),
+        ('type',    'wrong type',     'wrong data type (string vs number)', 'ERR_INVALID_FORMAT'),
+        ('special', 'special chars',  'special characters / injection attempt', 'ERR_INVALID_CHARS'),
+    ]
+
+    # Prioritize key fields — MDN, IMEI, ICCID are most important
+    _PRIORITY_FIELDS = {'mdn', 'msisdn', 'imei', 'iccid', 'lineid', 'line_id', 'accountnumber'}
+
+    processed = 0
+    for field_item in (request_fields or []):
+        if processed >= 8:  # cap to avoid explosion
+            break
+
+        field_name = (field_item.get('name', '') or field_item.get('field', '')
+                     if isinstance(field_item, dict) else str(field_item))
+        if not field_name:
+            continue
+
+        fn_lower = field_name.lower().replace('_', '').replace('-', '')
+        is_priority = fn_lower in _PRIORITY_FIELDS
+
+        # Only generate full matrix for priority fields; null-only for others
+        variants_to_test = _VARIANTS if is_priority else [_VARIANTS[0]]
+
+        for variant_key, variant_label, variant_desc, err_code in variants_to_test:
+            title = 'Negative: Verify %s rejects request when %s has %s' % (
+                fname, field_name, variant_label)
+
+            try:
+                tr = create_traceability(
+                    source_type='Business Rule',
+                    source_id=source_id,
+                    extracted_text='Field validation: %s.%s = %s' % (fname, field_name, variant_label),
+                    confidence=0.8,
+                )
+            except Exception:
+                continue
+
+            scenarios.append(ExtractedScenario(
+                title=title,
+                validation=(
+                    'API returns %s error. No operation performed. '
+                    'Error message identifies the invalid field.' % err_code
+                ),
+                category='Negative',
+                source=tr,
+                steps_hint=[
+                    'Build request with field %s set to %s' % (field_name, variant_desc),
+                    'Send %s request to %s' % ('POST', endpoint or fname),
+                    'Verify API returns error for invalid %s' % field_name,
+                    'Verify error message references field %s specifically' % field_name,
+                ],
+            ))
+        processed += 1
+
+    log('[A1-FIELD-MATRIX] Generated %d field-validation TCs for %s' % (len(scenarios), fname))
+    return scenarios
+
+
+# ================================================================
+# A2: IDEMPOTENCY / DUPLICATE REQUEST
+# ================================================================
+
+def generate_idempotency_tcs(
+    feature_name: str,
+    feature_id: str,
+    log=print,
+) -> list:
+    """A2 — Idempotency and duplicate-request test cases.
+
+    Submitting the same provisioning request twice is a classic telecom defect.
+    Tests:
+      1. Same request submitted twice in quick succession
+      2. Same request submitted after operation already completed
+      3. Same transaction ID reused
+
+    Returns:
+        List of ExtractedScenario objects.
+    """
+    try:
+        from .data_models_v8 import ExtractedScenario
+        from .traceability import create_traceability
+    except ImportError:
+        return []
+
+    fname = feature_name
+    source_id = 'Idempotency-%s' % feature_id
+
+    scenarios = []
+    idempotency_cases = [
+        (
+            'Verify %s is idempotent — duplicate request rejected or no-op' % fname,
+            'Submit %s request successfully, then submit the identical request again. '
+            'Verify: no duplicate transaction created, or operation is idempotent (safe repeat). '
+            'Transaction History shows exactly one COMPLETED entry.' % fname,
+            [
+                'Submit %s request successfully (first call)' % fname,
+                'Capture the transaction ID from the first response',
+                'Submit the identical %s request again immediately' % fname,
+                'Verify second request is rejected (duplicate) or returns same result (idempotent)',
+                'Verify Transaction History shows only one COMPLETED transaction — no duplicate',
+            ]
+        ),
+        (
+            'Verify %s does not create duplicate transaction when request retried after timeout' % fname,
+            'Submit %s request, simulate network timeout (no response received). '
+            'Retry the same request. Verify only one transaction is committed.' % fname,
+            [
+                'Submit %s request but intercept/drop the response (simulate timeout)' % fname,
+                'Retry the same %s request with the same payload' % fname,
+                'Verify only one transaction appears in Transaction History',
+                'Verify final state is consistent — no double-commit',
+            ]
+        ),
+    ]
+
+    for title, validation, steps in idempotency_cases:
+        try:
+            tr = create_traceability(
+                source_type='Business Rule',
+                source_id=source_id,
+                extracted_text='Idempotency: %s duplicate request' % fname,
+                confidence=0.85,
+            )
+            scenarios.append(ExtractedScenario(
+                title=title,
+                validation=validation,
+                category='Edge Case',
+                source=tr,
+                steps_hint=steps,
+            ))
+        except Exception:
+            continue
+
+    log('[A2-IDEMPOTENCY] Generated %d idempotency TCs for %s' % (len(scenarios), fname))
+    return scenarios
+
+
+# ================================================================
+# A3: CONCURRENCY / RACE CONDITIONS
+# ================================================================
+
+def generate_concurrency_tcs(
+    feature_name: str,
+    feature_id: str,
+    log=print,
+) -> list:
+    """A3 — Concurrency and race-condition test cases.
+
+    Tests two operations on the same line simultaneously:
+      - Same operation from two agents concurrently
+      - Two different operations on same MDN at once
+
+    Returns:
+        List of ExtractedScenario objects.
+    """
+    try:
+        from .data_models_v8 import ExtractedScenario
+        from .traceability import create_traceability
+    except ImportError:
+        return []
+
+    fname = feature_name
+    source_id = 'Concurrency-%s' % feature_id
+
+    scenarios = []
+    concurrency_cases = [
+        (
+            'Verify %s handles concurrent requests on the same MDN gracefully' % fname,
+            'First request wins or both are serialized. No data corruption. '
+            'Second request either queues or is rejected with appropriate error. '
+            'Transaction History shows no overlapping/conflicting state.',
+            [
+                'Prepare two identical %s requests for the same MDN' % fname,
+                'Submit both requests simultaneously (parallel API calls)',
+                'Verify at least one request succeeds with HTTP 200',
+                'Verify no data corruption — line state is consistent',
+                'Verify Transaction History shows correct serialization, no duplicate',
+            ]
+        ),
+        (
+            'Verify %s during an in-flight operation on the same line is handled safely' % fname,
+            'If another operation is in progress on the same MDN, '
+            '%s either waits or is rejected with a conflict error. '
+            'No partial state results from either operation.' % fname,
+            [
+                'Trigger a long-running operation on the MDN (e.g., async operation in progress)',
+                'Immediately trigger %s on the same MDN' % fname,
+                'Verify the system detects the conflict',
+                'Verify appropriate handling: queue or reject with ERR_CONCURRENT_OPERATION',
+                'After first operation completes, verify MDN is in correct state',
+            ]
+        ),
+    ]
+
+    for title, validation, steps in concurrency_cases:
+        try:
+            tr = create_traceability(
+                source_type='Business Rule',
+                source_id=source_id,
+                extracted_text='Concurrency: %s race condition' % fname,
+                confidence=0.8,
+            )
+            scenarios.append(ExtractedScenario(
+                title=title,
+                validation=validation,
+                category='Edge Case',
+                source=tr,
+                steps_hint=steps,
+            ))
+        except Exception:
+            continue
+
+    log('[A3-CONCURRENCY] Generated %d concurrency TCs for %s' % (len(scenarios), fname))
+    return scenarios

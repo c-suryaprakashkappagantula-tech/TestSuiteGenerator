@@ -417,6 +417,8 @@ def _build_testcases_sheet(wb, suite: TestSuite, sheet_name=None, tc_subset=None
     ws.column_dimensions['H'].width = 18
     ws.column_dimensions['I'].width = 18
     ws.column_dimensions['J'].width = 18
+    ws.column_dimensions['K'].width = 12
+    ws.column_dimensions['L'].width = 40
 
     # Row 1: Headers — bold white on soft navy (no feature description banner)
     ws.append(EXCEL_HEADERS)
@@ -476,6 +478,21 @@ def _build_testcases_sheet(wb, suite: TestSuite, sheet_name=None, tc_subset=None
                 else:
                     _gcell.fill = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
                     _gcell.font = Font(name='Calibri', bold=True, size=11, color='9C0006')
+                # Column 12: Test Data sample (MDN, lineId, etc.)
+                _test_data_str = ''
+                try:
+                    from .test_data_injector import get_operation_sample_request, format_request_sample
+                    _td_ctx = getattr(tc, 'dimension_values', {}) or {}
+                    _td_api_name = ''
+                    if hasattr(tc, 'traceability') and tc.traceability:
+                        _td_api_name = (tc.traceability.source_id or '').lower()
+                    _td_sample = get_operation_sample_request(_td_api_name)
+                    _test_data_str = format_request_sample(_td_sample, max_fields=4)
+                except Exception:
+                    pass
+                _tdcell = ws.cell(row=row, column=12, value=_test_data_str)
+                _tdcell.alignment = _wrap
+                _tdcell.font = Font(name='Calibri', size=10, italic=True)
             ws.cell(row=row, column=5, value=step.step_num).alignment = _wrap
             ws.cell(row=row, column=6, value=step.summary).alignment = _wrap
             ws.cell(row=row, column=7, value=step.expected).alignment = _wrap

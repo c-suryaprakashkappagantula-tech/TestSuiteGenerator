@@ -75,6 +75,20 @@ if sys.platform.startswith('win'):
 # ================================================================
 init_db()
 
+# Seed test data pool with SIT defaults if empty (Phase 4A)
+try:
+    from modules.test_data_injector import seed_sit_defaults
+    seed_sit_defaults()
+except Exception:
+    pass
+
+# Init execution results tables (Phase 4C)
+try:
+    from modules.database import init_execution_tables
+    init_execution_tables()
+except Exception:
+    pass
+
 # ================================================================
 # PAGE CONFIG
 # ================================================================
@@ -985,6 +999,35 @@ with right:
             elif ss.get('result_path'):
                 st.info('💡 LLM gap analysis not available — configure OPENAI_API_KEY or AWS credentials '
                         'to enable AI-powered coverage suggestions.')
+
+            # ── Phase 4B: Cross-feature reuse suggestions ──
+            _last_fid = ss.get('last_feature_id', '')
+            if _last_fid:
+                with st.expander('🔗 Similar Features — potential TC reuse', expanded=False):
+                    st.caption('Features sharing the same API endpoint or dimensions. '
+                               'Reusing their TCs saves time and reduces duplicate work.')
+                    try:
+                        from modules.similarity_engine import find_similar_features, get_reuse_suggestions
+                        _similar = find_similar_features(_last_fid, top_k=5, min_score=0.3)
+                        _reuse = get_reuse_suggestions(_similar)
+                        if _reuse:
+                            for _rs in _reuse[:5]:
+                                _rs_col1, _rs_col2 = st.columns([3, 1])
+                                with _rs_col1:
+                                    st.markdown(
+                                        '**%s** — %s  \n'
+                                        '_%d%% similar | Shares: %s | PI: %s_' % (
+                                            _rs['feature_id'], _rs['title'][:60],
+                                            _rs['score_pct'], _rs['shared'][:50] or 'keywords',
+                                            _rs['pi'] or '?',
+                                        )
+                                    )
+                                with _rs_col2:
+                                    st.metric('%d TCs' % _rs['tc_count'], '')
+                        else:
+                            st.info('No similar features found in the cache (min 30%% similarity).')
+                    except Exception as _sim_err:
+                        st.info('Similarity engine: %s' % str(_sim_err)[:80])
 
     # ── V8 Routing Classification Badge ──
     if ss.get('v8_routing_audit'):

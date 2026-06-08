@@ -341,6 +341,9 @@ def build_test_cases(
             api_context['source_system'] = nmno_spec.source_system
         if hasattr(nmno_spec, 'target_system') and nmno_spec.target_system:
             api_context['target_system'] = nmno_spec.target_system
+        # Store raw request_sample for test data injection
+        if hasattr(nmno_spec, 'request_sample') and nmno_spec.request_sample:
+            api_context['_nmno_request_sample'] = nmno_spec.request_sample
         api_context['_nmno_enriched'] = True
 
     # ── Determine routing path ──
@@ -1063,7 +1066,14 @@ def _build_post_get_steps(
     elif is_negative:
         precond_summary = 'Preconditions: Set up error condition for %s' % error_code
     else:
-        precond_summary = 'Preconditions: TMO MDN active in SIT, API endpoint accessible'
+        # Inject real SIT test data into preconditions
+        try:
+            from .test_data_injector import get_sample_data
+            _mdn = get_sample_data('MDN')['value']
+            _line = get_sample_data('LINE_ID')['value']
+            precond_summary = 'Preconditions: Active TMO MDN=%s, lineId=%s in SIT environment. API endpoint accessible.' % (_mdn, _line)
+        except Exception:
+            precond_summary = 'Preconditions: TMO MDN active in SIT, API endpoint accessible'
 
     steps = [
         TestStep(
@@ -1074,20 +1084,35 @@ def _build_post_get_steps(
         ),
     ]
 
-    # Step 2: Build Request
+    # Step 2: Build Request — inject real test data
     if request_fields:
         field_list = ', '.join('%s=%s' % (k, v) for k, v in request_fields.items())
         build_summary = 'Build request payload with fields: %s' % field_list
+        build_ref = 'Fields: %s' % ', '.join(request_fields.keys())
     elif is_negative:
         build_summary = 'Build request payload with invalid/missing data to trigger %s' % error_code
+        build_ref = 'Error trigger: %s' % error_code
     else:
-        build_summary = 'Build request payload with valid test data'
+        # Inject real test data from pool or NMNO spec
+        try:
+            from .test_data_injector import get_operation_sample_request, format_request_sample
+            _api_name = api_context.get('api_name', '')
+            _endpoint = api_context.get('endpoint', '')
+            _req_fields = api_context.get('request_fields', [])
+            _nmno_sample = api_context.get('_nmno_request_sample', '')
+            _sample = get_operation_sample_request(_api_name, _endpoint, _req_fields, _nmno_sample)
+            _sample_str = format_request_sample(_sample)
+            build_summary = 'Build %s request payload: %s' % (method, _sample_str)
+            build_ref = 'Test data (SIT): %s' % _sample_str[:80]
+        except Exception:
+            build_summary = 'Build request payload with valid SIT test data'
+            build_ref = 'Fields: per API spec'
 
     steps.append(TestStep(
         step_num=2,
         summary=build_summary,
         expected='Request payload is constructed',
-        data_reference='Fields: %s' % (', '.join(request_fields.keys()) if request_fields else 'per API spec'),
+        data_reference=build_ref,
     ))
 
     # Step 3: Send Request

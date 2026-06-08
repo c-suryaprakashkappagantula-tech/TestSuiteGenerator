@@ -1193,3 +1193,133 @@ def update_llm_suggestion_status(suggestion_id: int, adopted: int) -> None:
     c.execute('UPDATE llm_suggestions SET adopted = ? WHERE id = ?', (adopted, suggestion_id))
     c.commit()
     c.close()
+
+
+# ================================================================
+# EXECUTION FEEDBACK (Phase 4C)
+# ================================================================
+
+def init_execution_tables():
+    """Create execution_results table if it doesn't exist.
+    Called separately from init_db to keep schema additive."""
+    c = _conn()
+    c.executescript('''
+        CREATE TABLE IF NOT EXISTS execution_results (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            feature_id      TEXT NOT NULL,
+            tc_sno          TEXT NOT NULL,
+            tc_summary      TEXT DEFAULT '',
+            run_date        TEXT NOT NULL,
+            result          TEXT NOT NULL,  -- 'PASS' | 'FAIL' | 'BLOCKED' | 'SKIP'
+            environment     TEXT DEFAULT 'SIT',
+            defect_id       TEXT DEFAULT '',
+            notes           TEXT DEFAULT '',
+            run_by          TEXT DEFAULT '',
+            duration_secs   REAL DEFAULT 0.0,
+            created_at      TEXT DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_exec_feature ON execution_results(feature_id);
+        CREATE INDEX IF NOT EXISTS idx_exec_result ON execution_results(result);
+
+        -- TC quality weights (updated by execution feedback)
+        CREATE TABLE IF NOT EXISTS tc_quality_weights (
+            feature_id      TEXT NOT NULL,
+            tc_sno          TEXT NOT NULL,
+            pass_count      INTEGER DEFAULT 0,
+            fail_count      INTEGER DEFAULT 0,
+            block_count     INTEGER DEFAULT 0,
+            defect_found    INTEGER DEFAULT 0,
+            quality_weight  REAL DEFAULT 1.0,  -- >1 = high-value, <1 = low-value/flaky
+            last_updated    TEXT DEFAULT (datetime('now','localtime')),
+            PRIMARY KEY (feature_id, tc_sno)
+        );
+    ''')
+    c.commit()
+    c.close()
+
+
+def import_execution_results(results: List[Dict]) -> int:
+    """Import execution results. Each dict: {feature_id, tc_sno, result, run_date, defect_id}.
+    Returns count of records imported."""
+    c = _conn()
+    imported = 0
+    try:
+        for r in results:
+            c.execute('''
+                INSERT INTO execution_results
+                    (feature_id, tc_sno, tc_summary, run_date, result,
+                     environment, defect_id, notes, run_by)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                r.get('feature_id', ''),
+                str(r.get('tc_sno', '')),
+                r.get('tc_summary', '')[:200],
+                r.get('run_date', datetime.now().isoformat()),
+                r.get('result', 'SKIP').upper(),
+                r.get('environment', 'SIT'),
+                r.get('defect_id', ''),
+                r.get('notes', ''),
+                r.get('run_by', ''),
+            ))
+            imported += 1
+        c.commit()
+        # Update quality weights
+        _update_quality_weights(c)
+    finally:
+        c.close()
+    return imported
+
+
+def _update_quality_weights(c):
+    """Recompute quality_weight for each TC based on execution history."""
+    try:
+        rows = c.execute('''
+            SELECT feature_id, tc_sno,
+                   SUM(CASE WHEN result='PASS' THEN 1 ELSE 0 END) as pass_c,
+                   SUM(CASE WHEN result='FAIL' THEN 1 ELSE 0 END) as fail_c,
+                   SUM(CASE WHEN result='BLOCKED' THEN 1 ELSE 0 END) as block_c,
+                   SUM(CASE WHEN defect_id != '' THEN 1 ELSE 0 END) as defect_c
+            FROM execution_results
+            GROUP BY feature_id, tc_sno
+        ''').fetchall()
+        for row in rows:
+            total = row['pass_c'] + row['fail_c'] + row['block_c']
+            if total == 0:
+                weight = 1.0
+            else:
+                # High pass rate with defects found = high value
+                # High block rate = low value
+                pass_ratio = row['pass_c'] / total
+                block_ratio = row['block_c'] / total
+                defect_bonus = min(0.5, row['defect_c'] * 0.25)
+                weight = (1.0 - block_ratio * 0.5) + defect_bonus
+                weight = max(0.1, min(2.0, weight))
+            c.execute('''
+                INSERT OR REPLACE INTO tc_quality_weights
+                    (feature_id, tc_sno, pass_count, fail_count, block_count,
+                     defect_found, quality_weight)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (row['feature_id'], row['tc_sno'],
+                  row['pass_c'], row['fail_c'], row['block_c'],
+                  row['defect_c'], round(weight, 3)))
+    except Exception:
+        pass
+
+
+def get_execution_summary(feature_id: str) -> Dict:
+    """Get execution result summary for a feature."""
+    c = _conn()
+    row = c.execute('''
+        SELECT
+            COUNT(*) as total,
+            SUM(CASE WHEN result='PASS' THEN 1 ELSE 0 END) as passed,
+            SUM(CASE WHEN result='FAIL' THEN 1 ELSE 0 END) as failed,
+            SUM(CASE WHEN result='BLOCKED' THEN 1 ELSE 0 END) as blocked,
+            SUM(CASE WHEN defect_id != '' THEN 1 ELSE 0 END) as defects,
+            MAX(run_date) as last_run
+        FROM execution_results WHERE feature_id = ?
+    ''', (feature_id,)).fetchone()
+    c.close()
+    if not row or not row['total']:
+        return {}
+    return dict(row)
