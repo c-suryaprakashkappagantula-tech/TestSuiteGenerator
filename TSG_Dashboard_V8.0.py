@@ -868,6 +868,124 @@ with right:
                             use_container_width=True,
                             key='dl_batch_%d' % _bi)
 
+            # ── Phase 3A: Review-&-Edit panel ──
+            _review_tcs = ss.get('_review_tcs', [])
+            if _review_tcs:
+                with st.expander('✏️ Review & Edit Test Cases (%d TCs) — approve before export' % len(_review_tcs),
+                                 expanded=False):
+                    st.caption('Edit summaries, change priorities, drop TCs. Edits persist per feature. '
+                               'Click "Apply & Save" to export with overrides.')
+
+                    import pandas as _pd_rev
+                    _rev_df = _pd_rev.DataFrame(_review_tcs)
+                    _edit_cols = ['action', 'priority', 'category', 'summary', 'grounding', 'steps',
+                                  'source', 'source_id', 'source_text']
+                    _rev_df_edit = _rev_df[[c for c in _edit_cols if c in _rev_df.columns]].copy()
+
+                    _edited = st.data_editor(
+                        _rev_df_edit,
+                        column_config={
+                            'action': st.column_config.SelectboxColumn(
+                                'Action', options=['keep', 'drop', 'edit'], width='small'),
+                            'priority': st.column_config.SelectboxColumn(
+                                'Priority', options=['P1', 'P2', 'P3'], width='small'),
+                            'category': st.column_config.SelectboxColumn(
+                                'Category',
+                                options=['Happy Path', 'Negative', 'Edge Case', 'E2E', 'Regression'],
+                                width='medium'),
+                            'summary': st.column_config.TextColumn('Summary', width='large'),
+                            'grounding': st.column_config.NumberColumn('Grounding %', format='%d%%', width='small'),
+                            'steps': st.column_config.NumberColumn('Steps', width='small'),
+                            'source': st.column_config.TextColumn('Source', width='medium', disabled=True),
+                            'source_id': st.column_config.TextColumn('Source ID', width='small', disabled=True),
+                            'source_text': st.column_config.TextColumn('Evidence', width='large', disabled=True),
+                        },
+                        hide_index=True,
+                        use_container_width=True,
+                        num_rows='fixed',
+                        key='review_editor_%s' % ss.get('last_feature_id', 'suite'),
+                    )
+
+                    _rev_col1, _rev_col2, _rev_col3 = st.columns([2, 1, 1])
+                    with _rev_col1:
+                        if st.button('💾 Save Overrides', use_container_width=True, key='btn_save_overrides'):
+                            try:
+                                from modules.database import save_tc_overrides
+                                _overrides = []
+                                for _, row in _edited.iterrows():
+                                    _overrides.append({
+                                        'tc_sno': row.get('sno', ''),
+                                        'action': row.get('action', 'keep'),
+                                        'edited_summary': row.get('summary', ''),
+                                        'edited_preconditions': '',
+                                        'priority_override': row.get('priority', ''),
+                                        'note': '',
+                                    })
+                                save_tc_overrides(ss.get('last_feature_id', ''), _overrides)
+                                _kept = sum(1 for _, r in _edited.iterrows() if r.get('action') != 'drop')
+                                _dropped = len(_overrides) - _kept
+                                st.success('✅ Saved: %d kept, %d dropped' % (_kept, _dropped))
+                            except Exception as _ov_err:
+                                st.error('Save failed: %s' % str(_ov_err)[:100])
+                    with _rev_col2:
+                        _drop_count = sum(1 for _, r in _edited.iterrows() if r.get('action') == 'drop')
+                        st.metric('Dropping', _drop_count, delta='-%d' % _drop_count if _drop_count else '')
+                    with _rev_col3:
+                        _keep_count = len(_review_tcs) - _drop_count
+                        st.metric('Keeping', _keep_count)
+
+            # ── Phase 3C: "Why this TC?" Explainability ──
+            if _review_tcs:
+                with st.expander('🔍 TC Explainability — why each TC was generated', expanded=False):
+                    st.caption('Every TC traces back to a specific data source. '
+                               'High grounding = based on real Chalk/NMNO/Jira data.')
+                    for tc_row in _review_tcs:
+                        _src_type = tc_row.get('source', 'Unknown')
+                        _src_id = tc_row.get('source_id', '')
+                        _src_text = tc_row.get('source_text', '')
+                        _gs = tc_row.get('grounding', -1)
+                        _gs_color = 'green' if _gs >= 80 else ('orange' if _gs >= 60 else 'red')
+                        if _src_type or _src_text:
+                            st.markdown(
+                                '**TC%s** `%s` — :%s[Grounding: %d%%]  \n'
+                                '📎 Source: **%s** (`%s`)  \n'
+                                '> %s' % (
+                                    tc_row.get('sno', '?'),
+                                    tc_row.get('category', ''),
+                                    _gs_color, _gs if _gs >= 0 else 0,
+                                    _src_type, _src_id,
+                                    _src_text[:100] if _src_text else '_No extracted text_',
+                                )
+                            )
+
+            # ── Phase 3B: AI Review suggestions ──
+            _llm_suggestions = ss.get('_llm_suggestions', [])
+            if _llm_suggestions:
+                with st.expander('🤖 AI Gap Analysis — %d suggested missing TCs' % len(_llm_suggestions),
+                                 expanded=False):
+                    st.caption('These scenarios are suggested by the LLM based on gaps in '
+                               'the generated suite vs the feature AC. Each cites its source.')
+                    for _i, _sg in enumerate(_llm_suggestions):
+                        _sg_col1, _sg_col2 = st.columns([4, 1])
+                        with _sg_col1:
+                            st.markdown('**[%s/%s]** %s  \n_%s_' % (
+                                _sg.get('category', '?'),
+                                _sg.get('priority', 'P2'),
+                                _sg.get('title', ''),
+                                _sg.get('reasoning', '')[:120],
+                            ))
+                        with _sg_col2:
+                            if st.button('✅ Adopt', key='adopt_%d' % _i, use_container_width=True):
+                                try:
+                                    from modules.database import update_llm_suggestion_status
+                                    update_llm_suggestion_status(_sg.get('id', 0), 1)
+                                    st.success('Adopted')
+                                except Exception:
+                                    pass
+            elif ss.get('result_path'):
+                st.info('💡 LLM gap analysis not available — configure OPENAI_API_KEY or AWS credentials '
+                        'to enable AI-powered coverage suggestions.')
+
     # ── V8 Routing Classification Badge ──
     if ss.get('v8_routing_audit'):
         ra = ss['v8_routing_audit']
@@ -1767,6 +1885,24 @@ if run_btn:
                     }
                     ss['last_feature_id'] = feature_id
                     ss['last_suite_id'] = output.get('suite_id', '')
+                    # Store TCs for Review-&-Edit panel
+                    ss['_review_tcs'] = [
+                        {
+                            'sno': tc.sno,
+                            'summary': tc.summary or '',
+                            'category': tc.category or 'Happy Path',
+                            'priority': getattr(tc, 'priority', '') or 'P2',
+                            'preconditions': tc.preconditions or '',
+                            'steps': len(tc.steps),
+                            'grounding': getattr(tc, 'grounding_score', -1),
+                            'source': getattr(getattr(tc, 'traceability', None), 'source_type', '') or '',
+                            'source_id': getattr(getattr(tc, 'traceability', None), 'source_id', '') or '',
+                            'source_text': (getattr(getattr(tc, 'traceability', None), 'extracted_text', '') or '')[:120],
+                            'action': 'keep',
+                        }
+                        for tc in suite.test_cases
+                    ]
+                    ss['_llm_suggestions'] = getattr(suite, '_llm_suggestions', [])
 
                     ss['batch_results'].append({
                         'feature_id': feature_id, 'tc_count': output['tc_count'],

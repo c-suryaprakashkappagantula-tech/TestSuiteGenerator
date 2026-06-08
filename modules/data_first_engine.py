@@ -314,6 +314,33 @@ def build_test_suite_v8(
         log('[V8-ENGINE]   NBOP UI: nav=%s' % (nbop_data.get('nav_path', 'none')))
     log('═' * 60)
 
+    # ── LLM Reviewer: grounded gap-filler (Phase 3) ──
+    # Called AFTER generation so it only fills gaps, never replaces grounded TCs.
+    # Constrained to cite sources — cannot hallucinate.
+    # Suggestions stored in DB and surfaced in dashboard Review panel.
+    suite._llm_suggestions = []
+    try:
+        from .llm_engine import create_llm_from_env
+        _llm = create_llm_from_env(log=log)
+        if _llm.available:
+            from .llm_reviewer import review_suite_gaps
+            log('[V8-ENGINE] Step 5: LLM gap analysis (auto-detect provider)...')
+            _llm_gaps = review_suite_gaps(_llm, suite, jira, chalk, log=log)
+            if _llm_gaps:
+                suite._llm_suggestions = _llm_gaps
+                try:
+                    from .database import save_llm_suggestions
+                    save_llm_suggestions(feature_id, _llm_gaps)
+                    log('[V8-ENGINE]   %d LLM suggestions saved to DB' % len(_llm_gaps))
+                except Exception as _db_err:
+                    log('[V8-ENGINE]   LLM suggestion DB save: %s' % str(_db_err)[:60])
+        else:
+            log('[V8-ENGINE] LLM not configured — set OPENAI_API_KEY / AWS creds to enable gap analysis')
+            suite._llm_suggestions = []
+    except Exception as _llm_err:
+        log('[V8-ENGINE] LLM reviewer skipped: %s' % str(_llm_err)[:80])
+        suite._llm_suggestions = []
+
     return suite
 
 

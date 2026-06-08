@@ -232,6 +232,36 @@ def init_db():
             FOREIGN KEY (suite_id) REFERENCES test_suites(suite_id)
         );
         CREATE INDEX IF NOT EXISTS idx_inventory_suite ON data_inventory_log(suite_id);
+
+        -- Phase 3: TC overrides (Review-&-Edit before export)
+        CREATE TABLE IF NOT EXISTS tc_overrides (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            feature_id      TEXT NOT NULL,
+            tc_sno          TEXT NOT NULL,
+            action          TEXT NOT NULL,  -- 'keep' | 'drop' | 'edit'
+            edited_summary  TEXT DEFAULT '',
+            edited_preconditions TEXT DEFAULT '',
+            priority_override TEXT DEFAULT '',
+            note            TEXT DEFAULT '',
+            created_at      TEXT DEFAULT (datetime('now','localtime')),
+            PRIMARY KEY (feature_id, tc_sno) ON CONFLICT REPLACE
+        );
+        CREATE INDEX IF NOT EXISTS idx_override_fid ON tc_overrides(feature_id);
+
+        -- Phase 3: LLM review suggestions per feature
+        CREATE TABLE IF NOT EXISTS llm_suggestions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            feature_id      TEXT NOT NULL,
+            title           TEXT NOT NULL,
+            description     TEXT DEFAULT '',
+            category        TEXT DEFAULT 'Happy Path',
+            priority        TEXT DEFAULT 'P2',
+            reasoning       TEXT DEFAULT '',
+            steps_json      TEXT DEFAULT '[]',
+            adopted         INTEGER DEFAULT 0,  -- 0=pending, 1=adopted, -1=skipped
+            created_at      TEXT DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_llmsugg_fid ON llm_suggestions(feature_id);
     ''')
 
     # ── Run migrations ──
@@ -1055,5 +1085,111 @@ def save_data_inventory_log(suite_id: int, data_inventory):
             getattr(source, 'status', ''),
             1 if getattr(source, 'cache_hit', False) else 0,
         ))
+    c.commit()
+    c.close()
+
+
+# ================================================================
+# TC OVERRIDES (Phase 3 — Review-&-Edit)
+# ================================================================
+
+def save_tc_overrides(feature_id: str, overrides: List[Dict]) -> None:
+    """Save user TC override decisions (keep/drop/edit) for a feature.
+
+    Each override dict: {tc_sno, action, edited_summary, edited_preconditions,
+                         priority_override, note}
+    """
+    c = _conn()
+    try:
+        for ov in overrides:
+            c.execute('''
+                INSERT OR REPLACE INTO tc_overrides
+                    (feature_id, tc_sno, action, edited_summary, edited_preconditions,
+                     priority_override, note)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                feature_id,
+                str(ov.get('tc_sno', '')),
+                ov.get('action', 'keep'),
+                ov.get('edited_summary', ''),
+                ov.get('edited_preconditions', ''),
+                ov.get('priority_override', ''),
+                ov.get('note', ''),
+            ))
+        c.commit()
+    finally:
+        c.close()
+
+
+def load_tc_overrides(feature_id: str) -> List[Dict]:
+    """Load all TC override decisions for a feature."""
+    c = _conn()
+    rows = c.execute(
+        'SELECT * FROM tc_overrides WHERE feature_id = ? ORDER BY tc_sno',
+        (feature_id,)
+    ).fetchall()
+    c.close()
+    return [dict(r) for r in rows]
+
+
+def clear_tc_overrides(feature_id: str) -> None:
+    """Clear all TC overrides for a feature (e.g. after a fresh generate)."""
+    c = _conn()
+    c.execute('DELETE FROM tc_overrides WHERE feature_id = ?', (feature_id,))
+    c.commit()
+    c.close()
+
+
+# ================================================================
+# LLM SUGGESTIONS (Phase 3 — LLM reviewer)
+# ================================================================
+
+def save_llm_suggestions(feature_id: str, suggestions: List[Dict]) -> None:
+    """Save LLM gap-analysis suggestions for a feature."""
+    c = _conn()
+    try:
+        import json as _json
+        # Clear previous suggestions for this feature
+        c.execute('DELETE FROM llm_suggestions WHERE feature_id = ?', (feature_id,))
+        for sg in suggestions:
+            c.execute('''
+                INSERT INTO llm_suggestions
+                    (feature_id, title, description, category, priority, reasoning, steps_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                feature_id,
+                sg.get('title', '')[:200],
+                sg.get('description', '')[:500],
+                sg.get('category', 'Happy Path'),
+                sg.get('priority', 'P2'),
+                sg.get('reasoning', '')[:300],
+                _json.dumps(sg.get('steps', [])),
+            ))
+        c.commit()
+    finally:
+        c.close()
+
+
+def load_llm_suggestions(feature_id: str) -> List[Dict]:
+    """Load LLM suggestions for a feature."""
+    c = _conn()
+    rows = c.execute(
+        'SELECT * FROM llm_suggestions WHERE feature_id = ? ORDER BY priority, id',
+        (feature_id,)
+    ).fetchall()
+    c.close()
+    import json as _json
+    result = []
+    for r in rows:
+        d = dict(r)
+        d['steps'] = _json.loads(d.get('steps_json', '[]'))
+        result.append(d)
+    return result
+
+
+def update_llm_suggestion_status(suggestion_id: int, adopted: int) -> None:
+    """Mark a suggestion as adopted (1) or skipped (-1)."""
+    c = _conn()
+    c.execute('UPDATE llm_suggestions SET adopted = ? WHERE id = ?', (adopted, suggestion_id))
     c.commit()
     c.close()
