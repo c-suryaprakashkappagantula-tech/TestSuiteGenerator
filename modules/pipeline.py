@@ -133,7 +133,9 @@ def block_jira_fetch(page, feature_id, log=print):
     import json
 
     # ── V7: Try DB cache first ──
-    if not is_jira_stale(feature_id):
+    # When page=None (REST-only mode), also accept stale cache to avoid crashing
+    _cache_check = not is_jira_stale(feature_id) or (page is None)
+    if _cache_check:
         cached = load_jira(feature_id)
         if cached and cached.get('summary'):
             log('[PIPELINE] ⚡ Jira DB cache hit for %s (skipping browser)' % feature_id)
@@ -261,6 +263,37 @@ def block_jira_fetch(page, feature_id, log=print):
 
     # ── Final fallback: live fetch via browser ──
     log('[PIPELINE] REST failed for %s — fetching via browser' % feature_id)
+    if page is None:
+        # Browser not available (REST-only mode was selected at startup)
+        # Fall back to returning cached data if any exists, even if stale
+        log('[PIPELINE] Browser not available (page=None) — attempting stale cache load for %s' % feature_id)
+        stale_cached = load_jira(feature_id)
+        if stale_cached and stale_cached.get('summary'):
+            import json as _json
+            log('[PIPELINE] ⚡ Using stale cache for %s (REST unavailable, no browser)' % feature_id)
+            jira = JiraIssue(
+                key=stale_cached.get('feature_id', feature_id),
+                summary=stale_cached.get('summary', ''),
+                description=stale_cached.get('description', ''),
+                status=stale_cached.get('status', ''),
+                priority=stale_cached.get('priority', ''),
+                assignee=stale_cached.get('assignee', ''),
+                reporter=stale_cached.get('reporter', ''),
+                labels=_json.loads(stale_cached.get('labels_json', '[]')),
+                acceptance_criteria=stale_cached.get('ac_text', ''),
+                attachments=[],
+                linked_issues=_json.loads(stale_cached.get('links_json', '[]')),
+                subtasks=_json.loads(stale_cached.get('subtasks_json', '[]')),
+                comments=_json.loads(stale_cached.get('comments_json', '[]')),
+                pi=stale_cached.get('pi', ''),
+                channel=stale_cached.get('channel', ''),
+            )
+            warnings = validate_jira_issue(jira, log=log)
+            return {'jira': jira, 'warnings': warnings + ['⚠️ Using stale Jira cache — run Sync from Jira to refresh'], 'att_paths': []}
+        raise RuntimeError(
+            'Jira data unavailable for %s: REST failed and browser not available. '
+            'Run "Sync from Jira" to refresh the cache.' % feature_id
+        )
     jira = fetch_jira_issue(page, feature_id, log=log)
     warnings = validate_jira_issue(jira, log=log)
 
@@ -305,6 +338,8 @@ def block_jira_fetch(page, feature_id, log=print):
                     subtask_att_count += 1
                     continue
                 try:
+                    if page is None:
+                        continue  # Can't download — no browser
                     response = page.request.get(url)
                     if response.ok:
                         save_path.write_bytes(response.body())
