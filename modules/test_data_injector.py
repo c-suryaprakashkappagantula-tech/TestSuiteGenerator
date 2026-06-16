@@ -200,7 +200,7 @@ def get_operation_sample_request(
                     elif 'account' in key_lower:
                         result[key] = get_sample_data('ACCOUNT')['value']
                     elif str_val and str_val not in ('null', 'None', ''):
-                        result[key] = str_val  # keep the captured value as-is
+                        result[key] = '<sample_%s>' % key.lower()[:20]  # mask unrecognised fields — PII safety
                 if result:
                     return result
         except Exception:
@@ -306,7 +306,8 @@ def seed_from_nmno(nmno_result, feature_id: str = '') -> int:
                         add_test_data('IMEI', str_val, environment='SIT',
                                      notes='From NMNO/%s' % (feature_id or spec.api_name or ''))
                         seeded += 1
-                    elif re.match(r'^\d{19,20}$', str_val) and 'iccid' in key_lower:
+                    elif re.match(r'^\d{19,20}$', str_val) and 'iccid' in key_lower and str_val.startswith('89'):
+                        # ICCID (E.118 format starts with '89')
                         add_test_data('ICCID', str_val, environment='SIT',
                                      notes='From NMNO/%s' % (feature_id or spec.api_name or ''))
                         seeded += 1
@@ -341,3 +342,50 @@ def seed_sit_defaults() -> int:
     except Exception:
         pass
     return seeded
+
+
+def get_varied_test_data(
+    tc_index: int,
+    api_name: str = '',
+    category: str = '',
+    dimension_values: Dict = None,
+) -> str:
+    """Generate varied test data per TC to avoid identical MDN/lineId across all TCs.
+
+    Rotates through available SIT sample pools based on tc_index and adds
+    context-specific fields based on category and dimensions.
+
+    Args:
+        tc_index: 0-based index of the TC in the suite (used for rotation)
+        api_name: operation/api name for context
+        category: TC category (Happy Path, Negative, Edge Case)
+        dimension_values: dict of dimension key→value for this TC
+
+    Returns:
+        Formatted string like "MDN=7206814569, lineId=5634541233, RequestType=TMO"
+    """
+    dimension_values = dimension_values or {}
+
+    # Rotate through SIT_SAMPLES using tc_index
+    mdns = SIT_SAMPLES.get('MDN', ['3036694392'])
+    line_ids = SIT_SAMPLES.get('LINE_ID', ['5634541190'])
+    accounts = SIT_SAMPLES.get('ACCOUNT', ['100456789'])
+
+    mdn = mdns[tc_index % len(mdns)]
+    line_id = line_ids[tc_index % len(line_ids)]
+    account = accounts[tc_index % len(accounts)]
+
+    # Base fields
+    fields = {
+        'MDN': mdn,
+        'lineId': line_id,
+        'RequestType': 'TMO',
+    }
+
+    # NOTE: Context fields (product, plan_type, line_state, device_type, channel)
+    # are NOT added to the request payload fields. They belong in description/preconditions only.
+    # See BUG-TDI-1: context fields must stay separate from API request body fields.
+
+    # Format output — only the 3 core request fields
+    items = list(fields.items())
+    return ', '.join('%s=%s' % (k, v) for k, v in items)

@@ -21,6 +21,56 @@ from typing import Optional, List, Dict, Any, Callable
 MAX_RETRIES = 2
 RETRY_DELAY = 3  # seconds
 
+# ── Shared auto-spawned browser instance (reused across blocks in same run) ──
+_auto_browser_context = {
+    'pw': None,
+    'browser': None,
+    'page': None,
+}
+
+
+def _auto_spawn_browser(log=print):
+    """Auto-spawn a headless Playwright browser as a last-resort fallback.
+
+    Reuses the same browser instance across multiple blocks in the same
+    pipeline run (Jira + Chalk). Cleaned up by _cleanup_auto_browser().
+    """
+    if _auto_browser_context['page'] is not None:
+        return _auto_browser_context['page']
+
+    from playwright.sync_api import sync_playwright
+    from .config import get_browser_channel
+
+    log('[PIPELINE] 🚀 Auto-spawning headless browser (self-healing fallback)...')
+    pw = sync_playwright().start()
+    browser = pw.chromium.launch(headless=True, channel=get_browser_channel())
+    ctx = browser.new_context(viewport={'width': 1920, 'height': 1080})
+    page = ctx.new_page()
+
+    _auto_browser_context['pw'] = pw
+    _auto_browser_context['browser'] = browser
+    _auto_browser_context['page'] = page
+
+    log('[PIPELINE] ✅ Headless browser ready')
+    return page
+
+
+def cleanup_auto_browser():
+    """Close the auto-spawned browser if one was created. Call after pipeline completes."""
+    if _auto_browser_context['browser']:
+        try:
+            _auto_browser_context['browser'].close()
+        except Exception:
+            pass
+    if _auto_browser_context['pw']:
+        try:
+            _auto_browser_context['pw'].stop()
+        except Exception:
+            pass
+    _auto_browser_context['pw'] = None
+    _auto_browser_context['browser'] = None
+    _auto_browser_context['page'] = None
+
 
 @dataclass
 class BlockResult:
@@ -133,6 +183,7 @@ def block_jira_fetch(page, feature_id, log=print):
     import json
 
     # ── V7: Try DB cache first ──
+    # Path A: Fresh cache hit → use directly (no browser needed)
     # When page=None (REST-only mode), also accept stale cache to avoid crashing
     _cache_check = not is_jira_stale(feature_id) or (page is None)
     if _cache_check:
@@ -200,9 +251,13 @@ def block_jira_fetch(page, feature_id, log=print):
             if att_paths:
                 log('[PIPELINE]   %d attachments found/downloaded (parent + subtask)' % len(att_paths))
 
+            # Apply post-fetch enrichment even on cache hit (AC-from-description, comment rules, noise filter)
+            from .jira_fetcher import enrich_issue_post_fetch
+            enrich_issue_post_fetch(jira, log=log)
+
             return {'jira': jira, 'warnings': warnings, 'att_paths': att_paths}
 
-    # ── Fallback: REST-first, then browser ──
+    # ── Path B: REST succeeds → use and cache ──
     log('[PIPELINE] Jira DB cache miss or stale for %s — trying REST...' % feature_id)
 
     # Try REST API first (no browser needed)
@@ -261,9 +316,10 @@ def block_jira_fetch(page, feature_id, log=print):
 
         return {'jira': jira, 'warnings': warnings, 'att_paths': att_paths}
 
-    # ── Final fallback: live fetch via browser ──
+    # ── Path C/D/E: REST fails — stale cache, browser fallback, or error ──
     log('[PIPELINE] REST failed for %s — fetching via browser' % feature_id)
     if page is None:
+        # Path C: REST fails + no browser → attempt stale cache
         # Browser not available (REST-only mode was selected at startup)
         # Fall back to returning cached data if any exists, even if stale
         log('[PIPELINE] Browser not available (page=None) — attempting stale cache load for %s' % feature_id)
@@ -289,11 +345,21 @@ def block_jira_fetch(page, feature_id, log=print):
                 channel=stale_cached.get('channel', ''),
             )
             warnings = validate_jira_issue(jira, log=log)
+            # Apply post-fetch enrichment even on stale cache (AC-from-description, etc.)
+            from .jira_fetcher import enrich_issue_post_fetch
+            enrich_issue_post_fetch(jira, log=log)
             return {'jira': jira, 'warnings': warnings + ['⚠️ Using stale Jira cache — run Sync from Jira to refresh'], 'att_paths': []}
-        raise RuntimeError(
-            'Jira data unavailable for %s: REST failed and browser not available. '
-            'Run "Sync from Jira" to refresh the cache.' % feature_id
-        )
+
+        # ── Path D: REST fails + no cache + browser available → spawn and fetch ──
+        # ── Path E: REST fails + no cache + no browser → error ──
+        log('[PIPELINE] No cache available — auto-launching headless browser for %s...' % feature_id)
+        try:
+            page = _auto_spawn_browser(log)
+        except Exception as _browser_err:
+            raise RuntimeError(
+                'Jira data unavailable for %s: REST failed and browser launch failed (%s). '
+                'Run "Sync from Jira" to refresh the cache.' % (feature_id, str(_browser_err)[:80])
+            )
     jira = fetch_jira_issue(page, feature_id, log=log)
     warnings = validate_jira_issue(jira, log=log)
 
@@ -416,8 +482,17 @@ def block_chalk_live(page, feature_id, pi_url, pi_label, pi_list, log=print):
                 pass
 
     # ── BROWSER FALLBACK ──
+    if not page:
+        # Auto-spawn headless browser when page=None and REST failed
+        log('[PIPELINE] Chalk REST miss — auto-launching headless browser for %s...' % feature_id)
+        try:
+            page = _auto_spawn_browser(log)
+        except Exception as _browser_err:
+            log('[PIPELINE] Browser launch failed: %s — Chalk unavailable' % str(_browser_err)[:60])
+            return {'chalk': ChalkData(feature_id=feature_id), 'source': 'not found (no browser)'}
+
     if page:
-        log('[PIPELINE] REST miss — trying browser fallback...')
+        log('[PIPELINE] Fetching Chalk via browser...')
         chalk = fetch_feature_from_pi(page, pi_url, feature_id, log=log)
         if chalk and chalk.scenarios:
             save_chalk(feature_id, pi_label, chalk)
@@ -532,8 +607,11 @@ def block_generate_output(suite, feature_id, pi, strategy, jira=None, chalk=None
             _prev = _history[0]
             _prev_path = _prev.get('file_path', '')
             if _prev_path and Path(_prev_path).exists():
-                from .diff_engine import compare_suites as _compare
-                diff_report = _compare(Path(_prev_path), suite, feature_id, log=log)
+                try:
+                    from .diff_engine import compare_suites as _compare
+                    diff_report = _compare(Path(_prev_path), suite, feature_id, log=log)
+                except FileNotFoundError:
+                    log('[PIPELINE] Previous suite file not found — skipping diff')
                 if diff_report:
                     log('[DIFF] vs previous: +%d new, ~%d changed, -%d removed' % (
                         diff_report['new'], diff_report['changed'], diff_report['removed']))

@@ -318,8 +318,12 @@ def build_test_cases(
     if classification.confidence < 0.5:
         log('[TC-BUILD]   WARNING: Low-confidence routing — review may be needed')
 
-    # Also get legacy intent for backward compat with dual-path logic
-    feature_intent = _classify_feature_intent(jira, deep_mine_result, log)
+    # Only run legacy intent classifier when primary classification has low confidence
+    if classification.confidence >= 0.7:
+        feature_intent = {'channels': [jira.channel] if jira and hasattr(jira, 'channel') and jira.channel else ['ITMBO']}
+        log('[TC-BUILD]   High-confidence classification — skipping legacy intent classifier')
+    else:
+        feature_intent = _classify_feature_intent(jira, deep_mine_result, log)
 
     # ── Determine API spec context for step generation ──
     api_context = _build_api_context(jira, deep_mine_result, feature_name)
@@ -367,18 +371,32 @@ def build_test_cases(
         return '→' in s or '->' in s or s.lower().startswith('navigate to')
 
     if is_api_path:
-        for dim in plan.independent_dimensions:
-            if dim.name.lower() in _STRUCTURAL_DIMS_API:
-                continue
-            if dim.values and all(_is_nav_val(v) for v in dim.values):
-                continue
-            for value in dim.values:
-                if _is_nav_val(value):
+        # ── GATE: Do NOT generate synchronous API dimension TCs for notification-driven features
+        # when no real endpoint was found. De-prioritization, DPFO, throttle features are
+        # triggered by Mediation notifications, not by a direct POST/GET API call.
+        _has_real_endpoint = bool(api_context.get('endpoint', '').strip())
+        _feature_lower = (feature_name or '').lower()
+        _is_notification_driven = any(kw in _feature_lower for kw in [
+            'de-priorit', 'deprioritiz', 'throttle', 'dpfo', 'nc_deprior',
+            'notification', 'suppress', 'usage',
+        ])
+        _skip_dimension_tcs = _is_notification_driven and not _has_real_endpoint
+
+        if _skip_dimension_tcs:
+            log('[TC-BUILD]   GATE: Notification-driven feature with no endpoint — skipping dimension API TCs')
+        else:
+            for dim in plan.independent_dimensions:
+                if dim.name.lower() in _STRUCTURAL_DIMS_API:
                     continue
-                tc = _build_dimension_tc(dim, value, jira, chalk, feature_name, deep_mine_result, api_context, feature_intent)
-                test_cases.append(tc)
-        log('[TC-BUILD]   Built %d dimension TCs (API path)' % sum(
-            len(d.values) for d in plan.independent_dimensions))
+                if dim.values and all(_is_nav_val(v) for v in dim.values):
+                    continue
+                for value in dim.values:
+                    if _is_nav_val(value):
+                        continue
+                    tc = _build_dimension_tc(dim, value, jira, chalk, feature_name, deep_mine_result, api_context, feature_intent)
+                    test_cases.append(tc)
+            log('[TC-BUILD]   Built %d dimension TCs (API path)' % sum(
+                len(d.values) for d in plan.independent_dimensions))
     else:
         log('[TC-BUILD]   Skipping dimension TCs (UI-only feature)')
 
@@ -446,7 +464,8 @@ def build_test_cases(
     else:
         # API/hybrid path: standard scenario TC building
         for scenario in plan.scenario_tcs:
-            tc = _build_scenario_tc(scenario, jira, feature_name, nbop_knowledge, api_context, feature_intent)
+            tc = _build_scenario_tc(scenario, jira, feature_name, nbop_knowledge, api_context, feature_intent,
+                                    feature_type=classification.classification)
             test_cases.append(tc)
         log('[TC-BUILD]   Built %d scenario TCs' % len(plan.scenario_tcs))
 
@@ -611,6 +630,7 @@ def _build_scenario_tc(
     nbop_knowledge: Optional[Dict] = None,
     api_context: Dict = None,
     feature_intent: Dict = None,
+    feature_type: str = '',
 ) -> TestCase:
     """Build a TC from an ExtractedScenario with steps from hints and api_spec."""
     feature_id = jira.key if jira else ''
@@ -620,8 +640,13 @@ def _build_scenario_tc(
     steps = []
     if scenario.steps_hint:
         _is_negative = scenario.category == 'Negative'
-        _rejection_msg = (scenario.validation or 'Operation rejected with appropriate error')[:120]
-        _success_msg = (scenario.validation or 'Operation completes successfully')[:120]
+        _rejection_msg = (scenario.validation or 'Operation rejected with appropriate error')
+        _success_msg = (scenario.validation or 'Operation completes successfully')
+        # Ensure expected results end with punctuation
+        if _rejection_msg and not _rejection_msg.rstrip()[-1] in '.!?)':
+            _rejection_msg = _rejection_msg.rstrip(',;: ') + '.'
+        if _success_msg and not _success_msg.rstrip()[-1] in '.!?)':
+            _success_msg = _success_msg.rstrip(',;: ') + '.'
 
         for i, hint in enumerate(scenario.steps_hint, 1):
             # Derive step-appropriate expected result from the hint text
@@ -650,14 +675,19 @@ def _build_scenario_tc(
             elif any(kw in step_low for kw in ['send post', 'send get', 'send %s' % (api_context.get('method','') or 'post').lower()]):
                 _exp = 'Request submitted to API endpoint' if _is_negative else 'API returns HTTP 200/202 with success response'
             elif any(kw in step_low for kw in ['verify operation rejected', 'verify.*rejected', 'verify.*error', 'rejected']):
-                # Verify rejection — use scenario validation
+                # Verify rejection — specific expected based on hint
                 _exp = _rejection_msg if not _val_is_header else 'Operation rejected with appropriate error code'
             elif any(kw in step_low for kw in ['verify operation completes', 'verify.*completes', 'verify.*succeed', 'verify downstream', 'verify.*updated', 'verify.*consistent']):
-                # Verify success
-                _exp = _success_msg if not _val_is_header else 'Operation completed successfully. Downstream systems updated.'
+                # Verify success — derive from the step hint itself
+                _exp = hint.replace('Verify ', '').replace('Verify: ', '').strip()
+                if not _exp.endswith('.'):
+                    _exp += ' — confirmed.'
             elif any(kw in step_low for kw in ['verify', 'validate', 'check', 'confirm']):
-                # Generic verify — use validation but check category
-                if _is_negative:
+                # Generic verify — derive expected from the hint text (not raw AC)
+                _hint_as_expected = hint.replace('Verify ', '').replace('Verify: ', '').replace('Validate ', '').strip()
+                if _hint_as_expected and len(_hint_as_expected) > 10:
+                    _exp = _hint_as_expected if _hint_as_expected.endswith('.') else _hint_as_expected + '.'
+                elif _is_negative:
                     _exp = _rejection_msg if not _val_is_header else 'System rejects as expected with appropriate error'
                 else:
                     _exp = _success_msg if not _val_is_header else 'Verification passes as expected'
@@ -670,7 +700,7 @@ def _build_scenario_tc(
             else:
                 # Fallback: use validation for last step, neutral for others
                 if _is_last_step and _val and not _val_is_header:
-                    _exp = _val[:120]
+                    _exp = _val
                 elif _is_negative:
                     _exp = 'Step completed — continue to verification'
                 else:
@@ -865,7 +895,7 @@ def _build_scenario_tc(
         # scenario's actual subject matter.
         from .step_templates import get_step_chain as _get_chain
         _ctx = (feature_name + ' ' + (scenario.validation or '')).lower()
-        _chain = _get_chain(scenario.title, scenario.validation, _ctx)
+        _chain = _get_chain(scenario.title, scenario.validation, _ctx, feature_type=feature_type)
         steps = [TestStep(step_num=i, summary=s, expected=e, data_reference=scenario.source.source_id)
                  for i, (s, e) in enumerate(_chain, 1)]
 
@@ -891,22 +921,34 @@ def _build_scenario_tc(
         clean_title = _raw_title
     else:
         clean_title = _transform_to_scenario_title(scenario.title, feature_name)
-    # Phase 4: Replace spaces with underscores, then trim to fit a readable length.
-    # Budget: allow the title portion up to 100 chars (the feature_id prefix is separate).
-    # Trim at word boundary (last underscore) so names never cut mid-word.
+    # Phase 4: Collapse newlines/tabs, replace spaces with underscores, then trim.
+    # Budget: allow the title portion up to 150 chars (the feature_id prefix is separate).
+    # Uses semantic-aware truncation to find natural sentence breaks rather than
+    # chopping mid-phrase at the last underscore.
+    clean_title = re.sub(r'[\r\n\t]+', ' ', clean_title)
+    clean_title = re.sub(r'\s{2,}', ' ', clean_title).strip()
+    # If multi-sentence and will exceed limit, keep only the first sentence
+    if len(clean_title) > 140:
+        _sentence_break = re.search(r'\.\s+[A-Z]', clean_title)
+        if _sentence_break and _sentence_break.start() > 40:
+            clean_title = clean_title[:_sentence_break.start()]
     clean_title_safe = clean_title.replace(' ', '_')
-    _TITLE_MAX = 100  # title portion only — feature_id prefix adds ~15 more chars
+    _TITLE_MAX = 150  # title portion only — feature_id prefix adds ~15 more chars
     if len(clean_title_safe) > _TITLE_MAX:
-        # Find last underscore at or before the limit
-        cut_pos = clean_title_safe.rfind('_', 0, _TITLE_MAX)
-        if cut_pos > 50:
-            clean_title_safe = clean_title_safe[:cut_pos]
-        else:
-            clean_title_safe = clean_title_safe[:_TITLE_MAX]
+        clean_title_safe = _smart_truncate_title(clean_title_safe, _TITLE_MAX)
     summary = '%s_%s' % (feature_id, clean_title_safe)
 
-    # Short intent-focused description
-    description = 'To validate: %s' % scenario.title[:120]
+    # Description — use full validation text (untruncated) for complete context
+    _desc_val = re.sub(r'[\r\n\t]+', ' ', (scenario.validation or scenario.title or '')).strip()
+    _desc_val = re.sub(r'\s{2,}', ' ', _desc_val)
+    if len(_desc_val) > 500:
+        # Truncate at last space before 500
+        _cut = _desc_val.rfind(' ', 0, 500)
+        _desc_val = _desc_val[:_cut] if _cut > 200 else _desc_val[:500]
+    # Ensure ends with punctuation
+    if _desc_val and not _desc_val[-1] in '.!?)':
+        _desc_val = _desc_val.rstrip(',;: ') + '.'
+    description = 'To validate: %s' % _desc_val
 
     # Environment-specific preconditions
     # For state-matrix/partial-failure TCs: derive actual line state from steps_hint[0]
@@ -1531,6 +1573,64 @@ def _assign_serial_numbers(test_cases: List[TestCase]) -> None:
             tc.priority = 'P2'
 
 
+def _smart_truncate_title(title: str, max_len: int) -> str:
+    """Truncate a TC title at a natural sentence/phrase boundary.
+
+    Strategy (in priority order):
+      1. Find a clause boundary (preposition/conjunction) near the limit:
+         _when_, _for_, _if_, _on_, _after_, _before_, _with_, _that_, _and_,
+         _in_, _to_, _from_, _by_, _via_
+      2. Fall back to last underscore (word boundary) before limit
+      3. Hard chop at max_len as last resort
+
+    The goal: names end at a meaningful phrase rather than mid-word or mid-clause.
+    """
+    if len(title) <= max_len:
+        # Even if within limit, strip unclosed parens
+        return _strip_unclosed_paren(title)
+
+    # Define clause-boundary keywords (surrounded by underscores = word boundaries)
+    # Ordered from strongest break signal to weakest
+    _clause_breaks = [
+        '_when_', '_if_', '_after_', '_before_', '_once_', '_until_',
+        '_for_', '_on_', '_with_', '_that_', '_and_', '_but_',
+        '_in_', '_to_', '_from_', '_by_', '_via_', '_as_',
+    ]
+
+    # Strategy 1: Find the LAST clause boundary in the sweet zone (60% to 100% of max_len)
+    # Prefer breaking later (closer to max_len) for maximum info retention.
+    _sweet_start = int(max_len * 0.55)
+    best_break = -1
+    for kw in _clause_breaks:
+        # Search from the end of the sweet zone backwards
+        pos = title.rfind(kw, _sweet_start, max_len)
+        if pos > best_break:
+            best_break = pos
+
+    if best_break > _sweet_start:
+        # Cut just before the clause boundary keyword
+        return _strip_unclosed_paren(title[:best_break].rstrip('_-,'))
+
+    # Strategy 2: Find last underscore (word boundary) before max_len
+    cut_pos = title.rfind('_', 0, max_len)
+    if cut_pos > int(max_len * 0.5):
+        return _strip_unclosed_paren(title[:cut_pos].rstrip('_-,'))
+
+    # Strategy 3: Hard chop
+    return _strip_unclosed_paren(title[:max_len].rstrip('_-,'))
+
+
+def _strip_unclosed_paren(title: str) -> str:
+    """Remove trailing unclosed parenthesis content from a title.
+    E.g. 'foo_(single-bucket' → 'foo'
+    """
+    import re as _re
+    # If there's a '(' without a matching ')' at the end, strip from the '(' onwards
+    if '(' in title and title.count('(') > title.count(')'):
+        title = _re.sub(r'_?\([^)]*$', '', title)
+    return title.rstrip('_-,')
+
+
 def _transform_to_scenario_title(raw_text: str, feature_name: str) -> str:
     """Transform raw AC text into a proper test scenario title.
 
@@ -1597,15 +1697,11 @@ def _transform_to_scenario_title(raw_text: str, feature_name: str) -> str:
     if not text.lower().startswith(('verify ', 'validate ', 'for ')):
         text = 'Verify %s' % text
 
-    # ── Final truncation at 95 chars, word boundary ──
-    # (outer tc_builder budget is 100 — this pre-truncation leaves room for cleanup)
-    if len(text) > 95:
-        # Find last space before position 95
-        cut_pos = text.rfind(' ', 0, 95)
-        if cut_pos > 30:
-            text = text[:cut_pos]
-        else:
-            text = text[:95]
+    # ── Final truncation using smart boundary detection ──
+    # (outer tc_builder budget is 150 — this pre-truncation keeps titles clean)
+    if len(text) > 140:
+        # Use space-based version of smart truncate for pre-underscore text
+        text = _smart_truncate_title(text.replace(' ', '_'), 140).replace('_', ' ')
 
     # Clean trailing punctuation/artifacts
     text = text.rstrip(' —-,.:')
@@ -1718,7 +1814,9 @@ def _build_preconditions(dim_name: str, value: str, channel: str) -> str:
 
 
 def _classify_feature_intent(jira, deep_mine_result, log: Callable = print) -> Dict:
-    """Classify feature as API-only, UI-only, or dual-path (API+UI).
+    """DEPRECATED: Legacy intent classifier. Primary routing uses classify_feature().
+    This function only provides supplementary channel/device hints for dual-path generation.
+    Do NOT use its classification output for routing decisions.
 
     Analyzes:
       - Jira summary components (NSLNM=API, MWTGNBOP=UI, INTG=Integration)
@@ -2225,7 +2323,7 @@ def _build_ui_scenario_tc(
             steps.append(TestStep(
                 step_num=step_num,
                 summary='Verify: %s' % validation[:80],
-                expected=validation[:100] if validation else 'Expected behavior confirmed',
+                expected=validation if validation else 'Expected behavior confirmed',
                 data_reference='Scenario validation: %s' % title[:40],
             ))
         else:
@@ -2497,6 +2595,7 @@ def _validate_step_quality(
     # ── Enforce step count bounds: 4–15 ──
     # Allow up to 15 steps for evidence-based TCs with explicit verification points.
     # Evidence TCs often verify multiple attributes across multiple screens.
+    # Typically 4-8 for API TCs, up to 15 for evidence-based TCs.
     max_steps = 15
     if len(enriched_steps) > max_steps:
         enriched_steps = enriched_steps[:max_steps]
@@ -2903,7 +3002,7 @@ def _build_ui_scenario_tc_enriched(
                 steps.append(TestStep(
                     step_num=step_num,
                     summary='Verify: %s' % raw[:80],
-                    expected='Condition met: %s' % raw[:100],
+                    expected='Condition met: %s' % raw,
                     data_reference='AC text verification',
                 ))
 

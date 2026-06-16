@@ -339,6 +339,8 @@ def extract_dimensions(
     # For API/hybrid features, generate the full 7-state matrix as scenarios
     # This ensures line-state coverage is never missed regardless of what Chalk has
     _classification = (classification or '').lower()
+    _is_provisioning = False  # BUG-2 fix: initialize before try block
+    _contract = None          # BUG-3 fix: initialize before try block
     if _classification in ('api', 'hybrid', ''):
         try:
             from .test_analyst import generate_state_transition_matrix
@@ -353,7 +355,8 @@ def extract_dimensions(
             _provisioning_kws = [
                 'activate', 'deactivate', 'hotline', 'suspend', 'restore', 'reset',
                 'change sim', 'change device', 'change rateplan', 'swap mdn', 'port-in',
-                'port-out', 'reconnect', 'provisioning', 'change feature',
+                'port-out', 'reconnect', 'provisioning', 'change feature', 'change-feature',
+                'de-priorit', 'deprioritiz', 'throttl', 'nc_deprior',
             ]
             _ctx_check = ('%s %s' % (_feature_title, _desc)).lower()
             _is_provisioning = any(kw in _ctx_check for kw in _provisioning_kws)
@@ -393,8 +396,8 @@ def extract_dimensions(
         try:
             from .test_analyst import generate_partial_failure_matrix
 
-            # Re-use the contract already resolved for D1
-            _pf_contract = _contract if '_contract' in dir() else None
+            # Reuse D1's contract if available; resolve fresh only if D1 was skipped
+            _pf_contract = _contract
             if _pf_contract is None:
                 from .integration_contract import resolve_operation as _rop
                 _pf_contract = _rop(_feature_title, description=_ctx_check)
@@ -459,18 +462,14 @@ def extract_dimensions(
 
             # A2: Idempotency
             _a2_scenarios = generate_idempotency_tcs(_feat_short, _feature_id, log=log)
-            _a2_added = sum(
-                1 for s in _a2_scenarios
-                if s.title.lower().strip() not in _existing_set
-                and not scenarios.append(s)  # append returns None → truthy via walrus workaround
-            )
-            # Cleaner loop
+            _a2_added = 0
             for _sc in _a2_scenarios:
                 if _sc.title.lower().strip() not in _existing_set:
                     scenarios.append(_sc)
                     _existing_set.add(_sc.title.lower().strip())
-            if _a2_scenarios:
-                log('[DIM-EXTRACT]   A2 Idempotency: %d TCs injected' % len(_a2_scenarios))
+                    _a2_added += 1
+            if _a2_added:
+                log('[DIM-EXTRACT]   A2 Idempotency: %d TCs injected' % _a2_added)
 
             # A3: Concurrency
             _a3_scenarios = generate_concurrency_tcs(_feat_short, _feature_id, log=log)
@@ -846,6 +845,125 @@ def _group_ac_items_with_children(ac_items: List[str], subtask_key: str) -> List
             i += 1
 
     return results
+
+
+def _clean_ac_title(ac_text: str) -> str:
+    """Clean an AC line into a usable scenario title.
+
+    1. Collapse newlines, carriage returns, tabs, and runs of colons/whitespace to a single space.
+    2. Strip leading bullets/numbering.
+    3. Truncate on a word boundary (last space before 130 chars) — never mid-word.
+    4. Remove trailing punctuation fragments (dangling prepositions, unclosed parens).
+    """
+    # Collapse whitespace/newlines/tabs/special chars
+    cleaned = re.sub(r'[\r\n\t]+', ' ', ac_text)
+    cleaned = re.sub(r':\s+', ': ', cleaned)  # normalize ":\n\n" → ": "
+    cleaned = re.sub(r'\s{2,}', ' ', cleaned).strip()
+    # Strip leading bullets
+    cleaned = re.sub(r'^[\s]*(?:[-*•]\s*|\d+[.)]\s*)', '', cleaned).strip()
+
+    if len(cleaned) <= 130:
+        return cleaned
+
+    # Find last space before position 130 to cut on word boundary
+    cut = cleaned.rfind(' ', 0, 130)
+    if cut > 60:
+        cleaned = cleaned[:cut]
+    else:
+        cleaned = cleaned[:130]
+
+    # Strip trailing dangling prepositions, articles, conjunctions, unclosed parens
+    _danglers = re.compile(
+        r'\s+(?:of|the|a|an|in|on|to|for|by|with|and|or|but|that|from|as|at|is|are|was|has|its|dur|during|r)\s*$',
+        re.IGNORECASE
+    )
+    # Apply twice to catch double-danglers (e.g., "...reached 100% of the")
+    cleaned = _danglers.sub('', cleaned)
+    cleaned = _danglers.sub('', cleaned)
+    # Strip trailing unclosed parenthesis content: "...(single-bucket" → "..."
+    cleaned = re.sub(r'\s*\([^)]*$', '', cleaned)
+    # Clean trailing punctuation artifacts
+    cleaned = cleaned.rstrip(' .,;:-–—')
+
+    return cleaned
+
+
+def _derive_steps_hint_from_ac(ac_text: str, ac_lower: str) -> list:
+    """Derive domain-specific steps_hint from a subtask AC line.
+
+    For de-prioritization/notification-driven ACs, generates meaningful steps
+    instead of leaving steps_hint=[] which forces the generic template router.
+
+    Returns list of step strings, or [] if no domain match (falls to router).
+    """
+    # De-prioritization: OFF notification at BCD reset
+    if any(kw in ac_lower for kw in ['off notification', 'send an off', 'mhs_pfo_off', 'pfo_off']):
+        if 'bcd' in ac_lower or 'reset' in ac_lower:
+            return [
+                'Verify subscriber is in de-prioritized state (NC_DEPRIOR active)',
+                'Trigger BCD reset — Mediation emits OFF/MHS_PFO_OFF notification to NSL',
+                'Verify NSL removes NC_DEPRIOR via change-feature API',
+                'Verify throttle flag flipped Y → N',
+                'Verify: %s' % ac_text[:80],
+            ]
+        elif 'plan' in ac_lower or 'upgrade' in ac_lower:
+            return [
+                'Verify subscriber is in de-prioritized state (NC_DEPRIOR active)',
+                'Subscriber upgrades to plan with sufficient PDL — Mediation emits OFF notification',
+                'Verify NSL removes NC_DEPRIOR via change-feature API',
+                'Verify: %s' % ac_text[:80],
+            ]
+        # Generic OFF notification
+        return [
+            'Verify subscriber is in de-prioritized state (NC_DEPRIOR provisioned)',
+            'Trigger condition that causes Mediation to send OFF notification to NSL',
+            'Verify NSL processes OFF notification and removes NC_DEPRIOR',
+            'Verify: %s' % ac_text[:80],
+        ]
+
+    # De-prioritization: ON notification / 100% bucket trigger
+    if any(kw in ac_lower for kw in ['on notification', '100%', 'mhs_pfo_on', 'pfo_on', 'de-priorit', 'nc_deprior']):
+        if 'throttle' in ac_lower and ('flag' in ac_lower or 'n ' in ac_lower or 'y ' in ac_lower):
+            return [
+                'Verify current throttle flag state for subscriber in Mediation DB',
+                'Trigger the de-prioritization event (or removal) per AC',
+                'Verify throttle flag transitions to expected state per AC: %s' % ac_text[:60],
+                'Verify only applicable subscribers are affected (per-line, not per-account)',
+            ]
+        return [
+            'Set up TMO subscriber with active line in SIT',
+            'Trigger 100%% usage consumption — Mediation sends ON/MHS_PFO_ON notification to NSL',
+            'Verify NSL dual-bucket gate: NC_DEPRIOR provisioned only when BOTH buckets at 100%% in same BCD',
+            'Verify: %s' % ac_text[:80],
+        ]
+
+    # Notification format/content ACs (TC18/19/20/21 type).
+    # Match either an explicit 'notification ... format/content' AC, OR a
+    # notification-payload field rule that omits the word 'notification'
+    # (e.g. "Promo/CBRS related fields should be 0", "All fields in the attached sample...").
+    _is_notif_format = (
+        ('notification' in ac_lower and any(kw in ac_lower for kw in [
+            'format', 'content', 'field', 'same as', 'sample', 'promo', 'cbrs', 'pass-through',
+        ]))
+        or any(kw in ac_lower for kw in [
+            'promo/cbrs', 'cbrs', 'attached sample', 'all fields',
+        ])
+    )
+    if _is_notif_format:
+        steps = [
+            'Capture a sample TMO notification (ON/OFF or MHS_PFO_ON/OFF) emitted by Mediation to NSL',
+            'Compare the TMO notification structure field-by-field against the VZW notification format (reference sample / Solution Doc §30.7)',
+            'Verify the TMO Notification Response contains every field listed in the attached sample — none missing',
+        ]
+        if 'promo' in ac_lower or 'cbrs' in ac_lower:
+            steps.append('Verify Promo/CBRS-related fields are set to 0 until available')
+        if 'pass-through' in ac_lower or 'pass through' in ac_lower:
+            steps.append('Verify both pass-through and Mediation-generated notifications carry the updated format')
+        steps.append('Verify: %s' % ac_text[:80])
+        return steps
+
+    # No domain match — return empty (will go through step_templates router)
+    return []
 
 
 def _derive_title_from_ac(ac_text: str) -> str:
@@ -1476,6 +1594,11 @@ def _extract_dimensions_from_jira(
     product_matches = PRODUCT_PATTERN.findall(all_text)
     if product_matches:
         unique_products = []
+        # Context check: in notification/mediation features, "hotspot" means MHS data bucket, not device type
+        _feature_title_lower = (jira.summary if jira else '').lower()
+        _is_notif_feature = any(kw in _feature_title_lower for kw in [
+            'de-priorit', 'deprioritiz', 'throttle', 'dpfo', 'nc_deprior', 'notification', 'mediation',
+        ])
         for p in product_matches:
             # Normalize: map plural/variant to canonical form
             p_lower = p.lower().rstrip('s')
@@ -1488,6 +1611,9 @@ def _extract_dimensions_from_jira(
             elif p_lower.startswith('wearable'):
                 cap = 'Wearable'
             elif p_lower.startswith('hotspot'):
+                # In notification-driven features, "hotspot" = MHS data bucket, not a device type
+                if _is_notif_feature:
+                    continue  # Skip — not a product dimension for this feature
                 cap = 'Hotspot'
             elif p_lower == 'iot':
                 cap = 'IoT'
@@ -1495,9 +1621,10 @@ def _extract_dimensions_from_jira(
                 cap = p.capitalize()
             if cap not in unique_products:
                 unique_products.append(cap)
-        tr = create_traceability('Jira AC', jira.key, 'Products in AC: ' + ', '.join(unique_products))
-        dimensions.append(Dimension(name='product', values=unique_products, source=tr))
-        items_detail.append('Products: %s' % ', '.join(unique_products))
+        if unique_products:
+            tr = create_traceability('Jira AC', jira.key, 'Products in AC: ' + ', '.join(unique_products))
+            dimensions.append(Dimension(name='product', values=unique_products, source=tr))
+            items_detail.append('Products: %s' % ', '.join(unique_products))
 
     # ── Channels mentioned in AC ──
     channel_matches = CHANNEL_PATTERN.findall(all_text)
@@ -1659,17 +1786,26 @@ def _extract_dimensions_from_subtasks(
             )
             # Determine category from component type
             category = 'Happy Path'
-            if any(neg_word in ac_lower for neg_word in ['error', 'fail', 'reject', 'invalid', 'denied', 'off']):
+            # Gate: "off" alone is too broad — "OFF notification" / "send an OFF" is positive
+            # de-prioritization removal, not an error. Only match 'off' as negative when it
+            # means "access denied" / "turned off" (not notification context).
+            _neg_keywords = ['error', 'fail', 'reject', 'invalid', 'denied']
+            _is_off_notification = ('off notification' in ac_lower or 'off notif' in ac_lower
+                                    or 'send an off' in ac_lower or 'mhs_pfo_off' in ac_lower
+                                    or 'pfo_off' in ac_lower)
+            if not _is_off_notification:
+                _neg_keywords.append('off')
+            if any(neg_word in ac_lower for neg_word in _neg_keywords):
                 category = 'Negative'
             elif any(edge_word in ac_lower for edge_word in ['edge', 'boundary', 'timeout', 'concurrent']):
                 category = 'Edge Case'
 
             scenarios.append(ExtractedScenario(
-                title=ac_text[:120],
+                title=_clean_ac_title(ac_text),
                 validation=ac_text,
                 category=category,
                 source=tr,
-                steps_hint=[],
+                steps_hint=_derive_steps_hint_from_ac(ac_text, ac_lower),
             ))
 
         # Extract input types from subtask text (summary + AC + user story)
@@ -1772,17 +1908,30 @@ def _extract_dimensions_from_parsed_docs(
             continue
 
         # ── Skip evidence/result docs for product dimension extraction ──
-        # Unit testing docs, service grouping reports, test proofs contain product mentions
-        # in passing (e.g. "tested Phone device") — these should NOT drive dimension expansion.
-        # Only extract product dimensions from actual test plans / HLD / feature specs.
+        # Unit testing docs, service grouping reports, test proofs, UI docs, HTML progress
+        # reports contain product mentions in passing — NOT dimension expansion sources.
         _filename_lower = (getattr(doc, 'filename', '') or '').lower()
-        _is_evidence_doc = any(kw in _filename_lower for kw in [
-            'unit testing', 'unit_testing', 'unit test',
-            'service grouping', 'service_grouping',
-            'test proof', 'test_proof', 'testproof',
-            'test result', 'test_result',
-            'sit_', 'uat_', 'retest',
-        ])
+        _is_evidence_doc = (
+            # File extension: HTML attachments from progress/bug tickets always evidence
+            _filename_lower.endswith('.html')
+            # File suffix patterns: output/result/proof docs are evidence
+            or _filename_lower.endswith('_output.docx')
+            or _filename_lower.endswith('_result.docx')
+            or _filename_lower.endswith('_proof.docx')
+            or any(kw in _filename_lower for kw in [
+                'unit testing', 'unit_testing', 'unit test',
+                'unit_test',
+                'service grouping', 'service_grouping',
+                'test proof', 'test_proof', 'testproof',
+                'test result', 'test_result',
+                'sit_', 'uat_', 'retest',
+                ' - ui',          # e.g. "NBOP - TMO - Reset Plan - UI.docx"
+                'nbop - tmo',     # any NBOP-TMO doc (screen evidence)
+                'nbop-tmo',
+                'progression',    # SIT-NBOP-PROGRESSION docs
+                'screenshot',
+            ])
+        )
 
         all_text = ' '.join(doc.paragraphs or [])
         all_lower = all_text.lower()

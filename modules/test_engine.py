@@ -37,6 +37,9 @@ class TestCase:
     label: str = ''
     category: str = 'Happy Path'
     test_category: str = ''  # 8-category framework label (Cat1-Cat8)
+    grounding_score: int = -1
+    traceability: Optional[Dict] = None
+    dimension_values: Dict = field(default_factory=dict)
 
 
 @dataclass
@@ -190,7 +193,7 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print, deep_mine_res
                 s = s.replace('transaction records', 'transaction report')
                 s = s.replace('nsl db', 'subscriber data')
                 s = s.replace('nsl fetches', 'system fetches')
-                s = s.replace('nsl ', 'system ')
+                s = re.sub(r'\bnsl\b', 'system', s)
                 s = s.replace('system db', 'subscriber data')
                 s = s.replace('→', '-').replace('—', '-')
                 s = s.replace(' - ', ' ').replace('- ', ' ').replace(' -', ' ')
@@ -1016,6 +1019,19 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print, deep_mine_res
     _before_qg = len(suite.test_cases)
     suite.test_cases = _quality_gate(suite.test_cases, feature_short, jira.key, log)
     log('[ENGINE]   Quality gate: %d → %d TCs' % (_before_qg, len(suite.test_cases)))
+
+    # Step 8c-E2E: Inject E2E lifecycle TC if none exists and feature has enough happy paths
+    # This synthesizes one full-cycle TC from the existing happy-path scenarios
+    _has_e2e = any(tc.category in ('E2E', 'End-to-End') for tc in suite.test_cases)
+    _happy_paths = [tc for tc in suite.test_cases if tc.category == 'Happy Path']
+    if not _has_e2e and len(_happy_paths) >= 3:
+        try:
+            _e2e_tc = _synthesize_e2e_lifecycle(suite.test_cases, jira.key, feature_short, log)
+            if _e2e_tc:
+                suite.test_cases.append(_e2e_tc)
+                log('[ENGINE]   E2E lifecycle TC injected (synthesized from %d happy paths)' % len(_happy_paths))
+        except Exception as _e2e_err:
+            log('[ENGINE]   E2E synthesis skipped: %s' % str(_e2e_err)[:80])
 
     # Step 8c2: LIFECYCLE FILTER — remove unwanted TCs for lifecycle features
     # For Hotline/Suspend/Deactivate features, remove:
@@ -2279,7 +2295,7 @@ def _deduplicate_tcs(existing_tcs, new_tcs, log=print):
         s = s.replace('transaction records', 'transaction report')
         s = s.replace('nsl db', 'subscriber data')
         s = s.replace('nsl fetches', 'system fetches')
-        s = s.replace('nsl ', 'system ')
+        s = re.sub(r'\bnsl\b', 'system', s)
         s = s.replace('system db', 'subscriber data')
         s = s.replace('→', '-').replace('—', '-')
         s = s.replace(' - ', ' ').replace('- ', ' ').replace(' -', ' ')
@@ -4863,6 +4879,17 @@ def _quality_gate(test_cases, feature_name, feature_id, log=print):
         }
         if tc.category and tc.category.lower() in _cat_map:
             tc.category = _cat_map[tc.category.lower()]
+        # Safety net: if category is a long sentence (>40 chars), it's scenario text, not a label
+        elif tc.category and len(tc.category) > 40:
+            _cat_lower = tc.category.lower()
+            if 'negative' in _cat_lower or 'error' in _cat_lower or 'fail' in _cat_lower:
+                tc.category = 'Negative'
+            elif 'e2e' in _cat_lower or 'end-to-end' in _cat_lower:
+                tc.category = 'E2E'
+            elif 'edge' in _cat_lower:
+                tc.category = 'Edge Case'
+            else:
+                tc.category = 'Happy Path'
 
         # ── FIX: Ensure preconditions start with numbered format ──
         if tc.preconditions and not re.match(r'^\d+[\.\t]', tc.preconditions.strip()):
@@ -5082,6 +5109,88 @@ def _salvage_tc_name_v2(raw_name, feature_name):
         clean = raw_name[:70].rstrip('.').strip()
         return 'Validate %s %s.' % (feature_name, clean)
     return None
+
+def _synthesize_e2e_lifecycle(test_cases, feature_id: str, feature_name: str, log=print):
+    """Synthesize an E2E lifecycle TC by chaining key happy-path scenarios.
+
+    Picks the 3-5 most significant happy-path TCs and creates a single
+    end-to-end TC that chains their core actions into a lifecycle flow:
+      setup → trigger → verify → removal/reset → confirm clean state
+
+    Returns a single TestCase or None if synthesis is not possible.
+    """
+    happy_paths = [tc for tc in test_cases if tc.category == 'Happy Path']
+    negatives = [tc for tc in test_cases if tc.category == 'Negative']
+
+    if len(happy_paths) < 3:
+        return None
+
+    # Pick key lifecycle stages from happy paths (first few are usually core flow)
+    # and one negative for the "error recovery" stage
+    _core_hps = happy_paths[:4]
+    _recovery = negatives[0] if negatives else None
+
+    # Build E2E steps by extracting the first step from each core TC
+    steps = []
+    step_num = 1
+
+    # Step 1: Setup/preconditions
+    steps.append(TestStep(
+        step_num=step_num,
+        summary='E2E Setup: Prepare subscriber line in Active state with valid SIT test data',
+        expected='Subscriber line is active and all preconditions are met for %s' % feature_name,
+    ))
+    step_num += 1
+
+    # Steps 2-5: Chain core happy path actions
+    for hp_tc in _core_hps:
+        # Extract the core intent from the TC summary
+        _intent = (hp_tc.summary or '').replace(feature_id + '_', '').replace('_', ' ')
+        _intent = _intent[:100].strip()
+        if hp_tc.steps:
+            _expected = hp_tc.steps[0].expected or 'Operation completes successfully'
+        else:
+            _expected = 'Operation completes successfully'
+        steps.append(TestStep(
+            step_num=step_num,
+            summary='E2E Stage %d: %s' % (step_num - 1, _intent),
+            expected=_expected[:120],
+        ))
+        step_num += 1
+
+    # Optional: Error recovery stage
+    if _recovery and _recovery.steps:
+        _neg_intent = (_recovery.summary or '').replace(feature_id + '_', '').replace('_', ' ')[:80]
+        steps.append(TestStep(
+            step_num=step_num,
+            summary='E2E Error Recovery: Verify graceful handling when %s' % _neg_intent,
+            expected='System handles error gracefully without corrupting state',
+        ))
+        step_num += 1
+
+    # Final step: Confirm clean state
+    steps.append(TestStep(
+        step_num=step_num,
+        summary='E2E Final: Verify subscriber line returns to expected end-state after full lifecycle',
+        expected='Line state is consistent, no orphaned features, all downstream systems in sync',
+    ))
+
+    tc = TestCase(
+        summary='%s_E2E_Full_%s_Lifecycle' % (feature_id, feature_name.replace(' ', '_')[:40]),
+        description='End-to-end lifecycle test covering the full %s flow: '
+                    'setup → core operations → error recovery → clean state verification. '
+                    'Validates the complete chain across all systems.' % feature_name,
+        preconditions='1.\tActive TMO subscriber line in SIT environment\n'
+                      '2.\tAll APIs accessible and authenticated\n'
+                      '3.\tFull end-to-end connectivity available (NSL, Apollo, TMO, Mediation)',
+        steps=steps,
+        story_linkage=feature_id,
+        label=feature_id,
+        category='E2E',
+    )
+    tc.priority = 'P1'
+    return tc
+
 
 _TEST_DATA_HINTS = {
     'mdn': 'Test Data: Use 10-digit MDN from SIT environment (e.g., 3125551234)',

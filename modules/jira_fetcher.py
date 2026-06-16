@@ -1,12 +1,22 @@
 """
 jira_fetcher.py — Fetch ANY Jira issue via Playwright browser session + REST API.
 Downloads attachments. Extracts acceptance criteria from custom fields.
+
+V8.1: REST-first path added. Uses direct REST API when cookies are available,
+falls back to browser-based page.evaluate(fetch(...)) on failure.
 """
+import sys
+import re
 import time
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Any
 from .config import JIRA_BASE_URL, JIRA_REST_V2, ATTACHMENTS, PAGE_LOAD_TIMEOUT_MS, NETWORK_IDLE_TIMEOUT_MS
+
+# Add shared module path for REST clients
+_SHARED_PATH = str(Path(__file__).resolve().parent.parent.parent / 'shared')
+if _SHARED_PATH not in sys.path:
+    sys.path.insert(0, _SHARED_PATH)
 
 
 @dataclass
@@ -46,6 +56,157 @@ class JiraIssue:
 def _wait(page, timeout=NETWORK_IDLE_TIMEOUT_MS):
     try: page.wait_for_load_state('networkidle', timeout=timeout)
     except Exception: pass  # Timeout is expected for slow pages — not an error
+
+
+# ================================================================
+# POST-FETCH ENRICHMENT (Fix: AC-from-description + comment rules +
+# TEST-ONLY/Cancelled subtask filtering). Applies to BOTH the browser
+# and REST fetch paths so behaviour is identical regardless of route.
+# ================================================================
+
+# Confirmed-decision markers in comments worth promoting to acceptance criteria.
+_COMMENT_RULE_MARKERS = [
+    'nothing needed', 'does not need to', 'do not need to', 'does not send',
+    'should not', 'must not', 'no notification', 'not required', 'no requirement',
+    'nsl expects', 'only requirement', 'no impact', 'no changes', 'not need to send',
+]
+
+# Subtasks that are NOT functional requirements — duplicates / infra / cancelled.
+_TESTONLY_MARKERS = ['test only', 'test-only', 'test us', 'testus', 'test-us']
+
+
+def _strip_jira_markup(text: str) -> str:
+    """Strip Jira wiki markup ({panel}, {color}, *bold*, [text|url]) to plain text."""
+    if not text:
+        return ''
+    t = text.replace('\r\n', '\n').replace('\r', '\n')
+    t = re.sub(r'\{panel[^}]*\}', '', t, flags=re.IGNORECASE)
+    t = re.sub(r'\{color[^}]*\}', '', t, flags=re.IGNORECASE)
+    t = re.sub(r'\{[^}]*\}', '', t)               # any remaining {..} macro
+    t = re.sub(r'\[([^|\]]+)\|[^\]]+\]', r'\1', t)  # [text|url] -> text
+    t = t.replace('*', '')                         # bold markers ONLY — keep _ and + so NC_DEPRIOR / MHS_PFO_OFF / UNL+ survive
+    t = t.replace('&nbsp;', ' ')                   # non-breaking spaces
+    return t
+
+
+def _extract_ac_from_description(description: str) -> str:
+    """Derive acceptance criteria from a Jira description when there is no
+    dedicated AC custom field. Pulls the explicit 'Acceptance Criteria' section
+    AND inline requirement bullets (shall/must/no-notification/auto-renew/etc.)."""
+    if not description:
+        return ''
+    clean = _strip_jira_markup(description)
+    collected = []
+
+    # 1. Explicit "Acceptance Criteria:" section → following bullet/numbered lines.
+    m = re.search(r'acceptance criteria\s*:?\s*\n(.+?)(?:\n\s*\n\s*\n|reference\s*:|\Z)',
+                  clean, re.IGNORECASE | re.DOTALL)
+    if m:
+        for line in m.group(1).split('\n'):
+            line = line.strip(' -•\t')
+            if len(line) > 15:
+                collected.append(line)
+
+    # 2. Inline requirement bullets anywhere in the description.
+    # Domain-noun guard: only promote a line as AC if it references a domain concept.
+    # This prevents generic prose sentences containing 'should'/'must' from becoming AC.
+    _DOMAIN_NOUNS_AC = ['notification', 'mbo', 'nbop', 'nsl', 'qci', 'feature', 'bcd',
+                        'deprioriti', 'de-prioriti', 'provision', 'subscriber', 'tmo',
+                        'med', 'throttle', 'slo', 'rate plan', 'agent', 'line', 'device',
+                        'sim', 'imei', 'iccid', 'mdn', 'api', 'syniverse', 'hotline',
+                        'activation', 'deactivation', 'port', 'rateplan']
+    rule_markers = ['shall ', 'must ', 'should ', 'no new notification', 'no impacts',
+                    'auto renew', 'auto-renew', 'de-prioritiz', 'deprioritiz',
+                    'remove the qci', 'keep them deprioritized', 'no changes',
+                    'change-feature', 'change feature']
+    for line in clean.split('\n'):
+        s = line.strip(' -•\t')
+        low = s.lower()
+        # Skip narrative/non-requirement lines that merely mention the keywords.
+        if low.startswith(('background', 'story points', 'reference', 'as part of the sb mvno')):
+            continue
+        if len(s) > 20 and any(mk in low for mk in rule_markers):
+            # Domain-noun check: line must reference at least one domain concept
+            if any(n in low for n in _DOMAIN_NOUNS_AC):
+                collected.append(s)
+
+    # Deduplicate, preserve order.
+    seen, out = set(), []
+    for c in collected:
+        k = c.lower()
+        if k not in seen:
+            seen.add(k)
+            out.append('- ' + c)
+    return '\n'.join(out)
+
+
+def _extract_rules_from_comments(comments) -> List[str]:
+    """Mine confirmed business rules (must-not / nothing-needed decisions) from comments.
+
+    A sentence is promoted only when it is substantive (>= 30 chars) AND references
+    a domain noun — this drops bare confirmation fragments like 'No, nothing needed'
+    or 'No, not required.' that carry no testable content on their own."""
+    _DOMAIN_NOUNS = ['notification', 'mbo', 'nbop', 'nsl', 'qci', 'feature', 'bcd',
+                     'deprioriti', 'de-prioriti', 'provision', 'subscriber', 'tmo',
+                     'med', 'throttle', 'slo', 'rate plan', 'agent']
+    rules = []
+    for c in comments or []:
+        body = c.get('body', '') if isinstance(c, dict) else ''
+        body = _strip_jira_markup(body)
+        for sent in re.split(r'(?<=[.?!])\s+|\n', body):
+            s = sent.strip(' -•\t')
+            low = s.lower()
+            if (len(s) >= 30
+                    and any(mk in low for mk in _COMMENT_RULE_MARKERS)
+                    and any(n in low for n in _DOMAIN_NOUNS)):
+                rules.append(s)
+    seen, out = set(), []
+    for r in rules:
+        k = r.lower()
+        if k not in seen:
+            seen.add(k)
+            out.append(r)
+    return out
+
+
+def _is_noise_subtask(st: Dict) -> bool:
+    """True for subtasks that are NOT functional requirements:
+    TEST ONLY / Test US duplicates, or Cancelled stories."""
+    summary = (st.get('summary', '') or '').lower()
+    status = (st.get('status', '') or '').lower()
+    if status == 'cancelled':
+        return True
+    return any(mk in summary for mk in _TESTONLY_MARKERS)
+
+
+def enrich_issue_post_fetch(issue: 'JiraIssue', log=print) -> 'JiraIssue':
+    """Apply the three source-quality fixes after a fetch, on either path:
+      1. AC-from-description when no AC custom field was found ('Jira AC: 0' fix).
+      2. Promote confirmed must-not rules from comments into the AC.
+      3. Drop TEST-ONLY / Test US / Cancelled subtasks (source-level de-dup)."""
+    try:
+        if not (issue.acceptance_criteria or '').strip():
+            derived = _extract_ac_from_description(issue.description or '')
+            if derived:
+                issue.acceptance_criteria = derived
+                log('[JIRA] ✅ AC derived from description (%d chars, %d items)' % (
+                    len(derived), derived.count('\n') + 1))
+
+        comment_rules = _extract_rules_from_comments(getattr(issue, 'comments', []) or [])
+        if comment_rules:
+            block = '\n'.join('- [Confirmed in comments] ' + r for r in comment_rules)
+            issue.acceptance_criteria = ((issue.acceptance_criteria or '') + '\n' + block).strip()
+            log('[JIRA] ✅ %d confirmed rule(s) mined from comments → AC' % len(comment_rules))
+
+        before = len(issue.subtasks or [])
+        kept = [st for st in (issue.subtasks or []) if not _is_noise_subtask(st)]
+        if before - len(kept) > 0:
+            issue.subtasks = kept
+            log('[JIRA] 🧹 Dropped %d TEST-ONLY/Cancelled subtask(s); %d real remain' % (
+                before - len(kept), len(kept)))
+    except Exception as e:
+        log('[JIRA] ⚠️ post-fetch enrichment skipped: %s' % str(e)[:80])
+    return issue
 
 
 def fetch_jira_issue(page, issue_key: str, log=print) -> JiraIssue:
@@ -140,7 +301,7 @@ def fetch_jira_issue(page, issue_key: str, log=print) -> JiraIssue:
                     });
                     if (!r.ok) return null;
                     return await r.json();
-                }''', f'{page.url.split("/browse")[0]}/rest/api/2/issue/{li["key"]}')
+                }''', f'{JIRA_REST_V2}/issue/{li["key"]}')
                 if li_result and li_result.get('fields'):
                     lf = li_result['fields']
                     li['description'] = lf.get('description', '') or ''
@@ -300,6 +461,7 @@ def fetch_jira_issue(page, issue_key: str, log=print) -> JiraIssue:
             except Exception as e:
                 log(f'[JIRA]   ⚠️ Subtask attachment fetch failed: {str(e)[:60]}')
 
+    enrich_issue_post_fetch(issue, log)
     return issue
 
 
@@ -394,3 +556,86 @@ def download_attachments(page, issue: JiraIssue, log=print) -> List[Path]:
         except Exception as e:
             log(f'[JIRA] ⚠️ Failed: {att.filename} — {e}')
     return paths
+
+
+# ============================================================
+# REST-FIRST WRAPPER (V8.1 — try REST, fall back to browser)
+# ============================================================
+
+def fetch_jira_issue_rest(issue_key: str, log=print) -> Optional[JiraIssue]:
+    """Try to fetch a Jira issue via direct REST API (no browser needed).
+
+    Returns:
+        JiraIssue if REST succeeds, None if it fails (caller should use browser).
+    """
+    try:
+        from rest_clients import JiraRestClient
+
+        client = JiraRestClient(logger_fn=log)
+        if not client.health_check():
+            return None
+
+        rest_issue = client.fetch_issue(issue_key, log=log)
+        if not rest_issue:
+            return None
+
+        # Convert JiraIssueREST → JiraIssue (same fields, different class)
+        issue = JiraIssue(
+            key=rest_issue.key,
+            summary=rest_issue.summary,
+            description=rest_issue.description,
+            status=rest_issue.status,
+            priority=rest_issue.priority,
+            issue_type=rest_issue.issue_type,
+            assignee=rest_issue.assignee,
+            reporter=rest_issue.reporter,
+            labels=rest_issue.labels,
+            components=rest_issue.components,
+            fix_versions=rest_issue.fix_versions,
+            acceptance_criteria=rest_issue.acceptance_criteria,
+            linked_issues=rest_issue.linked_issues,
+            subtasks=rest_issue.subtasks,
+            comments=rest_issue.comments,
+            custom_fields=rest_issue.custom_fields,
+            raw_json=rest_issue.raw_json,
+            pi=rest_issue.pi,
+            channel=rest_issue.channel,
+        )
+        # Convert attachments
+        for a in rest_issue.attachments:
+            issue.attachments.append(JiraAttachment(
+                filename=a.filename, size=a.size,
+                mime_type=a.mime_type, url=a.url, author=a.author))
+
+        enrich_issue_post_fetch(issue, log)
+        log(f'[JIRA-REST] ✅ {issue.key} fetched via REST ({len(issue.subtasks)} subtasks, {len(issue.linked_issues)} links)')
+        return issue
+    except Exception as e:
+        log(f'[JIRA-REST] Failed: {e} — will use browser')
+        return None
+
+
+def download_attachments_rest(issue: JiraIssue, log=print) -> List[Path]:
+    """Download attachments via REST (no browser needed).
+
+    Returns:
+        List of local paths for downloaded files.
+    """
+    try:
+        from rest_clients import JiraRestClient
+
+        client = JiraRestClient(logger_fn=log)
+        paths = []
+        for att in issue.attachments:
+            save = ATTACHMENTS / f'{issue.key}_{att.filename}'
+            log(f'[JIRA-REST] Downloading {att.filename} ({att.size // 1024}KB)...')
+            if client.download_attachment(att.url, save):
+                att.local_path = save
+                paths.append(save)
+                log(f'[JIRA-REST] ✅ Saved: {save.name}')
+            else:
+                log(f'[JIRA-REST] ⚠️ Failed: {att.filename}')
+        return paths
+    except Exception as e:
+        log(f'[JIRA-REST] Attachment download failed: {e}')
+        return []

@@ -6,6 +6,13 @@ Used by test_engine.py, tc_templates.py, and TSG_Dashboard_V7.0.py.
 # Keywords in Jira summary that indicate a CR/bug fix
 _CR_SUMMARY_KEYWORDS = ['cr -', 'cr:', 'cr ', 'bug', 'defect', 'not working', 'hotfix', 'fix -', 'fix:']
 
+# Regex patterns for more precise CR detection in summary
+_CR_SUMMARY_PATTERNS = [
+    r'\bfix\b',          # "Fix" as a standalone word (e.g., "Address Mapping Fix in API")
+    r'\bcr\b',           # "CR" as standalone word
+    r'\bpatch\b',        # "Patch" as standalone word
+]
+
 # Jira issue types that indicate a CR/bug fix
 _CR_ISSUE_TYPES = {'bug', 'defect', 'cr', 'incident', 'problem'}
 
@@ -30,6 +37,11 @@ def is_cr_or_bug(summary='', issue_type='', description='', labels=None):
     
     # Check summary keywords
     if any(kw in _summary_lower for kw in _CR_SUMMARY_KEYWORDS):
+        return True
+    
+    # Check summary regex patterns (more precise word-boundary matching)
+    import re
+    if any(re.search(pat, _summary_lower) for pat in _CR_SUMMARY_PATTERNS):
         return True
     
     # Check issue type

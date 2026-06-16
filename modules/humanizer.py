@@ -252,11 +252,19 @@ def dedup_and_merge(test_cases, log=print, threshold=0.85):
         # Skip table-derived TCs — they represent distinct test matrix rows
         if hasattr(test_cases[i], '_from_table') and test_cases[i]._from_table:
             continue
+        # Skip workflow-split TCs — they represent distinct API workflows that must be tested individually
+        _i_summary_lower = test_cases[i].summary.lower()
+        if 'verify cr fix applies to' in _i_summary_lower or 'workflow for' in _i_summary_lower:
+            continue
         for j in range(i + 1, len(test_cases)):
             if j in to_remove:
                 continue
             # Skip table-derived TCs from being merged
             if hasattr(test_cases[j], '_from_table') and test_cases[j]._from_table:
+                continue
+            # Skip workflow-split TCs from being merged
+            _j_summary_lower = test_cases[j].summary.lower()
+            if 'verify cr fix applies to' in _j_summary_lower or 'workflow for' in _j_summary_lower:
                 continue
             sim = _step_similarity(test_cases[i], test_cases[j])
             if sim >= threshold:

@@ -56,6 +56,10 @@ def get_step_chain(sc_title, sc_validation, feature_context, feature_type=''):
     if feature_type in ('notification',):
         if _is_negative(t):
             return _negative_steps(sc_title, sc_validation, t)
+        # Content/format/field ACs get concrete payload-verification steps,
+        # NOT the generic trigger→KAFKA boilerplate.
+        if _is_notification_content(t):
+            return _notification_content_steps(sc_title, sc_validation)
         return _notification_steps(sc_title, sc_validation)
 
     # Check negative/error FIRST — but Sync Key Info negatives get their own handler
@@ -120,6 +124,8 @@ def get_step_chain(sc_title, sc_validation, feature_context, feature_type=''):
     # Then specific feature types
     if _is_swap_mdn(t, ctx):
         return _swap_mdn_steps(sc_title, sc_validation, t)
+    if _is_port_out(t, ctx):
+        return _port_out_steps(sc_title, sc_validation, t)
     if _is_activation(t, ctx):
         return _activation_steps(sc_title, sc_validation, t)
     if _is_change_sim(t, ctx):
@@ -130,11 +136,15 @@ def get_step_chain(sc_title, sc_validation, feature_context, feature_type=''):
         return _change_rateplan_steps(sc_title, sc_validation, t)
     if _is_change_feature(t, ctx):
         return _change_feature_steps(sc_title, sc_validation, t)
+    if _is_deprioritization(t, ctx):
+        return _deprioritization_steps(sc_title, sc_validation, t)
     if _is_report(t, ctx):
         return _report_steps(sc_title, sc_validation)
     if _is_inquiry(t, ctx):
         return _inquiry_steps(sc_title, sc_validation, t)
     if _is_notification(t, ctx):
+        if _is_notification_content(t):
+            return _notification_content_steps(sc_title, sc_validation)
         return _notification_steps(sc_title, sc_validation)
     if _is_api_flow(t, ctx):
         return _api_flow_steps(sc_title, sc_validation)
@@ -160,6 +170,10 @@ def _is_swap_mdn(t, ctx):
 def _is_activation(t, ctx):
     return any(kw in t for kw in ['activat', 'port-in']) and 'deactivat' not in t
 
+def _is_port_out(t, ctx):
+    """Detect Port-Out scenarios (Solicited, Unsolicited, Update Port-Out)."""
+    return any(kw in t for kw in ['port-out', 'port out', 'portout', 'unsolicited port'])
+
 def _is_deactivation(t, ctx):
     return 'deactivat' in t or 'disconnect' in t
 
@@ -167,13 +181,52 @@ def _is_change_sim(t, ctx):
     return 'change sim' in t or ('change' in t and ('iccid' in t or 'sim' in ctx))
 
 def _is_change_bcd(t, ctx):
-    return 'bcd' in t or 'dpfo' in t or 'bill cycle' in t or 'reset day' in t
+    # Gate: "BCD reset" in a notification/mediation/de-prioritization context is NOT a Change-BCD operation.
+    # Only match when the AC is actually about changing the bill cycle date, not about BCD-triggered events.
+    _bcd_kws = 'bcd' in t or 'dpfo' in t or 'bill cycle' in t or 'reset day' in t
+    if not _bcd_kws:
+        return False
+    # Exclude: if context is de-prioritization/notification and the AC is about "at BCD reset, send OFF"
+    _is_mediation_context = any(kw in t for kw in [
+        'off notification', 'on notification', 'mhs_pfo', 'de-priorit', 'deprioritiz',
+        'throttle', 'nc_deprior', 'send an off', 'send an on', 'at the time of bcd',
+        'mediation', 'notification to nsl', 'bcd cycle', 'bill cycle day',
+        'same bill cycle', 'same bcd', 'cross-bcd', 'cross bcd',
+    ])
+    if _is_mediation_context:
+        return False
+    # Exclude: if the feature context is de-prioritization/mediation
+    _is_deprioritization_feature = any(kw in ctx for kw in [
+        'de-priorit', 'deprioritiz', 'throttle', 'nc_deprior', 'mediation',
+    ])
+    if _is_deprioritization_feature and 'change bcd' not in t:
+        return False
+    return True
 
 def _is_change_rateplan(t, ctx):
     return 'rateplan' in t or 'rate plan' in t or 'plan code' in t
 
 def _is_change_feature(t, ctx):
     return 'change feature' in t or 'add feature' in t or 'remove feature' in t or 'reset feature' in t
+
+
+def _is_deprioritization(t, ctx):
+    """Detect de-prioritization / throttle / NC_DEPRIOR scenarios.
+    These involve Mediation ON/OFF notifications, BCD-reset OFF, plan-upgrade removal."""
+    # Primary: title contains explicit de-prior keywords
+    _title_match = any(kw in t for kw in [
+        'de-priorit', 'deprioritiz', 'nc_deprior', 'throttle flag',
+        'mhs_pfo_on', 'mhs_pfo_off', 'pfo_on', 'pfo_off',
+    ])
+    # Secondary: feature context is de-prior AND title has notification-related keywords
+    _ctx_match = (
+        any(kw in ctx for kw in ['de-priorit', 'deprioritiz', 'nc_deprior'])
+        and any(kw in t for kw in [
+            'off notification', 'on notification', 'bcd reset', 'throttle',
+            'notification to nsl', 'send an off', 'send an on', '100%',
+        ])
+    )
+    return _title_match or _ctx_match
 
 def _is_syniverse_flow(t, ctx):
     """Detect Syniverse integration scenarios — CreateSubscriber, RemoveSubscriber, SwapIMSI, etc."""
@@ -226,13 +279,20 @@ def _is_network_reset(t, ctx):
 
 def _is_ui_network_reset(t, ctx=''):
     """Detect UI-based Network Reset scenarios (trigger via NBOP portal)."""
-    return any(kw in t for kw in [
+    if any(kw in t for kw in [
         'network reset via nbop', 'network reset through nbop',
         'reset via nbop', 'reset through nbop',
         'nbop network reset', 'ui: network reset',
         'ui verify: network reset', 'validate network reset through nbop',
         'perform network reset via nbop', 'perform network reset operation via nbop',
-    ])
+    ]):
+        return True
+    # Fallback: broader matching for real Chalk titles
+    if 'network' in t and 'reset' in t and ('nbop' in t or 'nbop' in ctx):
+        return True
+    if 'reset network' in t and 'nbop' in (t + ' ' + ctx):
+        return True
+    return False
 
 def _is_inquiry(t, ctx):
     """Detect inquiry/query features — read-only operations that return data."""
@@ -247,12 +307,28 @@ def _is_notification(t, ctx):
     return any(kw in t for kw in ['notification', 'suppress', 'dpfo', 'usage',
                                    'throttle', 'speed reduction'])
 
+def _is_notification_content(t):
+    """Notification payload/format/field ACs (VZW parity, field sample, Promo/CBRS,
+    pass-through) — these need field-level verification, not generic trigger steps."""
+    return any(kw in t for kw in [
+        'content and format', 'same content', 'same format', 'all fields',
+        'attached sample', 'notification response', 'promo', 'cbrs',
+        'pass-through', 'pass through', 'fields should be 0',
+        'vzw notification', 'verizon notification', 'notification method and format',
+    ])
+
 def _is_kafka_event(t, ctx):
     """Detect Kafka/BI event features — verified via Century Report EVENT_MESSAGES table."""
     return any(kw in t for kw in ['kafka', 'bi kafka', 'event message', 'networkprovider',
                                    'network provider', 'bi event', 'tmo indicator'])
 
 def _is_ui_flow(t, ctx):
+    # Domain exclusions — these scenarios mention NBOP but should NOT route to UI template
+    _domain_exclusions = ['nc_deprior', 'de-priorit', 'throttle flag', 'kafka', 'bi kafka',
+                          'century report', 'change-feature', 'change feature',
+                          'notification to nsl', 'mhs_pfo', 'provision']
+    if any(kw in t for kw in _domain_exclusions):
+        return False
     # Strong UI indicators in the title — always route to UI regardless of channel
     # These are explicit UI visibility/accessibility checks
     _strong_ui = any(kw in t for kw in ['menu is visible', 'menu is accessible', 'menu is displayed',
@@ -382,6 +458,30 @@ def _activation_steps(title, validation, t):
     return steps
 
 
+def _port_out_steps(title, validation, t):
+    """Port-Out: Solicited/Unsolicited/Update — MBO notification + Syniverse RemoveSubscriber."""
+    val = _sanitize_val(validation, title) or 'Port-Out completed. Subscriber removed from NSL and Syniverse'
+    _is_unsolicited = 'unsolicited' in t
+    steps = [
+        ('Step 1: %s Port-Out request received by NSL' % ('Unsolicited' if _is_unsolicited else 'Solicited'),
+         'NSL accepts Port-Out request. Transaction initiated'),
+        ('Step 2: Verify NSL sends deactivation notification to MBO',
+         'MBO notified of subscriber port-out. Subscriber flagged for removal'),
+        ('Step 3: Verify NSL triggers Syniverse RemoveSubscriber',
+         'Syniverse RemoveSubscriber executed. Subscriber removed from Syniverse'),
+        ('Step 4: Verify NSL updates line status to Deactivated/Ported-Out',
+         'Line status changed to Ported-Out in NSL DB'),
+        ('Step 5: Verify ITMBO and EMM notified of port-out',
+         'ITMBO and EMM receive port-out notification'),
+        ('Step 6: Download Century Report and verify all backend calls',
+         val),
+    ]
+    if _is_unsolicited:
+        steps.insert(1, ('Step 1b: Verify NSL validates port-out eligibility (line must be Active)',
+                         'Port-Out eligibility confirmed — line is Active and eligible'))
+    return steps
+
+
 def _change_sim_steps(title, validation, t):
     """Change SIM: V6 pipeline - 4 steps + NE Portal + Validate SG."""
     val = _sanitize_val(validation, title) or 'Change SIM completed. New ICCID reflected in NBOP and TMO Portal'
@@ -470,6 +570,113 @@ def _change_feature_steps(title, validation, t):
         ('Verify feature compatibility rules enforced (non-compatible features blocked)',
          'Feature compatibility validated per business rules'),
     ]
+
+
+def _deprioritization_steps(title, validation, t):
+    """De-prioritization / NC_DEPRIOR / Throttle steps.
+
+    Domain logic:
+      - Mediation sends ON/MHS_PFO_ON when subscriber hits 100% of a bucket
+      - NSL provisions NC_DEPRIOR via change-feature when BOTH buckets hit 100% in same BCD
+      - Mediation sends OFF/MHS_PFO_OFF at BCD reset or plan upgrade
+      - NSL removes NC_DEPRIOR; throttle flag flips N
+      - Must NOT cross bill cycle boundaries
+    """
+    val = _sanitize_val(validation, title) or 'De-prioritization state updated correctly per Mediation notification'
+
+    # Determine which sub-flow this AC describes
+    _t = t  # already lowercased by caller
+    _is_off = 'off' in _t and ('notification' in _t or 'bcd' in _t or 'reset' in _t)
+    _is_on = ('on notification' in _t or '100%' in _t or 'mhs_pfo_on' in _t) and not _is_off
+    _is_throttle = 'throttle' in _t
+
+    if _is_off:
+        # BCD-reset OFF or plan-upgrade OFF path
+        # Extract specific notification type and bucket from title for precision
+        _is_mhs_pfo = 'mhs_pfo' in _t or 'mhs pfo' in _t or 'mhs data' in _t or 'hotspot' in _t
+        _is_primary = 'primary' in _t or 'pdl' in _t or ('data use' in _t and 'mhs' not in _t)
+        _is_plan_upgrade = 'plan' in _t and ('upgrade' in _t or 'change' in _t)
+        _is_bcd = 'bcd' in _t or 'bill cycle' in _t or 'reset' in _t
+
+        if _is_mhs_pfo:
+            _notif_type = 'MHS_PFO_OFF'
+            _bucket = 'Mobile Hotspot (MHS)'
+            _trigger = 'BCD reset for MHS bucket'
+        elif _is_primary:
+            _notif_type = 'OFF'
+            _bucket = 'Primary Data (PDL)'
+            _trigger = 'BCD reset for Primary Data bucket'
+        elif _is_plan_upgrade:
+            _notif_type = 'OFF (plan upgrade)'
+            _bucket = 'both buckets (plan now sufficient)'
+            _trigger = 'Rate plan upgrade to sufficient PDL'
+        else:
+            _notif_type = 'OFF/MHS_PFO_OFF'
+            _bucket = 'Primary Data and/or MHS'
+            _trigger = 'BCD reset or plan upgrade'
+
+        return [
+            ('Step 1: Precondition — Subscriber is de-prioritized: NC_DEPRIOR active, throttle flag=Y, %s at 100%%' % _bucket,
+             'Subscriber confirmed in de-prioritized state. %s bucket was at 100%% when NC_DEPRIOR was provisioned.' % _bucket),
+            ('Step 2: Trigger: %s — Mediation emits %s notification to NSL for this subscriber' % (_trigger, _notif_type),
+             'NSL receives %s notification with correct MDN, notification type=%s, BCD cycle reference' % (_notif_type, _notif_type)),
+            ('Step 3: Verify NSL invokes change-feature API to REMOVE NC_DEPRIOR from the line (autoRenew=F)',
+             'NC_DEPRIOR SLO removed from the line. Apollo NE confirms removal. Notification type that triggered: %s' % _notif_type),
+            ('Step 4: Verify Mediation updates throttle flag from Y → N for this subscriber',
+             'Throttle flag = N in Mediation DB. Subscriber no longer de-prioritized. Triggered by: %s' % _notif_type),
+            ('Step 5: Verify only THIS subscriber receives removal — other lines on same account unaffected',
+             val),
+        ]
+    elif _is_on:
+        # 100% bucket notification ON path
+        # Extract which bucket hit 100%
+        _is_mhs = 'mhs' in _t or 'hotspot' in _t or 'mhs_pfo_on' in _t
+        _is_primary = 'primary' in _t or 'pdl' in _t or ('data' in _t and 'mhs' not in _t)
+
+        if _is_mhs:
+            _notif_type = 'MHS_PFO_ON'
+            _bucket = 'Mobile Hotspot (MHS)'
+        elif _is_primary:
+            _notif_type = 'ON'
+            _bucket = 'Primary Data (PDL)'
+        else:
+            _notif_type = 'ON/MHS_PFO_ON'
+            _bucket = 'Primary Data or MHS'
+
+        return [
+            ('Step 1: Mediation detects subscriber hits 100%% of %s bucket' % _bucket,
+             '%s notification generated with correct MDN, bucket type=%s' % (_notif_type, _bucket)),
+            ('Step 2: Mediation sends %s notification to NSL within same BCD' % _notif_type,
+             'NSL receives %s notification; records %s=100%% state for this MDN' % (_notif_type, _bucket)),
+            ('Step 3: Verify NSL gate logic — NC_DEPRIOR NOT provisioned until BOTH buckets are at 100%% in same BCD',
+             'NC_DEPRIOR not yet active; NSL holds partial state (%s=100%%) awaiting second bucket trigger' % _bucket),
+            ('Step 4: Second bucket hits 100%% in same BCD → NSL provisions NC_DEPRIOR via change-feature (autoRenew=F)',
+             val),
+        ]
+    elif _is_throttle:
+        # Throttle flag management
+        return [
+            ('Step 1: Verify throttle flag current state in Mediation DB for target subscriber',
+             'Throttle flag state confirmed (Y=de-prioritized, N=normal)'),
+            ('Step 2: Trigger the notification event (ON or OFF) from Mediation to NSL',
+             'NSL processes notification and updates NC_DEPRIOR state accordingly'),
+            ('Step 3: Verify throttle flag updated to expected value (Y→N on OFF, N→Y on provision)',
+             'Throttle flag matches expected state per notification type'),
+            ('Step 4: Verify only de-prioritized subscribers (throttle=Y) receive OFF at BCD reset',
+             val),
+        ]
+    else:
+        # General de-prioritization AC (notification format, content, field validation)
+        return [
+            ('Step 1: Identify the notification type and verify it matches TMO de-prioritization spec',
+             'Notification type confirmed (ON/OFF/MHS_PFO_ON/MHS_PFO_OFF) per feature spec'),
+            ('Step 2: Verify notification payload contains all required fields per TMO spec',
+             'All mandatory fields present: MDN, notification type, timestamp, BCD cycle info'),
+            ('Step 3: Verify notification format matches VZW/TMO equivalence rules (same content/structure)',
+             'Notification format and field ordering matches TMO standard per spec'),
+            ('Step 4: Verify NSL processes the notification and updates subscriber state correctly',
+             val),
+        ]
 
 
 def _deactivation_steps(title, validation, t):
@@ -616,12 +823,20 @@ def _syniverse_integration_steps(title, validation, t):
 
 def _sync_subscriber_steps(title, validation, t):
     """Sync Subscriber: YL/YD/YM/YP/PL state change flows.
-    Based on Chalk matrix for MWTGPROV-4009."""
+    Based on Chalk matrix for MWTGPROV-4009.
+    BUG-ST-3 fix applied: all direction detection uses word-boundary regex
+    (re.search(r'\\bactive\\b')) instead of fragile substring .index()."""
     val = _sanitize_val(validation, title) or 'Sync completed. NBOP reflects updated subscriber state'
     t_low = t.lower()
 
     # Determine the state change direction and Syniverse action
-    if 'active' in t_low and 'deactive' in t_low and 'deactive' in t_low[t_low.index('active'):]:
+    # Use word-boundary regex to find standalone 'active' (not inside 'deactive')
+    _active_match = re.search(r'\bactive\b', t_low)
+    _deactive_match = re.search(r'\bdeactive\b', t_low)
+    _active_pos = _active_match.start() if _active_match else -1
+    _deactive_pos = _deactive_match.start() if _deactive_match else -1
+
+    if _active_pos >= 0 and _deactive_pos >= 0 and _active_pos < _deactive_pos:
         # Active → Deactive
         return [
             ('Step 1: Trigger YL Sync Subscriber API with valid LineId and MDN (line currently Active on NSL)',
@@ -638,7 +853,7 @@ def _sync_subscriber_steps(title, validation, t):
             ('Step 6: Verify NBOP reflects Deactive status',
              val),
         ]
-    elif 'deactive' in t_low and 'active' in t_low and 'port' not in t_low:
+    elif _deactive_pos >= 0 and _active_pos >= 0 and _deactive_pos < _active_pos and 'port' not in t_low:
         # Deactive → Active (no port-out)
         return [
             ('Step 1: Trigger YL Sync Subscriber API with valid LineId and MDN (line currently Deactive on NSL)',
@@ -654,7 +869,7 @@ def _sync_subscriber_steps(title, validation, t):
             ('Step 6: Verify NBOP reflects Active status',
              val),
         ]
-    elif 'deactive' in t_low and 'active' in t_low and 'port' in t_low:
+    elif _deactive_pos >= 0 and _active_pos >= 0 and _deactive_pos < _active_pos and 'port' in t_low:
         # Deactive → Active with In Progress Port Out
         return [
             ('Step 1: Trigger YL Sync Subscriber API with valid LineId and MDN (line Deactive, port-out in progress)',
@@ -1159,6 +1374,27 @@ def _inquiry_steps(title, validation, t):
         ]
 
 
+def _notification_content_steps(title, validation):
+    """Notification payload/format verification — concrete field-level checks
+    instead of the generic 'Trigger notification → check KAFKA' boilerplate."""
+    val = _sanitize_val(validation, title) or 'Notification payload matches the required content and format'
+    steps = [
+        ('Capture a sample TMO notification (ON/OFF or MHS_PFO_ON/OFF) emitted by Mediation to NSL',
+         'Notification message captured for field-by-field inspection'),
+        ('Compare the TMO notification structure against the VZW notification format (reference sample / Solution Doc §30.7)',
+         'TMO notification has the same content and format as the VZW notification'),
+        ('Verify every field listed in the attached sample is present in the TMO Notification Response',
+         'All sample fields present in the response; none missing'),
+    ]
+    # Only include Promo/CBRS step if the scenario mentions it
+    if 'promo' in (title + ' ' + (validation or '')).lower() or 'cbrs' in (title + ' ' + (validation or '')).lower():
+        steps.append(('Verify Promo/CBRS-related fields are set to 0 until available',
+                      'Promo/CBRS fields = 0'))
+    steps.append(('Verify both pass-through and Mediation-generated notifications carry the updated format',
+                  val))
+    return steps
+
+
 def _notification_steps(title, validation):
     """Notification: from V6 DPFO/KAFKA flow."""
     val = _sanitize_val(validation, title) or 'Notification processed. All downstream systems updated'
@@ -1360,6 +1596,7 @@ def _default_workflow_steps(title, validation):
     # Try to consult the integration contract for system-specific steps
     try:
         from .integration_contract import resolve_operation
+        from .integration_contract import EXTERNAL_SYSTEMS
         _contract = resolve_operation(title)
         if _contract:
             import re as _re3
@@ -1375,7 +1612,6 @@ def _default_workflow_steps(title, validation):
 
             # Add "MUST CALL" system verification steps from contract
             for sys_name in _contract.must_call[:3]:  # Cap at 3 to avoid bloat
-                from .integration_contract import EXTERNAL_SYSTEMS
                 if sys_name in EXTERNAL_SYSTEMS:
                     sys_obj = EXTERNAL_SYSTEMS[sys_name]
                     if sys_name == 'syniverse' and _contract.syniverse_action not in ('NONE', 'Conditional', ''):
@@ -1388,7 +1624,6 @@ def _default_workflow_steps(title, validation):
 
             # Add "MUST NOT CALL" assertions from contract
             for sys_name in _contract.must_not_call[:2]:  # Cap at 2
-                from .integration_contract import EXTERNAL_SYSTEMS
                 if sys_name in EXTERNAL_SYSTEMS:
                     sys_obj = EXTERNAL_SYSTEMS[sys_name]
                     steps.append(('Step %d: Verify %s is NOT called' % (step_num, sys_obj.name),

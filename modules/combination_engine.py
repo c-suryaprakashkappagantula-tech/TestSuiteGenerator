@@ -168,23 +168,62 @@ def plan_combinations(
 
 
 def _deduplicate_scenarios(scenarios: List[ExtractedScenario]) -> tuple:
-    """Deduplicate scenarios — only remove EXACT title duplicates.
+    """Deduplicate scenarios — remove exact title duplicates AND near-duplicates.
 
-    Chalk scenarios are authored by test architects and are meaningful.
-    Only remove if two scenarios have the EXACT same normalized title.
-    Near-matches are kept — they likely test different things.
+    Phase 1: Exact normalized title match (same as before).
+    Phase 2: 75% word-overlap on meaningful words (4+ chars).
+             Product tokens (phone, tablet, esim, psim, wearable, etc.)
+             are excluded from overlap calculation so product-crossed
+             scenarios are never collapsed.
 
     Returns: (deduped_list, count_removed)
     """
+    import re as _re
+
+    # Product tokens excluded from similarity (these differentiate valid TCs)
+    _PRODUCT_TOKENS = {
+        'phone', 'tablet', 'smartwatch', 'wearable', 'hotspot', 'iot',
+        'esim', 'psim', 'wholesale', 'mobile', 'device',
+    }
+
+    def _meaningful_words(title: str) -> set:
+        """Extract meaningful words (4+ chars, not product tokens) from a title."""
+        words = set(_re.findall(r'\b[a-z]{4,}\b', title.lower()))
+        return words - _PRODUCT_TOKENS
+
+    # Phase 1: Exact title dedup
     seen_titles = set()
-    deduped = []
+    phase1_deduped = []
     for sc in scenarios:
         normalized = _normalize_title(sc.title)
         if not normalized or len(normalized) < 5:
-            continue  # Skip empty/tiny titles
+            continue
         if normalized not in seen_titles:
             seen_titles.add(normalized)
+            phase1_deduped.append(sc)
+
+    # Phase 2: Near-duplicate dedup (75% word overlap)
+    deduped = []
+    for sc in phase1_deduped:
+        sc_words = _meaningful_words(sc.title)
+        if not sc_words or len(sc_words) < 3:
+            deduped.append(sc)  # Too few words to compare — keep
+            continue
+
+        is_near_dup = False
+        for existing in deduped:
+            existing_words = _meaningful_words(existing.title)
+            if not existing_words or len(existing_words) < 3:
+                continue
+            overlap = len(sc_words & existing_words)
+            max_words = max(len(sc_words), len(existing_words))
+            if max_words > 0 and overlap / max_words >= 0.75:
+                is_near_dup = True
+                break
+
+        if not is_near_dup:
             deduped.append(sc)
+
     return deduped, len(scenarios) - len(deduped)
 
 

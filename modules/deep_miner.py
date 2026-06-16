@@ -830,6 +830,11 @@ def _mine_subtask(subtask: Dict, log=print) -> SubtaskMine:
     return mine
 
 
+def mine_subtask(*args, **kwargs):
+    """Public API wrapper for subtask mining."""
+    return _mine_subtask(*args, **kwargs)
+
+
 # ================================================================
 # COMPILE ALL TESTABLE ITEMS
 # ================================================================

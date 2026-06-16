@@ -1,7 +1,7 @@
 """
 TSG_Dashboard_V8.0.py -- Test Suite Generator Dashboard V8.0 (Data-First Engine)
 STANDALONE dashboard — no V7 toggle, no shared engine logic with V7.
-Uses ONLY the V8.0 Data-First Engine for test suite generation.
+Uses ONLY the V9.0 Data-First Engine for test suite generation.
 
 V8.0 = Data-First approach:
   - Dimension Extraction from all data sources
@@ -93,7 +93,7 @@ except Exception:
 # PAGE CONFIG
 # ================================================================
 st.set_page_config(
-    page_title='TSG V8.0 - Data-First Test Suite Generator',
+    page_title='TSG V9.0 - Data-First Test Suite Generator',
     page_icon='https://em-content.zobj.net/source/twitter/408/test-tube_1f9ea.png',
     layout='wide',
     initial_sidebar_state='collapsed',
@@ -201,11 +201,11 @@ _chalk_cached = _cached_chalk_count()
 _db_badge = 'DB: %d features | %d cached' % (_db_stats['feature_count'], _chalk_cached) if _db_stats['feature_count'] > 0 else 'DB: empty'
 st.markdown("""<div class='banner'>
   <div>
-    <div class='title'>TSG V8.0 &mdash; Data-First Test Suite Generator</div>
+    <div class='title'>TSG V9.0 &mdash; Data-First Test Suite Generator</div>
     <div class='sub'>Data-Driven &bull; Full Traceability &bull; Zero-Generic Validation</div>
   </div>
   <div style='display:flex; gap:8px; align-items:center; flex-wrap:wrap;'>
-    <div class='badge'>V8.0</div>
+    <div class='badge'>V9.0</div>
     <div class='badge'>Data-First</div>
     <div class='badge'>Traceability</div>
     <div class='badge'>Batch Mode</div>
@@ -683,7 +683,7 @@ with left:
 
     st.markdown(
         '<div style="color:#64748b;font-size:12px;margin-bottom:10px;">'
-        'V8.0 automatically extracts dimensions from your data sources. '
+        'V9.0 automatically extracts dimensions from your data sources. '
         'Use custom instructions to focus or constrain the generated suite.</div>',
         unsafe_allow_html=True)
 
@@ -780,9 +780,9 @@ with right:
         )
         cli_header.markdown(_strip_html, unsafe_allow_html=True)
 
-        # ── Static log: chronological (oldest→newest), 13px/#cbd5e1 to match theme ──
+        # ── Static log: newest-first (latest at top) ──
         _static_lines = []
-        for _line in ss['logs'][-80:]:   # chronological — no reversed()
+        for _line in reversed(ss['logs'][-80:]):   # reversed = latest first
             _t = _line.strip()
             if not _t:
                 continue
@@ -991,7 +991,7 @@ with right:
 
                                     # 3. Re-number sno on kept TCs
                                     for _ni, tc in enumerate(_kept_tcs, 1):
-                                        tc.sno = _ni
+                                        tc.sno = str(_ni)
 
                                     # 4. Rebuild suite with filtered TCs
                                     import copy as _copy
@@ -1289,9 +1289,9 @@ class LiveLog:
 
         ss['logs'] = list(self.lines)
 
-        # Build structured HTML output — chronological (oldest→newest), 13px base
+        # Build structured HTML output — newest-first (latest at top)
         html_lines = []
-        for line in self.lines[-80:]:    # chronological — no reversed()
+        for line in reversed(self.lines[-80:]):    # reversed = latest first
             html_lines.append(self._format_line(line))
 
         html = (
@@ -1337,7 +1337,7 @@ if history_btn:
         for h in hist[:20]:
             with st.sidebar.expander('%s | %s | %d TCs' % (h['timestamp'][:16], h['feature_id'], h['tc_count'])):
                 st.write('PI: %s' % h.get('pi', 'N/A'))
-                st.write('Engine: V8.0 Data-First')
+                st.write('Engine: V9.0 Data-First')
                 st.write('Steps: %d' % h.get('step_count', 0))
                 st.write('Status: %s' % h.get('status', 'N/A'))
                 fp = Path(h.get('file_path', ''))
@@ -1610,7 +1610,10 @@ if ss.get('_jira_sync_running'):
                         if not _jtitle or _jtitle in ('(no title)', '(no title found on page)'):
                             save_features(ss.get('selected_pi') or '', [(_jfid, jira.summary[:120])])
                             ss['all_pi_features'] = None  # invalidate cache so dropdown refreshes
-                            _cached_load_all_features.clear()
+                            try:
+                                _cached_load_all_features.clear()
+                            except (AttributeError, TypeError):
+                                pass
                         _jsync_msg('[%d/%d] ✅ %s (REST)' % (_ji, _jira_total, _jfid))
                         _jira_ok += 1
                     else:
@@ -1636,7 +1639,10 @@ if ss.get('_jira_sync_running'):
                         if jira and jira.summary and (not _jtitle2 or _jtitle2 in ('(no title)', '(no title found on page)')):
                             save_features(ss.get('selected_pi') or '', [(_jfid2, jira.summary[:120])])
                             ss['all_pi_features'] = None
-                            _cached_load_all_features.clear()
+                            try:
+                                _cached_load_all_features.clear()
+                            except (AttributeError, TypeError):
+                                pass
                         _jsync_msg('[%d/%d] ✅ %s (browser)' % (_ji2, len(_jira_rest_failures), _jfid2))
                         _jira_ok += 1
                     except Exception as _je2:
@@ -1665,7 +1671,10 @@ if ss.get('_jira_sync_running'):
                     if jira and jira.summary and (not _jtitle or _jtitle in ('(no title)', '(no title found on page)')):
                         save_features(ss.get('selected_pi') or '', [(_jfid, jira.summary[:120])])
                         ss['all_pi_features'] = None
-                        _cached_load_all_features.clear()
+                        try:
+                            _cached_load_all_features.clear()
+                        except (AttributeError, TypeError):
+                            pass
                     _jsync_msg('[%d/%d] ✅ %s' % (_ji, _jira_total, _jfid))
                     _jira_ok += 1
                 except Exception as _je:
@@ -1865,11 +1874,11 @@ if run_btn:
                     if _skip_deep_mine:
                         print('[V8] NMNO has %d Business Rules — SKIPPING deep mine entirely (local DB sufficient)' % len(_nmno_pre_check.business_rules), flush=True)
                         # Still create a minimal DeepMineResult with subtask mines
-                        from modules.deep_miner import DeepMineResult, _mine_subtask
+                        from modules.deep_miner import DeepMineResult, mine_subtask
                         deep_mine_result = DeepMineResult(feature_id=feature_id)
                         if jira.subtasks:
                             for _st in jira.subtasks:
-                                _mine = _mine_subtask(_st, log=lambda x: None)
+                                _mine = mine_subtask(_st, log=lambda x: None)
                                 if _mine.ac_items or _mine.testable_rules:
                                     deep_mine_result.subtask_mines.append(_mine)
                             print('[V8] Subtask mines: %d (from Jira cache)' % len(deep_mine_result.subtask_mines), flush=True)
@@ -1888,7 +1897,7 @@ if run_btn:
                     # Block 5: V8 Data-First Engine
                     print('', flush=True)
                     print('[V8] ═══════════════════════════════════════════════════', flush=True)
-                    print('[V8] Block 5: V8.0 Data-First Engine for %s' % feature_id, flush=True)
+                    print('[V8] Block 5: V9.0 Data-First Engine for %s' % feature_id, flush=True)
                     print('[V8] ═══════════════════════════════════════════════════', flush=True)
                     logger.set('%sBlock 5: V8 Data-First Engine %s...' % (_bp, feature_id))
                     options = {
@@ -1994,25 +2003,27 @@ if run_btn:
                     }
                     ss['last_feature_id'] = feature_id
                     ss['last_suite_id'] = output.get('suite_id', '')
-                    ss['_suite_obj'] = suite  # stored for Apply & Re-export in Review panel
+                    if _batch_count == 1:
+                        ss['_suite_obj'] = suite  # stored for Apply & Re-export in Review panel
                     # Store TCs for Review-&-Edit panel
-                    ss['_review_tcs'] = [
-                        {
-                            'sno': tc.sno,
-                            'summary': tc.summary or '',
-                            'category': tc.category or 'Happy Path',
-                            'priority': getattr(tc, 'priority', '') or 'P2',
-                            'preconditions': tc.preconditions or '',
-                            'steps': len(tc.steps),
-                            'grounding': getattr(tc, 'grounding_score', -1),
-                            'source': getattr(getattr(tc, 'traceability', None), 'source_type', '') or '',
-                            'source_id': getattr(getattr(tc, 'traceability', None), 'source_id', '') or '',
-                            'source_text': (getattr(getattr(tc, 'traceability', None), 'extracted_text', '') or '')[:120],
-                            'action': 'keep',
-                        }
-                        for tc in suite.test_cases
-                    ]
-                    ss['_llm_suggestions'] = getattr(suite, '_llm_suggestions', [])
+                    if _batch_count == 1:
+                        ss['_review_tcs'] = [
+                            {
+                                'sno': tc.sno,
+                                'summary': tc.summary or '',
+                                'category': tc.category or 'Happy Path',
+                                'priority': getattr(tc, 'priority', '') or 'P2',
+                                'preconditions': tc.preconditions or '',
+                                'steps': len(tc.steps),
+                                'grounding': getattr(tc, 'grounding_score', -1),
+                                'source': getattr(getattr(tc, 'traceability', None), 'source_type', '') or '',
+                                'source_id': getattr(getattr(tc, 'traceability', None), 'source_id', '') or '',
+                                'source_text': (getattr(getattr(tc, 'traceability', None), 'extracted_text', '') or '')[:120],
+                                'action': 'keep',
+                            }
+                            for tc in suite.test_cases
+                        ]
+                        ss['_llm_suggestions'] = getattr(suite, '_llm_suggestions', [])
 
                     ss['batch_results'].append({
                         'feature_id': feature_id, 'tc_count': output['tc_count'],
@@ -2092,14 +2103,14 @@ if run_btn:
                     ss['exit_report'] = {
                         'title': _title,
                         'items': _batch_summary + [''] + timing_items,
-                        'footer': 'Completed at %s | Duration: %dm %ds | PI: %s | Engine: V8.0 Data-First' % (
+                        'footer': 'Completed at %s | Duration: %dm %ds | PI: %s | Engine: V9.0 Data-First' % (
                             datetime.now().strftime('%Y-%m-%d %H:%M:%S'), m, s, ss.get('selected_pi') or 'Manual'),
                     }
                 else:
                     ss['exit_report'] = {
                         'title': 'V8 Generation Complete — %s' % feature_id,
                         'items': exit_items + [''] + timing_items,
-                        'footer': 'Completed at %s | Duration: %dm %ds | PI: %s | Engine: V8.0 Data-First' % (
+                        'footer': 'Completed at %s | Duration: %dm %ds | PI: %s | Engine: V9.0 Data-First' % (
                             datetime.now().strftime('%Y-%m-%d %H:%M:%S'), m, s, ss.get('selected_pi') or 'Manual'),
                     }
 
@@ -2126,7 +2137,7 @@ if run_btn:
                         'Block: %s' % pe.block_name,
                         'Error: %s' % pe.error_msg[:200],
                     ] + exit_items,
-                    'footer': 'Failed at %s | Duration: %dm %ds | %d/%d features completed | Engine: V8.0' % (
+                    'footer': 'Failed at %s | Duration: %dm %ds | %d/%d features completed | Engine: V9.0' % (
                         datetime.now().strftime('%Y-%m-%d %H:%M:%S'), m, s, _completed, _total),
                 }
                 for _obj_name in ('context', 'browser', 'pw'):
@@ -2155,7 +2166,7 @@ if run_btn:
                 ss['exit_report'] = {
                     'title': 'V8 Generation FAILED — %s (%d/%d completed)' % (feature_id, _completed, _total),
                     'items': _progress_items + exit_items + ['', 'ERROR: %s' % str(e)[:200]],
-                    'footer': 'Failed at %s | Duration: %dm %ds | %d/%d features completed | Engine: V8.0' % (
+                    'footer': 'Failed at %s | Duration: %dm %ds | %d/%d features completed | Engine: V9.0' % (
                         datetime.now().strftime('%Y-%m-%d %H:%M:%S'), m, s, _completed, _total),
                 }
                 for _obj_name in ('context', 'browser', 'pw'):

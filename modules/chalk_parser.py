@@ -56,7 +56,7 @@ class ChalkData:
 
 def _wait(page, timeout=NETWORK_IDLE_TIMEOUT_MS):
     try: page.wait_for_load_state('networkidle', timeout=timeout)
-    except: pass
+    except Exception: pass
 
 
 # ============================================================
@@ -298,7 +298,7 @@ def discover_features_on_pi(page, pi_url: str, log=print) -> List[Tuple[str, str
     log('[CHALK] Navigating to PI page...')
     page.goto(pi_url, timeout=PAGE_LOAD_TIMEOUT_MS, wait_until='commit')
     try: page.wait_for_load_state('domcontentloaded', timeout=15000)
-    except: pass
+    except Exception: pass
     time.sleep(3)
 
     # Expand all tabs on the page so content inside inactive tabs is visible
@@ -487,11 +487,18 @@ def fetch_feature_from_pi(page, pi_url: str, feature_id: str, log=print) -> Chal
         if not has_content:
             log(f'[CHALK]   Short section ({len(feature_lines)} lines), no content — expanding past grouped siblings...')
             # Keep scanning forward: skip sibling feature IDs until we find content
+            # Track visited IDs to prevent over-expansion in grouped features
+            _visited_ids = set()
+            _visited_ids.add(fid)
             expanded_end = len(lines)
             found_content = False
             for i in range(feature_end, len(lines)):
                 ln = lines[i]
                 ln_low = ln.lower().strip()
+                # Track any feature IDs we encounter during expansion
+                _found_ids = re.findall(r'MWTGPROV-\d{3,5}', ln, re.IGNORECASE)
+                for _fid_found in _found_ids:
+                    _visited_ids.add(_fid_found.upper())
                 # If we hit a line with real content (not just another feature ID), start including
                 if not re.match(r'^MWTGPROV-\d{3,5}$', ln.strip(), re.IGNORECASE) and \
                    not re.match(r'^\[.*\].*:.*New MVNO', ln.strip()):
@@ -924,6 +931,8 @@ def _parse_ts_format(lines, data, fid, ts_pattern, log=print):
             if current_scenario:
                 data.scenarios.append(current_scenario)
             current_scenario = ChalkScenario(scenario_id=f'TS_{fid}_{m.group(1)}')
+            # Normalize: MWTGPROV4379 → MWTGPROV-4379 (Chalk pages sometimes omit the hyphen)
+            current_scenario.scenario_id = re.sub(r'(MWTG(?:PROV|MED|NBOP))(\d)', r'\1-\2', current_scenario.scenario_id)
             parts = ln.split('\t')
             if len(parts) >= 2:
                 current_scenario.title = parts[1].strip()
@@ -939,7 +948,9 @@ def _parse_ts_format(lines, data, fid, ts_pattern, log=print):
             # Check for validation and category in tab-separated parts
             for p in parts:
                 p_low = p.strip().lower()
-                if any(cat in p_low for cat in ['happy path', 'edge case', 'negative', 'e2e', 'workflow']):
+                # Only assign category if the text IS a category label (short, ≤40 chars)
+                # Long text containing "workflow" or "e2e" is scenario content, not a category
+                if len(p.strip()) <= 40 and any(cat in p_low for cat in ['happy path', 'edge case', 'negative', 'e2e', 'workflow']):
                     current_scenario.category = p.strip()
                 elif len(p.strip()) > 30 and any(kw in p_low for kw in ['prr output', 'verify', 'should', 'correctly', 'ensure', 'treated']):
                     current_scenario.validation = p.strip()
@@ -1020,7 +1031,9 @@ def _parse_ts_format(lines, data, fid, ts_pattern, log=print):
             parts = [p.strip() for p in ln.split('\t') if p.strip()]
             for p in parts:
                 p_low = p.lower()
-                if any(cat in p_low for cat in ['happy path', 'edge case', 'negative', 'e2e', 'workflow']):
+                # Only assign category if the text IS a category label (short, ≤40 chars)
+                # Long text containing "workflow" or "e2e" is scenario content, not a category
+                if len(p.strip()) <= 40 and any(cat in p_low for cat in ['happy path', 'edge case', 'negative', 'e2e', 'workflow']):
                     current_scenario.category = p.strip()
                 elif _is_section_header_text(p):
                     continue  # never use section headers as validation

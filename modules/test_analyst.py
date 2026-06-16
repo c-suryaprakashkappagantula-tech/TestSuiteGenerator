@@ -85,6 +85,7 @@ def analyze_and_suggest(feature_name: str, feature_id: str,
     # ── Step 5b: CONTRACT-DRIVEN integration thinking ──
     # Instead of per-feature hardcoding, consult the global integration contract.
     # The contract knows which systems each operation touches and which it doesn't.
+    # In-function import to avoid circular dependency with integration_contract
     from .integration_contract import resolve_operation, get_syniverse_assertion, get_must_not_call_systems
     _contract = resolve_operation(fname, description=ctx, ac_text=ctx)
     if _contract:
@@ -157,6 +158,7 @@ def analyze_and_suggest(feature_name: str, feature_id: str,
 
 def _detect_feature_type(fname, ctx):
     """Detect feature type — delegates to classify_feature for consistency."""
+    # In-function import to avoid circular dependency with tc_templates
     from .tc_templates import classify_feature
     # Extract channel from ctx if present (ctx contains all text including channel)
     channel = ''
@@ -177,6 +179,7 @@ def _detect_feature_type(fname, ctx):
 def _detect_lifecycle(fname, ctx):
     """Detect the feature's lifecycle pattern.
     UI features return None — they don't have API lifecycles."""
+    # In-function import to avoid circular dependency with tc_templates
     from .tc_templates import classify_feature
     fc = classify_feature(feature_name=fname, description=ctx, ac_text=ctx)
     if fc.is_ui:
@@ -920,6 +923,11 @@ def _line_state_thinking(fname, ctx, existing):
         pass  # NMNO lookup is best-effort
 
     # Generate one TC per state
+    # ── Consolidate: ONE happy path TC (Active) + ONE negative TC (all reject states) ──
+    # Instead of 7 separate TCs with identical steps, produce 2 consolidated TCs.
+    _allow_states = []
+    _reject_states = []
+
     for state_label, state_key, default_behaviour, fallback_code in FULL_STATE_MATRIX:
         # Determine expected behaviour for this state × operation
         if req_state == 'any':
@@ -931,7 +939,6 @@ def _line_state_thinking(fname, ctx, existing):
         else:
             behaviour = 'reject'
 
-        # Get real error code if available
         error_code = _nmno_state_codes.get(state_key, fallback_code)
 
         # Skip if already covered in existing scenarios
@@ -940,38 +947,50 @@ def _line_state_thinking(fname, ctx, existing):
             continue
 
         if behaviour == 'allow':
-            # Happy path for the required state
-            if state_key == req_state or req_state == 'any':
-                s.append({
-                    'title': 'Verify %s succeeds for line in %s state.' % (fname, state_label),
-                    'description': (
-                        'Trigger %s for a TMO subscriber line in %s state. '
-                        'Verify the operation completes successfully and all downstream systems are updated.' % (fname, state_label)
-                    ),
-                    'category': 'Happy Path',
-                    'reasoning': 'State-transition matrix: %s state should allow %s.' % (state_label, fname),
-                    'test_category': 'Cat1-HappyPath',
-                    'precondition': 'TMO subscriber line in %s state in SIT environment.' % state_label,
-                })
+            _allow_states.append((state_label, error_code))
         else:
-            # Negative: this state should reject the operation
-            error_suffix = (' with error %s' % error_code) if error_code else ''
-            s.append({
-                'title': 'Negative: Verify %s rejected for line in %s state%s.' % (
-                    fname, state_label, error_suffix),
-                'description': (
-                    'Trigger %s for a TMO subscriber line in %s state. '
-                    'Verify the operation is rejected%s. No partial state changes.' % (
-                        fname, state_label,
-                        ' with error code %s' % error_code if error_code else ' with appropriate error'
-                    )
-                ),
-                'category': 'Negative',
-                'reasoning': 'State-transition matrix: %s state must block %s.' % (state_label, fname),
-                'test_category': 'Cat2-InputValidation',
-                'precondition': 'TMO subscriber line in %s state in SIT environment.' % state_label,
-                'expected_error': error_code or 'ERR_INVALID_STATE',
-            })
+            _reject_states.append((state_label, error_code))
+
+    # Generate ONE happy path TC for the first allow state (usually Active)
+    if _allow_states:
+        _state = _allow_states[0][0]
+        s.append({
+            'title': 'Verify %s succeeds for line in %s state.' % (fname, _state),
+            'description': (
+                'Trigger %s for a TMO subscriber line in %s state. '
+                'Verify the operation completes successfully and all downstream systems are updated.' % (fname, _state)
+            ),
+            'category': 'Happy Path',
+            'reasoning': 'State-transition matrix: %s state should allow %s.' % (_state, fname),
+            'test_category': 'Cat1-HappyPath',
+            'precondition': 'TMO subscriber line in %s state in SIT environment.' % _state,
+        })
+
+    # Generate ONE consolidated negative TC for ALL reject states (data-driven)
+    if _reject_states:
+        _state_table = '\n'.join(
+            '  • %s → %s' % (state, code or 'ERR_INVALID_STATE')
+            for state, code in _reject_states
+        )
+        _state_names = ', '.join(s[0] for s in _reject_states)
+        _first_state = _reject_states[0][0]
+        _first_code = _reject_states[0][1] or 'ERR_INVALID_STATE'
+        s.append({
+            'title': 'Negative: Verify %s rejected for non-Active line states (%s).' % (
+                fname, _state_names),
+            'description': (
+                'Data-driven negative test: Trigger %s for a TMO subscriber in each of the following '
+                'non-Active line states and verify rejection with the expected error code.\n\n'
+                'Line State → Expected Error:\n%s\n\n'
+                'For each state: verify operation is rejected, line state remains unchanged, '
+                'no partial updates or downstream calls triggered.' % (fname, _state_table)
+            ),
+            'category': 'Negative',
+            'reasoning': 'State-transition matrix: consolidated negative for all reject states.',
+            'test_category': 'Cat2-InputValidation',
+            'precondition': 'TMO subscriber lines in Suspended, Hotlined, Pending Port-Out, Port-In, Cancelled, and Pre-active states available in SIT.',
+            'expected_error': _first_code,
+        })
 
     # Add wearable state check (always relevant for provisioning operations)
     if 'wearable' not in existing and 'smartwatch' not in existing:
@@ -1217,11 +1236,20 @@ def generate_state_transition_matrix(
         ('Pre-active',       'pre-active',      'reject', 'ERR_INVALID_STATE'),
     ]
 
+    # Detect notification-driven features (de-prioritization, throttle, DPFO)
+    # These are triggered by Mediation notifications, not a direct API call.
+    _fname_lower = fname.lower()
+    _is_notification_driven = any(kw in _fname_lower for kw in [
+        'de-priorit', 'deprioritiz', 'throttle', 'dpfo', 'nc_deprior', 'notification',
+    ])
+
+    # ── Consolidate: ONE happy path (Active) + ONE negative (all reject states) ──
+    _allow_scenarios = []
+    _reject_states_info = []
     scenarios = []
     source_id = 'State-Transition-Matrix-%s' % feature_id
 
     for state_label, state_key, default_behaviour, fallback_code in FULL_STATE_MATRIX:
-        # Determine allow/reject from contract
         if req_state == 'any':
             behaviour = 'allow'
         elif req_state in state_key or state_key in req_state:
@@ -1233,45 +1261,68 @@ def generate_state_transition_matrix(
 
         error_code = _nmno_state_codes.get(state_key, fallback_code)
 
-        try:
-            tr = create_traceability(
-                source_type='Business Rule',
-                source_id=source_id,
-                extracted_text='State-transition matrix: %s state × %s' % (state_label, fname),
-                confidence=0.9,
-            )
-        except Exception:
-            continue
-
         if behaviour == 'allow':
-            title = 'Verify %s succeeds for line in %s state' % (fname, state_label)
-            validation = ('Operation completes successfully. '
-                          'Line remains in %s state. All downstream systems updated.' % state_label)
-            category = 'Happy Path'
+            _allow_scenarios.append((state_label, state_key, error_code))
+        else:
+            _reject_states_info.append((state_label, state_key, error_code))
+
+    try:
+        tr = create_traceability(
+            source_type='Business Rule',
+            source_id=source_id,
+            extracted_text='State-transition matrix: %s' % fname,
+            confidence=0.9,
+        )
+    except Exception:
+        tr = None
+
+    # ONE happy path TC (Active state)
+    if _allow_scenarios and tr:
+        _state = _allow_scenarios[0][0]
+        if _is_notification_driven:
             steps_hint = [
-                'Set up subscriber line in %s state in SIT environment' % state_label,
+                'Set up subscriber line in %s state in SIT environment' % _state,
+                'Simulate Mediation sending 100%% Primary Data + 100%% MHS notifications for the subscriber within same BCD',
+                'Verify NSL provisions NC_DEPRIOR via change-feature API (dual-bucket gate triggered)',
+                'Verify subscriber is de-prioritized — throttle flag=Y, QCI decreased at TMO',
+            ]
+        else:
+            steps_hint = [
+                'Set up subscriber line in %s state in SIT environment' % _state,
                 'Trigger %s operation via API' % fname,
                 'Verify operation completes with HTTP 200/202 and SUCC00',
                 'Verify downstream systems updated (NSL DB, Century Report, NBOP MIG tables)',
             ]
-        else:
-            error_suffix = ' with error %s' % error_code if error_code else ''
-            title = 'Negative: Verify %s rejected for %s line%s' % (fname, state_label, error_suffix)
-            validation = ('Operation rejected%s. Line state unchanged. No partial updates.' % (
-                ' with error code %s' % error_code if error_code else ' with appropriate error'))
-            category = 'Negative'
-            steps_hint = [
-                'Set up subscriber line in %s state in SIT environment' % state_label,
-                'Trigger %s operation via API' % fname,
-                'Verify operation rejected%s' % (
-                    ' — response contains error code %s' % error_code if error_code else ' with error'),
-                'Verify line remains in %s state — no state change occurred' % state_label,
-            ]
-
         scenarios.append(ExtractedScenario(
-            title=title,
-            validation=validation,
-            category=category,
+            title='Verify %s succeeds for line in %s state' % (fname, _state),
+            validation='Operation completes successfully. Line remains in %s state. All downstream systems updated.' % _state,
+            category='Happy Path',
+            source=tr,
+            steps_hint=steps_hint,
+        ))
+
+    # ONE consolidated negative TC (all reject states as data-driven)
+    if _reject_states_info and tr:
+        _state_table = ', '.join('%s(%s)' % (s[0], s[2] or 'ERR_INVALID_STATE') for s in _reject_states_info)
+        _state_names = ', '.join(s[0] for s in _reject_states_info)
+        if _is_notification_driven:
+            steps_hint = [
+                'For EACH state (%s): set up subscriber line in that state in SIT' % _state_names,
+                'Simulate Mediation sending 100%% Primary + MHS notifications for the subscriber',
+                'Verify NSL rejects NC_DEPRIOR provisioning with expected error per state: %s' % _state_table,
+                'Verify line remains in original state — no NC_DEPRIOR provisioned, no throttle flag change',
+            ]
+        else:
+            steps_hint = [
+                'For EACH state (%s): set up subscriber line in that state in SIT' % _state_names,
+                'Trigger %s operation via API' % fname,
+                'Verify operation rejected with expected error per state: %s' % _state_table,
+                'Verify line remains in original state — no state change occurred',
+            ]
+        scenarios.append(ExtractedScenario(
+            title='Negative: Verify %s rejected for non-Active line states (%s)' % (fname, _state_names),
+            validation='Operation rejected for all non-Active states. Expected errors: %s. No partial updates.' % _state_table,
+            category='Negative',
             source=tr,
             steps_hint=steps_hint,
         ))
@@ -1794,29 +1845,21 @@ def generate_idempotency_tcs(
     source_id = 'Idempotency-%s' % feature_id
 
     scenarios = []
+    # Merged: single TC with both sub-scenarios (A: immediate duplicate, B: retry after timeout)
     idempotency_cases = [
         (
             'Verify %s is idempotent — duplicate request rejected or no-op' % fname,
-            'Submit %s request successfully, then submit the identical request again. '
-            'Verify: no duplicate transaction created, or operation is idempotent (safe repeat). '
-            'Transaction History shows exactly one COMPLETED entry.' % fname,
+            '(A) Submit %s request successfully, then submit identical request again immediately — '
+            'verify no duplicate transaction created. '
+            '(B) Submit %s request, simulate timeout (no response), retry same request — '
+            'verify only one transaction committed. No double-commit in either scenario.' % (fname, fname),
             [
-                'Submit %s request successfully (first call)' % fname,
-                'Capture the transaction ID from the first response',
-                'Submit the identical %s request again immediately' % fname,
-                'Verify second request is rejected (duplicate) or returns same result (idempotent)',
-                'Verify Transaction History shows only one COMPLETED transaction — no duplicate',
-            ]
-        ),
-        (
-            'Verify %s does not create duplicate transaction when request retried after timeout' % fname,
-            'Submit %s request, simulate network timeout (no response received). '
-            'Retry the same request. Verify only one transaction is committed.' % fname,
-            [
-                'Submit %s request but intercept/drop the response (simulate timeout)' % fname,
-                'Retry the same %s request with the same payload' % fname,
-                'Verify only one transaction appears in Transaction History',
-                'Verify final state is consistent — no double-commit',
+                '(A) Submit %s request successfully (first call) — capture transaction ID' % fname,
+                '(A) Submit the identical %s request again immediately' % fname,
+                '(A) Verify second request is rejected (duplicate) or returns same result (idempotent)',
+                '(B) Submit %s request but simulate timeout (drop response)' % fname,
+                '(B) Retry the same request with same payload',
+                '(B) Verify only one transaction in Transaction History — no double-commit',
             ]
         ),
     ]
@@ -1871,31 +1914,22 @@ def generate_concurrency_tcs(
     source_id = 'Concurrency-%s' % feature_id
 
     scenarios = []
+    # Merged: single TC covering both parallel + in-flight conflict scenarios
     concurrency_cases = [
         (
-            'Verify %s handles concurrent requests on the same MDN gracefully' % fname,
-            'First request wins or both are serialized. No data corruption. '
-            'Second request either queues or is rejected with appropriate error. '
-            'Transaction History shows no overlapping/conflicting state.',
+            'Verify %s handles concurrent and in-flight requests on the same MDN gracefully' % fname,
+            '(A) Concurrent: Two identical requests submitted simultaneously — first wins, '
+            'second queued or rejected. No data corruption. '
+            '(B) In-flight: Another operation in progress on same MDN — %s either waits or is '
+            'rejected with conflict error. No partial state from either operation.' % fname,
             [
-                'Prepare two identical %s requests for the same MDN' % fname,
-                'Submit both requests simultaneously (parallel API calls)',
-                'Verify at least one request succeeds with HTTP 200',
-                'Verify no data corruption — line state is consistent',
-                'Verify Transaction History shows correct serialization, no duplicate',
-            ]
-        ),
-        (
-            'Verify %s during an in-flight operation on the same line is handled safely' % fname,
-            'If another operation is in progress on the same MDN, '
-            '%s either waits or is rejected with a conflict error. '
-            'No partial state results from either operation.' % fname,
-            [
-                'Trigger a long-running operation on the MDN (e.g., async operation in progress)',
-                'Immediately trigger %s on the same MDN' % fname,
-                'Verify the system detects the conflict',
-                'Verify appropriate handling: queue or reject with ERR_CONCURRENT_OPERATION',
-                'After first operation completes, verify MDN is in correct state',
+                '(A) Prepare two identical %s requests for the same MDN' % fname,
+                '(A) Submit both requests simultaneously (parallel API calls)',
+                '(A) Verify at least one succeeds; no data corruption; Transaction History consistent',
+                '(B) Trigger a long-running operation on the MDN (async in progress)',
+                '(B) Immediately trigger %s on the same MDN' % fname,
+                '(B) Verify conflict detected — queue or reject with ERR_CONCURRENT_OPERATION',
+                '(B) After first operation completes, verify MDN is in correct final state',
             ]
         ),
     ]

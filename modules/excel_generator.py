@@ -142,12 +142,20 @@ def _build_summary_sheet(wb, suite: TestSuite):
     # Feature Details
     _section(r, 'SUITE GUIDE')
     r += 1
+    # Only list sheets that are ACTUALLY generated — mirror the build conditions
+    # in generate_excel() so the guide never advertises a sheet that isn't present.
     _guide_items = [
         ('Summary (this sheet)', 'Overview of the feature, acceptance criteria, coverage breakdown, priority distribution, and data sources.'),
         ('Test Cases', 'All test scenarios with step-by-step actions and expected results. Execute in order — P1 (critical) first.'),
-        ('Traceability', 'Maps each Acceptance Criteria to the test cases that cover it. Green = covered, Red = gap.'),
-        ('Combinations', 'Device/SIM/Network matrix showing which hardware combos each test case should be run on.'),
     ]
+    if getattr(suite, 'ac_traceability', None):
+        _guide_items.append(('Traceability', 'Maps each Acceptance Criteria to the test cases that cover it. Green = covered, Red = gap.'))
+    if hasattr(suite, 'combinations') and getattr(suite, 'combinations', None) and len(suite.combinations) > 1:
+        _guide_items.append(('Combinations', 'Device/SIM/Network matrix showing which hardware combos each test case should be run on.'))
+    if hasattr(suite, 'data_inventory') and getattr(suite, 'data_inventory', None) and getattr(suite.data_inventory, 'sources', None):
+        _guide_items.append(('Data Sources', 'Inventory of every source mined (Chalk, Jira AC, subtasks) and how many testable items each yielded.'))
+    if getattr(suite, '_coverage_scorecard', None) is not None:
+        _guide_items.append(('Coverage Scorecard', 'Risk lenses — line-state matrix, Chalk alignment, category balance, grounding — with an overall risk rating.'))
     _cat_guide = [
         ('Happy Path', 'Core positive scenarios — the feature works as designed with valid inputs and expected conditions.'),
         ('Negative', 'Failure and error scenarios — invalid inputs, system failures, timeouts, rollbacks. Verifies graceful handling.'),
@@ -479,17 +487,28 @@ def _build_testcases_sheet(wb, suite: TestSuite, sheet_name=None, tc_subset=None
                     _gcell.fill = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
                     _gcell.font = Font(name='Calibri', bold=True, size=11, color='9C0006')
                 # Column 12: Test Data sample (MDN, lineId, etc.)
+                # Rotate through available SIT samples per TC to avoid identical data
                 _test_data_str = ''
                 try:
-                    from .test_data_injector import get_operation_sample_request, format_request_sample
+                    from .test_data_injector import get_varied_test_data
                     _td_ctx = getattr(tc, 'dimension_values', {}) or {}
                     _td_api_name = ''
                     if hasattr(tc, 'traceability') and tc.traceability:
                         _td_api_name = (tc.traceability.source_id or '').lower()
-                    _td_sample = get_operation_sample_request(_td_api_name)
-                    _test_data_str = format_request_sample(_td_sample, max_fields=4)
+                    _test_data_str = get_varied_test_data(
+                        tc_index=sheet_idx - 1,
+                        api_name=_td_api_name,
+                        category=getattr(tc, 'category', ''),
+                        dimension_values=_td_ctx,
+                    )
                 except Exception:
-                    pass
+                    # Fallback to old behavior
+                    try:
+                        from .test_data_injector import get_operation_sample_request, format_request_sample
+                        _td_sample = get_operation_sample_request(_td_api_name if '_td_api_name' in dir() else '')
+                        _test_data_str = format_request_sample(_td_sample, max_fields=4)
+                    except Exception:
+                        pass
                 _tdcell = ws.cell(row=row, column=12, value=_test_data_str)
                 _tdcell.alignment = _wrap
                 _tdcell.font = Font(name='Calibri', size=10, italic=True)
