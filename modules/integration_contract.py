@@ -430,6 +430,64 @@ _register(OperationContract(
 ))
 
 _register(OperationContract(
+    operation='Reset Plan',
+    aliases=['reset plan', 'plan reset', 'reset rateplan', 'reset rate plan',
+             'plan reset (pn)', 'pn transaction', 'reset features to plan default'],
+    category='plan_change',
+    must_call=['apollo_ne', 'tmo', 'itmbo', 'emm'],
+    must_not_call=['syniverse'],
+    syniverse_action='NONE',
+    syniverse_condition='PN (Plan Reset) — wholesale plan unchanged, only features reset to plan defaults. Syniverse NOT affected.',
+    verify_points=[
+        'All features reset to plan defaults in NSL DB',
+        'PDL (Plan Default List) values applied correctly',
+        'Century Report shows NO Syniverse outbound call',
+        'ITMBO and EMM notified of feature reset',
+        'NBOP MIG_FEATURE table reflects reset features',
+        'Wholesale plan code unchanged after reset',
+    ],
+    required_line_state='active',
+    transaction_types=['PN'],
+    mandatory_negatives=[
+        'Mismatch in wholesale plan — reject',
+        'Mismatch in features vs PDL — reject',
+        'Mismatch in PDL values — reject',
+        'MDN not 10 digits — reject',
+        'Account validation failure — reject',
+        'Deactivated line — reject',
+    ],
+    device_sensitive=True,
+    sim_sensitive=False,
+))
+
+_register(OperationContract(
+    operation='Fraud SLO',
+    aliases=['fraud', 'fraud slo', 'fraud status', 'put a subscriber line in fraud',
+             'remove fraud', 'fraud hotline'],
+    category='line_state',
+    must_call=['apollo_ne', 'tmo', 'itmbo', 'emm'],
+    must_not_call=['syniverse'],
+    syniverse_action='NONE',
+    syniverse_condition='Fraud SLO is an internal line-state change (similar to hotline) — Syniverse NOT affected.',
+    verify_points=[
+        'Fraud SLO provisioned — line status reflects fraud/hotline state in NSL DB',
+        'Century Report shows NO Syniverse outbound call',
+        'ITMBO and EMM notified of fraud status change',
+        'NBOP reflects fraud-hotlined line',
+        'Removal of Fraud SLO restores prior line state',
+    ],
+    required_line_state='active',
+    transaction_types=['YL'],
+    mandatory_negatives=[
+        'Fraud SLO already applied — reject duplicate',
+        'Deactivated line — reject',
+        'Remove Fraud SLO when not in fraud state — reject',
+    ],
+    device_sensitive=False,
+    sim_sensitive=False,
+))
+
+_register(OperationContract(
     operation='Change Feature',
     aliases=['change feature', 'add feature', 'remove feature', 'reset feature', 'toggle feature',
              'scamblock', 'scam block'],
@@ -545,7 +603,9 @@ _register(OperationContract(
 
 _register(OperationContract(
     operation='Sync Subscriber',
-    aliases=['sync subscriber', 'sync sub', 'subscriber sync'],
+    aliases=['sync subscriber', 'sync sub', 'subscriber sync', 'on demand sync',
+             'on-demand sync', 'ondemand sync', 'on demand-push', 'on-demand-push',
+             'demand sync'],
     category='sync',
     must_call=['apollo_ne', 'tmo'],
     conditional_call={
@@ -837,3 +897,122 @@ def get_all_operations() -> List[OperationContract]:
 def get_operations_by_category(category: str) -> List[OperationContract]:
     """Get all operations in a category."""
     return [op for op in OPERATION_CONTRACTS.values() if op.category == category]
+
+
+# ════════════════════════════════════════════════════════════════════
+#  DOWNSTREAM-SYSTEM VERIFICATION STEP BUILDER
+# ════════════════════════════════════════════════════════════════════
+#  Injects integration-layer verification steps (Service Grouping /
+#  Century Report, Syniverse assertions, NBOP MIG tables, Genesis portal)
+#  into generated TCs so the suite verifies the FULL system chain, not
+#  just the API request/response contract.
+#
+#  Consulted by: tc_builder._build_scenario_tc (and other TC builders)
+#  Goal: close the "domain-awareness" gap vs manual test suites.
+# ════════════════════════════════════════════════════════════════════
+
+# How each external system is verified (verification surface)
+_VERIFY_SURFACE = {
+    'syniverse': 'Century Report Service Grouping',
+    'itmbo': 'Century Report Service Grouping',
+    'emm': 'Century Report Service Grouping',
+    'apollo_ne': 'NE Portal / Century Report',
+    'tmo': 'TMO Genesis Portal',
+    'connection_manager': 'Century Report Service Grouping',
+    'kafka': 'KAFKA topic / BI dashboard',
+    'mediation': 'PRR output file (SFTP)',
+    'amdocs_sftp': 'PRR file on Amdocs SFTP',
+}
+
+
+def build_downstream_verification_steps(
+    contract: 'OperationContract',
+    scenario_category: str = '',
+    existing_step_texts: Optional[List[str]] = None,
+    max_steps: int = 3,
+) -> List[tuple]:
+    """Build downstream-system verification steps from an operation contract.
+
+    Returns a list of ``(summary, expected)`` tuples to append to a TC's steps.
+    Only emits steps for downstream effects NOT already covered by the
+    existing steps, so we never duplicate what the base builder produced.
+
+    Args:
+        contract: The resolved OperationContract for the feature/operation.
+        scenario_category: TC category ('Happy Path', 'Negative', etc.).
+        existing_step_texts: Summaries of steps already in the TC (for dedupe).
+        max_steps: Hard cap on how many verification steps to inject.
+
+    Behaviour:
+        - Positive/happy-path TCs get Service Grouping + Syniverse(+) + NBOP MIG.
+        - Negative TCs get a single "no unintended downstream change" assertion.
+        - Read-only/inquiry operations (no must_call systems) get nothing.
+    """
+    if contract is None:
+        return []
+
+    existing = ' '.join(existing_step_texts or []).lower()
+    cat = (scenario_category or '').lower()
+    is_negative = 'negative' in cat or 'reject' in cat
+    steps: List[tuple] = []
+
+    must_call_systems = get_must_call_systems(contract)
+    syn = get_syniverse_assertion(contract)
+
+    # ── NEGATIVE TCs: assert no unintended downstream side effects ──
+    if is_negative:
+        if 'no downstream' not in existing and 'no state change' not in existing \
+                and 'unchanged' not in existing and 'no syniverse' not in existing:
+            steps.append((
+                'Verify Service Grouping shows NO unintended downstream calls after rejection',
+                'Century Report confirms the operation was rejected cleanly — no outbound calls '
+                'to %s and no state change persisted.'
+                % (', '.join(s.name for s in must_call_systems[:4]) or 'external systems'),
+            ))
+        return steps[:max_steps]
+
+    # ── POSITIVE / HAPPY-PATH TCs: verify the full chain ──
+
+    # 1. Service Grouping (Century Report) — verify must_call systems fired
+    if must_call_systems \
+            and 'service grouping' not in existing \
+            and 'century report' not in existing:
+        sys_names = ', '.join(s.name for s in must_call_systems[:5])
+        steps.append((
+            'Verify Service Grouping (Century Report) shows outbound calls to: %s' % sys_names,
+            'Century Report Service Grouping confirms successful calls to %s with correct '
+            'request/response payloads and SUCCESS status.' % sys_names,
+        ))
+
+    # 2. Syniverse assertion (MUST_CALL or MUST_NOT_CALL) — the dual-assertion pattern
+    if 'syniverse' not in existing:
+        if syn['assert_type'] == 'MUST_CALL' and syn['action'] not in ('NONE', ''):
+            steps.append((
+                'Verify Syniverse %s call is triggered and logged in Service Grouping' % syn['action'],
+                'Syniverse %s call present in Century Report — %s'
+                % (syn['action'], syn['condition'] or 'wholesale subscriber record updated.'),
+            ))
+        elif syn['assert_type'] == 'MUST_NOT_CALL':
+            steps.append((
+                'Verify NO Syniverse call is triggered (dual-assertion negative check)',
+                'Century Report shows NO Syniverse outbound call — %s'
+                % (syn['condition'] or 'this operation does not affect Syniverse.'),
+            ))
+
+    # 3. NBOP MIG tables — verify portal reflects the change
+    if 'nbop mig' not in existing and 'mig table' not in existing and 'nbop reflects' not in existing:
+        steps.append((
+            'Verify NBOP MIG tables reflect the change (Device, SIM, Line, Feature, Transaction History)',
+            'NBOP MIG tables updated correctly — Transaction History row present with the expected '
+            'transaction type and all relevant Device/SIM/Line/Feature fields match expected values.',
+        ))
+
+    # 4. TMO Genesis portal — only if TMO is a downstream and not already covered
+    if 'tmo' in contract.must_call and 'genesis' not in existing and 'tmo portal' not in existing \
+            and len(steps) < max_steps:
+        steps.append((
+            'Verify TMO Genesis portal reflects the updated subscriber state',
+            'TMO Genesis portal shows the subscriber with the correct post-operation state and attributes.',
+        ))
+
+    return steps[:max_steps]

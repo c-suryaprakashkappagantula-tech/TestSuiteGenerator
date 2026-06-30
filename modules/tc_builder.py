@@ -23,6 +23,9 @@ from .data_models_v8 import (
     Dimension, ExtractedScenario, NegativeSpec, CombinationPlan,
     TestStep, TestCase,
 )
+from .integration_contract import (
+    resolve_operation, build_downstream_verification_steps,
+)
 
 
 # ================================================================
@@ -904,6 +907,35 @@ def _build_scenario_tc(
         steps = [TestStep(step_num=1, summary=scenario.title,
                  expected=scenario.validation, data_reference=scenario.source.source_id)]
 
+    # ── Inject downstream-system verification steps (integration-layer depth) ──
+    # Closes the domain-awareness gap: verify Service Grouping / Century Report,
+    # Syniverse dual-assertion, NBOP MIG tables, and TMO Genesis — not just the
+    # API request/response. Only fires for operations with a known integration
+    # contract; read-only/inquiry/UI-only features resolve to None and get nothing.
+    try:
+        _contract = resolve_operation(
+            feature_name,
+            description=(scenario.validation or scenario.title or ''),
+        )
+        if _contract is not None:
+            _existing_texts = [s.summary for s in steps]
+            _ds_steps = build_downstream_verification_steps(
+                _contract,
+                scenario_category=scenario.category,
+                existing_step_texts=_existing_texts,
+                max_steps=3,
+            )
+            for _ds_summary, _ds_expected in _ds_steps:
+                steps.append(TestStep(
+                    step_num=len(steps) + 1,
+                    summary=_ds_summary,
+                    expected=_ds_expected,
+                    data_reference='Integration Contract: %s' % _contract.operation,
+                ))
+    except Exception:
+        # Never let verification enrichment break TC generation
+        pass
+
     # Transform raw AC text into a proper test scenario title
     # Skip transform for state-matrix/partial-failure titles — they're already clean
     _is_generated_title = (
@@ -1164,6 +1196,27 @@ def _build_negative_tc(
                 data_reference='Business Rule: %s' % (neg_spec.source.source_id if neg_spec.source else error_code),
             ),
         ]
+
+    # ── Inject "no unintended downstream change" assertion (negative-path depth) ──
+    try:
+        _neg_contract = resolve_operation(feature_name, description=condition)
+        if _neg_contract is not None:
+            _existing_neg = [s.summary for s in steps]
+            _ds_neg = build_downstream_verification_steps(
+                _neg_contract,
+                scenario_category='Negative',
+                existing_step_texts=_existing_neg,
+                max_steps=1,
+            )
+            for _ds_summary, _ds_expected in _ds_neg:
+                steps.append(TestStep(
+                    step_num=len(steps) + 1,
+                    summary=_ds_summary,
+                    expected=_ds_expected,
+                    data_reference='Integration Contract: %s' % _neg_contract.operation,
+                ))
+    except Exception:
+        pass
 
     return TestCase(
         summary=summary,
