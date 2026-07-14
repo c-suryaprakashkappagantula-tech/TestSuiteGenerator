@@ -280,6 +280,21 @@ def _classify_by_keywords(combined_text: str) -> FeatureClassification:
 # ================================================================
 
 
+_DEGENERATE_TITLE_WORDS = {'verify', 'validate', 'check', 'test', 'confirm', 'ensure',
+                           'the', 'a', 'an', 'that', 'this', 'it', 'is', 'are', 'to', 'of'}
+
+
+def _is_degenerate_title(title: str) -> bool:
+    """True when a scenario title carries no real content — e.g. "Verify", "Verify Verify",
+    "Validate the" — so we don't emit stub steps like 'Verify expected result: Verify' or
+    degenerate TCs named 'Verify_Verify'. A real title must have >=1 meaningful (non-filler) word."""
+    t = re.sub(r'[\s_]+', ' ', (title or '').strip().lower())
+    if len(t) < 6:
+        return True
+    meaningful = [w for w in t.split() if w not in _DEGENERATE_TITLE_WORDS]
+    return len(meaningful) == 0
+
+
 def build_test_cases(
     plan: CombinationPlan,
     jira,
@@ -746,9 +761,14 @@ def _build_scenario_tc(
                 _val_norm = re.sub(r'\s+', ' ', _val_clean.lower())
                 _is_title_repeat = (_val_norm == _title_norm or _val_norm.startswith(_title_norm[:40]))
                 if not _is_title_repeat:
+                    # Use the (specific) validation text as the step summary when the title is a
+                    # bare verb like "Verify" — avoids stub steps 'Verify expected result: Verify'.
+                    _fb_summary = ('Verify expected result: %s' % scenario.title[:80]
+                                   if not _is_degenerate_title(scenario.title)
+                                   else 'Verify: %s' % _val_clean[:80])
                     steps.append(TestStep(
                         step_num=len(steps) + 1,
-                        summary='Verify expected result: %s' % scenario.title[:80],
+                        summary=_fb_summary,
                         expected=_val_clean[:200],
                         data_reference=scenario.source.source_id,
                     ))
@@ -902,9 +922,12 @@ def _build_scenario_tc(
         steps = [TestStep(step_num=i, summary=s, expected=e, data_reference=scenario.source.source_id)
                  for i, (s, e) in enumerate(_chain, 1)]
 
-    # Ensure at least one step
+    # Ensure at least one step (never a bare-verb 'Verify' — prefer the specific validation text)
     if not steps:
-        steps = [TestStep(step_num=1, summary=scenario.title,
+        _one_summary = scenario.title
+        if _is_degenerate_title(scenario.title) and (scenario.validation or '').strip():
+            _one_summary = 'Verify: %s' % scenario.validation.strip()[:80]
+        steps = [TestStep(step_num=1, summary=_one_summary,
                  expected=scenario.validation, data_reference=scenario.source.source_id)]
 
     # ── Inject downstream-system verification steps (integration-layer depth) ──
