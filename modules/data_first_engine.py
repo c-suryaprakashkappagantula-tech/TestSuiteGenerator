@@ -585,6 +585,13 @@ def _inject_eligibility_negatives(suite, jira, chalk, classification, log: Calla
             tc.priority = 'P2'
         except Exception:
             pass
+        try:
+            tc.traceability = TraceabilityRecord(
+                source_type='Jira AC', source_id=feature_id,
+                extracted_text='Feature eligibility gating: %s' % description[:100],
+                confidence=0.8)
+        except Exception:
+            pass
         _pending.append(tc)
 
     if has_commercial:

@@ -120,9 +120,25 @@ _P3_KEYWORDS = ['ui display', 'portal', 'menu visible', 'kafka', 'notification',
                 'different plan', 'different manufacturer', 'wearable']
 
 
-def score_priority(test_cases, log=print):
-    """Assign P1/P2/P3 priority to each TC based on risk analysis."""
+def score_priority(test_cases, log=print, feature_priority=''):
+    """Assign P1/P2/P3 priority to each TC based on risk analysis.
+
+    Criticality-aware: the Jira feature priority scales how many core Happy Path
+    TCs are treated as P1, and whether functional overflow lands on P2 (Critical/High
+    features — functional coverage stays important) or P3 (lower criticality)."""
     counts = {'P1': 0, 'P2': 0, 'P3': 0}
+
+    # Substring match — Jira priority is often a combined label ("Critical/High",
+    # "Blocker/Emergency"). Check most-critical tokens first.
+    _fp = (feature_priority or '').strip().lower()
+    if any(k in _fp for k in ('blocker', 'emergency', 'critical', 'highest')):
+        _core_cap, _overflow_pri = 8, 'P2'
+    elif 'high' in _fp:
+        _core_cap, _overflow_pri = 6, 'P2'
+    elif any(k in _fp for k in ('low', 'minor', 'trivial')):
+        _core_cap, _overflow_pri = 3, 'P3'
+    else:  # Medium / unset
+        _core_cap, _overflow_pri = 5, 'P3'
 
     for tc in test_cases:
         text = (tc.summary + ' ' + tc.description + ' ' + tc.category).lower()
@@ -131,18 +147,18 @@ def score_priority(test_cases, log=print):
         p2_hits = sum(1 for kw in _P2_KEYWORDS if kw in text)
         p3_hits = sum(1 for kw in _P3_KEYWORDS if kw in text)
 
-        # Core happy path TCs (first few) are always P1
+        # Core happy path TCs (first few) are always P1 — count scales with criticality
         try:
             sno = int(tc.sno)
         except (ValueError, TypeError):
             sno = 99
 
-        if p1_hits >= 2 or (tc.category == 'E2E') or sno <= 5:
+        if p1_hits >= 2 or (tc.category == 'E2E') or sno <= _core_cap:
             tc._priority = 'P1'
         elif p1_hits >= 1 or p2_hits >= 2 or tc.category == 'Negative':
             tc._priority = 'P2'
         else:
-            tc._priority = 'P3'
+            tc._priority = _overflow_pri
 
         counts[tc._priority] = counts.get(tc._priority, 0) + 1
 
@@ -507,7 +523,7 @@ def final_validation(test_cases, log=print):
 # MAIN ENTRY — run all humanization passes
 # ================================================================
 
-def humanize_suite(test_cases, log=print):
+def humanize_suite(test_cases, log=print, feature_priority=''):
     """Run all humanization passes on the test suite.
     Order: clean → dedup → priority → humanize descriptions → validate → flag low-value → reorder."""
     log('[HUMANIZE] Starting humanization pass on %d TCs...' % len(test_cases))
@@ -519,7 +535,7 @@ def humanize_suite(test_cases, log=print):
     test_cases = dedup_and_merge(test_cases, log)
 
     # 2. Score priorities
-    test_cases = score_priority(test_cases, log)
+    test_cases = score_priority(test_cases, log, feature_priority=feature_priority)
 
     # 3. Humanize descriptions
     test_cases = humanize_descriptions(test_cases, log)

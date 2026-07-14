@@ -520,7 +520,7 @@ def build_test_cases(
             log('[TC-BUILD]   Built %d dual-path TCs (API + UI coverage)' % len(dual_tcs))
 
     # ── 6. Assign serial numbers ──
-    _assign_serial_numbers(test_cases)
+    _assign_serial_numbers(test_cases, feature_priority=getattr(jira, 'priority', '') if jira else '')
 
     log('[TC-BUILD] Complete: %d test cases built (route=%s)' % (
         len(test_cases), classification.classification))
@@ -1614,15 +1614,34 @@ def _build_api_spec_steps(
 # ================================================================
 
 
-def _assign_serial_numbers(test_cases: List[TestCase]) -> None:
+def _assign_serial_numbers(test_cases: List[TestCase], feature_priority: str = '') -> None:
     """Assign sequential serial numbers and priorities to all test cases.
 
-    Priority assignment (Phase 5):
-      P1 (Critical): Happy Path core scenarios — the primary feature verification.
-                     First 3 happy path TCs, or any TC with 'corrects'/'validates' in title.
-      P2 (Important): Negative/error scenarios, regression TCs.
-      P3 (Nice-to-have): Edge cases, remaining happy path beyond core set.
+    Priority assignment (Phase 5) — now criticality-aware:
+      The Jira feature priority (Critical / High / Medium / Low) scales how many
+      Happy Path scenarios are treated as P1 core verification, and whether the
+      remainder fall to P2 (still important functional coverage) or P3. This fixes
+      the old bug where a Critical feature's functional scenarios beyond the first
+      few were all demoted to P3 "nice-to-have".
+
+      P1 (Critical): E2E + core Happy Path verification (count scales with criticality).
+      P2 (Important): Negative/regression + remaining functional Happy Path on
+                      Critical/High features (functional scenarios are NOT throwaway).
+      P3 (Nice-to-have): Edge cases, and remaining Happy Path only on lower-criticality
+                         features.
     """
+    # Substring match — Jira priority is often a combined label ("Critical/High",
+    # "Blocker/Emergency"). Check most-critical tokens first.
+    _fp = (feature_priority or '').strip().lower()
+    if any(k in _fp for k in ('blocker', 'emergency', 'critical', 'highest')):
+        _p1_cap, _overflow_pri = 8, 'P2'
+    elif 'high' in _fp:
+        _p1_cap, _overflow_pri = 6, 'P2'
+    elif any(k in _fp for k in ('low', 'minor', 'trivial')):
+        _p1_cap, _overflow_pri = 2, 'P3'
+    else:  # Medium / unset — balanced default
+        _p1_cap, _overflow_pri = 4, 'P3'
+
     # Count happy path TCs to determine P1 allocation
     happy_path_count = 0
     for i, tc in enumerate(test_cases, 1):
@@ -1630,7 +1649,6 @@ def _assign_serial_numbers(test_cases: List[TestCase]) -> None:
 
         # Priority assignment based on category and position
         category_lower = (tc.category or '').lower()
-        summary_lower = (tc.summary or '').lower()
 
         if category_lower == 'negative':
             tc.priority = 'P2'
@@ -1638,13 +1656,16 @@ def _assign_serial_numbers(test_cases: List[TestCase]) -> None:
             tc.priority = 'P2'
         elif category_lower == 'edge case':
             tc.priority = 'P3'
+        elif category_lower in ('e2e', 'end-to-end'):
+            tc.priority = 'P1'
         elif category_lower == 'happy path':
             happy_path_count += 1
-            # First 5 happy path TCs are P1 (core verification)
-            if happy_path_count <= 5:
+            # Core happy path TCs are P1 (count scales with feature criticality);
+            # the remainder fall to P2 (functional) or P3 (lower criticality).
+            if happy_path_count <= _p1_cap:
                 tc.priority = 'P1'
             else:
-                tc.priority = 'P3'
+                tc.priority = _overflow_pri
         else:
             tc.priority = 'P2'
 
