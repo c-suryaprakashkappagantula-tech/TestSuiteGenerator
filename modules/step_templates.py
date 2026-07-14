@@ -1661,3 +1661,57 @@ def _default_workflow_steps(title, validation):
         ('Check audit logs (TRANSACTION_HISTORY & LINE_HISTORY)',
          'Transaction recorded correctly'),
     ]
+
+
+# ================================================================
+# PLUMBING-STEP CLEANUP
+# ================================================================
+import re as _re_plumb
+
+# Steps that are implementation plumbing, not test actions a tester performs.
+# OAuth token acquisition is handled by the framework/TokenManager — it should
+# never appear as an explicit test step.
+_PLUMBING_STEP_PATTERNS = [
+    _re_plumb.compile(r'\bobtain\s+(an?\s+)?oauth\s+token\b', _re_plumb.I),
+    _re_plumb.compile(r'\bget\s+(an?\s+)?oauth\s+token\b', _re_plumb.I),
+    _re_plumb.compile(r'\bgenerate\s+(an?\s+)?oauth\s+token\b', _re_plumb.I),
+    _re_plumb.compile(r'\bobtain\s+(an?\s+)?bearer\s+token\b', _re_plumb.I),
+    _re_plumb.compile(r'\bfetch\s+(an?\s+)?oauth\s+token\b', _re_plumb.I),
+    _re_plumb.compile(r'^\s*(step\s*\d+\s*[:.\-]?\s*)?oauth\s+token\b', _re_plumb.I),
+    _re_plumb.compile(r'\btoken\s+from\s+tokenmanager\b', _re_plumb.I),
+]
+
+
+def _is_plumbing_step(summary: str) -> bool:
+    s = (summary or '').strip()
+    if not s:
+        return False
+    return any(p.search(s) for p in _PLUMBING_STEP_PATTERNS)
+
+
+def strip_plumbing_steps(test_cases, log=print):
+    """Remove OAuth/token-acquisition plumbing steps from every TC and renumber the
+    remaining steps (keeping any 'Step N:' text prefix in sync). Testers don't manually
+    obtain OAuth tokens — that's framework plumbing, not a test action.
+
+    Never leaves a TC with zero steps (skips the strip in that unlikely case)."""
+    removed = 0
+    for tc in test_cases:
+        steps = getattr(tc, 'steps', None) or []
+        kept = [s for s in steps if not _is_plumbing_step(getattr(s, 'summary', ''))]
+        if len(kept) == len(steps) or not kept:
+            continue
+        removed += (len(steps) - len(kept))
+        for i, s in enumerate(kept, 1):
+            try:
+                s.step_num = i
+            except Exception:
+                pass
+            _summ = getattr(s, 'summary', None)
+            if _summ:
+                # Keep a leading "Step N:" prefix in sync with the new position.
+                s.summary = _re_plumb.sub(r'^\s*Step\s*\d+\s*:\s*', 'Step %d: ' % i, _summ)
+        tc.steps = kept
+    if removed and log:
+        log('[CLEANUP] Removed %d OAuth/plumbing step(s)' % removed)
+    return test_cases
