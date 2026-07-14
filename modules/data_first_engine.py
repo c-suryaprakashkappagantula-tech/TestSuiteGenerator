@@ -398,6 +398,12 @@ def build_test_suite_v8(
     except Exception as _elig_err:
         log('[V8-ENGINE]   WARNING: eligibility negative injection failed: %s — continuing' % str(_elig_err)[:100])
 
+    # ── Prune degenerate/junk TCs (e.g. "Verify_Verify" from a Chalk Note row) ──
+    try:
+        _prune_degenerate_tcs(suite, feature_id, log)
+    except Exception as _pj_err:
+        log('[V8-ENGINE]   WARNING: degenerate-TC prune failed: %s — continuing' % str(_pj_err)[:100])
+
     # ── Final criticality-aware priority pass over the complete TC list ──
     try:
         _finalize_priorities(suite, feature_priority=getattr(jira, 'priority', '') or '', log=log)
@@ -521,6 +527,31 @@ def _retag_positive_flows(test_cases, log: Callable = print):
     return test_cases
 
 
+def _prune_degenerate_tcs(suite, feature_id, log: Callable = print):
+    """Drop junk TCs whose title carries no real content (e.g. 'Verify_Verify' built
+    from a Chalk 'Note:' row). These slip past the grounding gate because their steps
+    look fine, but the TC itself is meaningless and inflates the count."""
+    import re as _re_deg
+    try:
+        from .tc_builder import _is_degenerate_title
+    except Exception:
+        return
+    kept, dropped = [], 0
+    for tc in suite.test_cases:
+        _s = tc.summary or ''
+        _s = _re_deg.sub(r'^%s[_\s]*' % _re_deg.escape(feature_id or ''), '', _s, flags=_re_deg.IGNORECASE)
+        _s = _re_deg.sub(r'^(ITMBO|NBOP|API)[_\s]*', '', _s, flags=_re_deg.IGNORECASE)
+        # Also strip a leading verb so "Verify_Verify" → "Verify" is judged on content.
+        if _is_degenerate_title(_s):
+            dropped += 1
+            log('[V8-ENGINE]   Pruned degenerate TC: %s' % (tc.summary or '')[:60])
+            continue
+        kept.append(tc)
+    if dropped:
+        suite.test_cases = kept
+        log('[V8-ENGINE]   Pruned %d degenerate/junk TC(s)' % dropped)
+
+
 def _finalize_priorities(suite, feature_priority='', log: Callable = print):
     """Final criticality-aware priority pass over the COMPLETE TC list.
 
@@ -619,8 +650,17 @@ def _inject_eligibility_negatives(suite, jira, chalk, classification, log: Calla
     if not (has_commercial or is_feature_gated):
         return
 
+    import re as _re_elig
+    # Normalize underscores→spaces: TC summaries are underscore-joined
+    # (e.g. "non-eligible_plan"), so space-delimited guard tokens must match.
     existing = ' '.join((tc.summary or '').lower() + ' ' + (tc.description or '').lower()
                         for tc in suite.test_cases if getattr(tc, 'category', '') == 'Negative')
+    existing = _re_elig.sub(r'[_]+', ' ', existing)
+    # If any lumped rejection negative already covers plan/line eligibility, don't
+    # add the standalone non-eligible-plan negative (avoids near-duplicate TCs).
+    _plan_rejection_covered = any(kw in existing for kw in [
+        'non-eligible plan', 'not eligible', 'ineligible', 'rejected per catalog',
+        'invalid retailplan', 'err07'])
 
     _pending = []
 
@@ -665,7 +705,7 @@ def _inject_eligibility_negatives(suite, jira, chalk, classification, log: Calla
                  TestStep(step_num=3, summary='Verify NBOP Transaction History for the line', expected='No provisioning transaction recorded; line unchanged'),
              ])
 
-    if is_feature_gated:
+    if is_feature_gated and not _plan_rejection_covered:
         _add('non-eligible plan',
              '%s_Negative_%s_blocked_on_non-eligible_rate_plan' % (feature_id, feature_short.replace(' ', '_')),
              'Attempt to apply %s on a line whose current rate plan does not entitle the feature. Must be rejected.' % feature_short,
