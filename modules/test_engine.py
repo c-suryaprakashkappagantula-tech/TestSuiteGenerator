@@ -1513,6 +1513,70 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print, deep_mine_res
         if _cleaned_count:
             log('[ENGINE]   UI cleanup: replaced API steps in %d TCs' % _cleaned_count)
 
+    # ════════════════════════════════════════════════════════════════
+    # Step 12b: notification / mediation (CDR) final cleanup — strip NSL
+    # provisioning boilerplate (OAuth / Trigger-API / Century Report /
+    # Deactivate API / NE Portal) that leaked from generic step templates
+    # or the CR deactivation builder into a batch/notification feature.
+    # ════════════════════════════════════════════════════════════════
+    _mediation_signal = ' '.join(filter(None, [
+        (feature_short or ''), (jira.summary or ''),
+        (jira.acceptance_criteria or ''), ' '.join(jira.labels or []),
+    ])).lower()
+    _is_mediation_feature = any(kw in _mediation_signal for kw in [
+        'mediation', 'cdr', ' prr', 'record type', ' ild ', 'ild ', 'derivation',
+        'mapping table', 'country code', 'country_code', 'amdocs', 'sftp'])
+
+    if _fc.is_notification or _is_mediation_feature:
+        _nsl_leak_keywords = [
+            'oauth', 'obtain oauth', 'century report', 'service grouping',
+            'trigger api', 'trigger activate', 'trigger change', 'trigger deactivat',
+            'deactivate api', 'ne portal', 'transaction id generated', 'apollo_ne',
+            'apollo-ne', 'guaranteed delivery', 'genesis portal', 'nbop portal',
+        ]
+
+        def _mediation_steps_for(_title):
+            import re as _re_med
+            # Strip a leading "TC007_MWTGPROV-4429_" identifier prefix, then verb prefixes.
+            _act = _re_med.sub(r'^TC\d+[_\s]*[A-Z]+-\d+[_\s]*', '', _title or '', flags=_re_med.IGNORECASE)
+            _act = _re_med.sub(r'^(?:Validate|Verify|Check|Ensure|Negative\s*[-:]?\s*|Step\s*\d+\s*[-:]?\s*)',
+                               '', _act, flags=_re_med.IGNORECASE).strip()
+            _act = _re_med.sub(r'(?:New\s+MVNO|CR)\s*[-:—]\s*', '', _act, flags=_re_med.IGNORECASE).strip()
+            _act = _act[:80] if _act else 'the mediation rule'
+            return [
+                ('Prepare a TMO CDR input file exercising: %s' % _act,
+                 'CDR file staged in the mediation ingest location (TMO workflow)'),
+                ('Run the mediation batch job to ingest and process the file (TMO workflow)',
+                 'Records are processed through the TMO-PRR mapping pipeline'),
+                ('Verify the identification/derivation logic for: %s' % _act,
+                 'Each record is classified/derived correctly per the mapping rules'),
+                ('Verify the generated PRR output file on SFTP for the processed records',
+                 'PRR output contains the correct derived values (e.g. 3-digit country_code) per the mapping'),
+                ('Verify mediation batch job logs show successful processing with expected record counts',
+                 'Batch job completed; processed record counts match expected'),
+            ]
+
+        _med_cleaned = 0
+        for tc in suite.test_cases:
+            # Skip E2E — its steps are synthesized from other TCs and handled separately.
+            if (getattr(tc, 'category', '') or '') == 'E2E':
+                continue
+            _step_text = ' '.join((s.summary or '').lower() + ' ' + (s.expected or '').lower()
+                                  for s in tc.steps)
+            if any(kw in _step_text for kw in _nsl_leak_keywords):
+                if _is_mediation_feature:
+                    _chain = _mediation_steps_for(tc.summary)
+                    tc.steps = [TestStep(i, s, e) for i, (s, e) in enumerate(_chain, 1)]
+                else:
+                    from .step_templates import get_step_chain
+                    _ctx = ('%s %s %s' % (jira.key, jira.channel or '', feature_short)).lower()
+                    _chain = get_step_chain(tc.summary, tc.description, _ctx, feature_type='notification')
+                    tc.steps = [TestStep(i, s, e) for i, (s, e) in enumerate(_chain, 1)]
+                _med_cleaned += 1
+        if _med_cleaned:
+            log('[ENGINE]   %s cleanup: replaced NSL provisioning steps in %d TCs' % (
+                'Mediation' if _is_mediation_feature else 'Notification', _med_cleaned))
+
     return suite
 
 
@@ -3211,8 +3275,33 @@ def _build_from_jira_only(jira, feature_name='', log=print):
                 '%d.\t%s' % (i + _start, p) for i, p in enumerate(_extra_pre))
 
         # ── TC1: Reproduce defect & verify fix ──
+        # Detect mediation/CDR CRs — these must NOT get NSL deactivation/provisioning steps.
+        _cr_text = ' '.join(filter(None, [
+            (jira.summary or ''), (jira.acceptance_criteria or ''),
+            ' '.join(jira.labels or []),
+        ])).lower()
+        _is_mediation_cr = any(kw in _cr_text for kw in [
+            'mediation', 'cdr', ' prr', 'record type', ' ild ', 'ild ', 'derivation',
+            'mapping table', 'country code', 'country_code'])
         _tc1_steps = []
-        if _repro_steps:
+        if _is_mediation_cr and not _repro_steps:
+            log('[ENGINE]  [CR] TC1 building MEDIATION steps (CDR ingest -> PRR output)')
+            _tc1_steps = [
+                TestStep(1, 'Prepare a TMO CDR input file containing the record(s) targeted by this CR (%s)' % (fname or 'mediation change')[:60],
+                         'CDR file staged in the mediation ingest location for the TMO workflow'),
+                TestStep(2, 'Run the mediation batch job to ingest and process the CDR file (TMO workflow)',
+                         'Mediation picks up the file and processes each record through the TMO-PRR mapping'),
+                TestStep(3, 'Verify the CR-specific identification/derivation logic is applied: %s' % (_defect_scenario or _fix_expected or fname or '')[:100],
+                         _fix_expected or 'Records are classified/derived correctly per the CR rule'),
+                TestStep(4, 'Verify the generated PRR output file on SFTP for the processed records',
+                         'PRR output contains the correct derived values (e.g. 3-digit country_code) per the CR mapping'),
+                TestStep(5, 'Verify the previous incorrect behavior no longer occurs%s' % ((' (was: "%s")' % _error_msg) if _error_msg else ''),
+                         'Defect no longer reproduces — output matches the expected post-fix mapping'),
+            ]
+            if _post_conditions:
+                _tc1_steps.append(TestStep(6, 'Verify post-condition: %s' % _post_conditions[:120],
+                         'Mediation output and downstream PRR consumption remain consistent'))
+        elif _repro_steps:
             log('[ENGINE]  [CR] TC1 using REPRO STEPS (%d steps)' % len(_repro_steps))
             # Enrich vague repro steps with portal-specific actions
             for ri, rs in enumerate(_repro_steps, 1):
@@ -3295,6 +3384,30 @@ def _build_from_jira_only(jira, feature_name='', log=print):
             story_linkage=jira.key, label=jira.key, category='Happy Path',
         ))
         idx += 1
+
+        if _is_mediation_cr:
+            # Mediation/CDR CRs: add a scope-regression TC, then return. The
+            # deactivation-specific TC2/TC3/TC4 below (Deactivate API / guaranteed
+            # delivery / Genesis-NBOP status) do NOT apply to CDR/PRR features.
+            tcs.append(TestCase(
+                sno=str(idx),
+                summary='TC%03d_%s_Regression: Unrelated record types unaffected by CR fix' % (idx, jira.key),
+                description='Ensure the mediation CR fix (%s) does not alter processing of record '
+                            'types outside its scope (e.g. Voice, domestic SMS).' % (fname or 'mediation change')[:80],
+                preconditions='1.\tA TMO CDR file containing record types NOT targeted by this CR (e.g. Voice, domestic SMS)\n'
+                              '2.\tMediation TMO workflow and PRR output SFTP are available',
+                steps=[
+                    TestStep(1, 'Prepare a TMO CDR file with record types outside this CR\'s scope (e.g. Voice, domestic SMS)',
+                             'CDR file staged for the TMO workflow'),
+                    TestStep(2, 'Run the mediation batch job to process the file (TMO workflow)',
+                             'All records processed through their existing TMO-PRR mappings'),
+                    TestStep(3, 'Compare the PRR output for the unrelated record types against the pre-fix baseline',
+                             'Voice / domestic-SMS mappings are consistent with the baseline — no regression introduced by the CR'),
+                ],
+                story_linkage=jira.key, label=jira.key, category='Regression',
+            ))
+            idx += 1
+            return tcs
 
         # ── TC2: Verify old error no longer occurs ──
         if _error_msg:
