@@ -398,6 +398,12 @@ def build_test_suite_v8(
     except Exception as _elig_err:
         log('[V8-ENGINE]   WARNING: eligibility negative injection failed: %s — continuing' % str(_elig_err)[:100])
 
+    # ── Final criticality-aware priority pass over the complete TC list ──
+    try:
+        _finalize_priorities(suite, feature_priority=getattr(jira, 'priority', '') or '', log=log)
+    except Exception as _pri_err:
+        log('[V8-ENGINE]   WARNING: priority finalization failed: %s — continuing' % str(_pri_err)[:100])
+
     return suite
 
 
@@ -513,6 +519,49 @@ def _retag_positive_flows(test_cases, log: Callable = print):
     if changed:
         log('[V8-ENGINE]   Re-tagged %d positive flow(s) Negative→Happy Path' % changed)
     return test_cases
+
+
+def _finalize_priorities(suite, feature_priority='', log: Callable = print):
+    """Final criticality-aware priority pass over the COMPLETE TC list.
+
+    Priorities are first set in build_test_cases (Step 3), but TCs added later
+    (silence assertions, eligibility negatives, deep-mine supplements) and any
+    reordering can skew the final distribution. This pass re-derives P1/P2/P3 on
+    the final list so the Excel reflects a consistent, criticality-scaled spread.
+
+    The Jira feature priority scales the P1 core cap and whether functional Happy
+    Path overflow lands on P2 (Critical/High) or P3 (lower criticality).
+    """
+    _fp = (feature_priority or '').strip().lower()
+    if any(k in _fp for k in ('blocker', 'emergency', 'critical', 'highest')):
+        _p1_cap, _overflow = 8, 'P2'
+    elif 'high' in _fp:
+        _p1_cap, _overflow = 6, 'P2'
+    elif any(k in _fp for k in ('low', 'minor', 'trivial')):
+        _p1_cap, _overflow = 2, 'P3'
+    else:
+        _p1_cap, _overflow = 4, 'P3'
+
+    happy = 0
+    counts = {'P1': 0, 'P2': 0, 'P3': 0}
+    for tc in suite.test_cases:
+        cat = (getattr(tc, 'category', '') or '').lower()
+        if cat == 'negative':
+            tc.priority = 'P2'
+        elif cat == 'regression':
+            tc.priority = 'P2'
+        elif cat == 'edge case':
+            tc.priority = 'P3'
+        elif cat in ('e2e', 'end-to-end'):
+            tc.priority = 'P1'
+        elif cat == 'happy path':
+            happy += 1
+            tc.priority = 'P1' if happy <= _p1_cap else _overflow
+        else:
+            tc.priority = 'P2'
+        counts[tc.priority] = counts.get(tc.priority, 0) + 1
+    log('[V8-ENGINE]   Priority (feature=%s): P1=%d | P2=%d | P3=%d' % (
+        feature_priority or 'Medium', counts['P1'], counts['P2'], counts['P3']))
 
 
 def _inject_eligibility_negatives(suite, jira, chalk, classification, log: Callable = print):
