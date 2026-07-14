@@ -129,7 +129,8 @@ def build_test_suite_v8(
         nbop_data = _gather_nbop_data(jira, log)
 
     # ── Step 1: Dimension Extraction ──
-    log('[V8-ENGINE] Step 1: Extracting dimensions from all data sources...')
+    _data_only = options.get('data_only', True)
+    log('[V8-ENGINE] Step 1: Extracting dimensions from all data sources (data_only=%s)...' % _data_only)
     dimension_set = extract_dimensions(
         jira=jira,
         chalk=chalk,
@@ -138,6 +139,7 @@ def build_test_suite_v8(
         nmno_result=nmno_result,
         nbop_data=nbop_data,
         classification=classification.classification,
+        data_only=_data_only,
         log=log,
     )
 
@@ -169,11 +171,11 @@ def build_test_suite_v8(
             pi=jira.pi if jira and hasattr(jira, 'pi') else '',
         )
 
-    # ── FIX 4: V7 supplementary mining for low-dimension tickets ──
-    # When dimension extraction yields < 5 testable items, call V7's
-    # _build_from_jira_only and subtask mining as supplementary source.
+    # ── FIX 4: V7 supplementary mining — disabled in data_only mode ──
+    # V7 mining uses keyword/pattern matching on Jira text and produces
+    # template-style TCs not grounded in Chalk. Skipped when data_only=True.
     _v7_supplement_tcs = []
-    if dimension_set.data_inventory.total_testable_items < 5:
+    if not _data_only and dimension_set.data_inventory.total_testable_items < 5:
         log('[V8-ENGINE] Low testable items (%d) — invoking V7 supplementary mining...' %
             dimension_set.data_inventory.total_testable_items)
         try:
@@ -234,10 +236,11 @@ def build_test_suite_v8(
             log('[V8-ENGINE]   Merged %d unique V7 supplementary TCs (deduped %d)' % (
                 _merged_count, len(_v7_supplement_tcs) - _merged_count))
 
-    # ── Step 3b: Cross-path near-duplicate sweep ──
-    # Catches near-duplicates from different generation paths (dimension TC ≈ scenario TC)
+    # ── Step 3b: Cross-path near-duplicate pruning ──
+    # Catches near-identical TCs that survived earlier per-path dedup because they
+    # came from different generation paths (dimension TC vs scenario TC, etc.).
     _before_prune = len(test_cases)
-    test_cases = _prune_near_duplicate_tcs(test_cases, log)
+    test_cases = _prune_near_duplicate_tcs(test_cases, log=log)
     if len(test_cases) < _before_prune:
         log('[V8-ENGINE]   Near-dup pruning: %d → %d TCs' % (_before_prune, len(test_cases)))
 
@@ -382,8 +385,18 @@ def build_test_suite_v8(
 
     _retag_positive_flows(suite.test_cases, log)
 
-    # ── Inject silence-rule dual-assertion TCs when AC says "no notification to X" ──
-    _inject_silence_assertions(suite, jira, log)
+    # ── Inject silence-rule TCs — skipped in data_only mode ──
+    # These TCs are AC-keyword-triggered templates, not direct Chalk/Jira scenario extractions.
+    if not _data_only:
+        _inject_silence_assertions(suite, jira, log)
+
+    # ── Feature-eligibility negatives — runs REGARDLESS of data_only ──
+    # Line/subscriber eligibility features (MVNO, commercial-line, feature-gated)
+    # must prove eligibility gating even when template negatives were skipped.
+    try:
+        _inject_eligibility_negatives(suite, jira, chalk, classification, log)
+    except Exception as _elig_err:
+        log('[V8-ENGINE]   WARNING: eligibility negative injection failed: %s — continuing' % str(_elig_err)[:100])
 
     return suite
 
@@ -473,73 +486,6 @@ def _build_cr_suite_v8(jira, chalk, parsed_docs, options, deep_mine_result, log)
 # ================================================================
 
 
-def _prune_near_duplicate_tcs(test_cases, log: Callable = print):
-    """Cross-path near-duplicate sweep on the full TC list.
-
-    Catches near-duplicates from different generation paths (e.g., a dimension TC
-    and a scenario TC that describe the same test). Uses 70% word-overlap on
-    title + first two step summaries.
-
-    When a near-duplicate pair is found, keeps the TC with more steps (the richer one).
-    Product tokens are excluded to prevent collapsing valid product-specific TCs.
-    """
-    import re as _re
-
-    _PRODUCT_TOKENS = {
-        'phone', 'tablet', 'smartwatch', 'wearable', 'hotspot', 'iot',
-        'esim', 'psim', 'wholesale', 'mobile', 'device', 'active',
-        'suspended', 'hotlined', 'cancelled', 'pre-active',
-    }
-
-    def _tc_words(tc) -> set:
-        """Extract meaningful words from TC title + first 2 step summaries."""
-        text = (tc.summary or '').lower()
-        for step in (tc.steps or [])[:2]:
-            text += ' ' + (step.summary or '').lower()
-        words = set(_re.findall(r'\b[a-z]{4,}\b', text))
-        return words - _PRODUCT_TOKENS
-
-    pruned = []
-    removed_titles = []
-
-    for tc in test_cases:
-        tc_words = _tc_words(tc)
-        if not tc_words or len(tc_words) < 3:
-            pruned.append(tc)
-            continue
-
-        is_near_dup = False
-        dup_partner_idx = -1
-        for i, existing in enumerate(pruned):
-            existing_words = _tc_words(existing)
-            if not existing_words or len(existing_words) < 3:
-                continue
-            overlap = len(tc_words & existing_words)
-            max_words = max(len(tc_words), len(existing_words))
-            if max_words > 0 and overlap / max_words >= 0.70:
-                is_near_dup = True
-                dup_partner_idx = i
-                break
-
-        if is_near_dup:
-            # Keep the one with more steps (richer)
-            existing_tc = pruned[dup_partner_idx]
-            if len(tc.steps) > len(existing_tc.steps):
-                # Replace existing with the richer TC
-                removed_titles.append(existing_tc.summary[:80])
-                pruned[dup_partner_idx] = tc
-                log('[V8-ENGINE]   NEAR-DUP: "%s" ≈ "%s" — kept richer' % (
-                    tc.summary[:50], existing_tc.summary[:50]))
-            else:
-                removed_titles.append(tc.summary[:80])
-                log('[V8-ENGINE]   NEAR-DUP: "%s" ≈ "%s" — removed' % (
-                    tc.summary[:50], existing_tc.summary[:50]))
-        else:
-            pruned.append(tc)
-
-    return pruned
-
-
 def _retag_positive_flows(test_cases, log: Callable = print):
     """De-prioritization removal/notification flows are positive verifications,
     not failure scenarios. Re-tag 'Negative' TCs as 'Happy Path' when the summary
@@ -547,15 +493,18 @@ def _retag_positive_flows(test_cases, log: Callable = print):
     Genuine negatives (line-state rejections, 'Negative:' prefixed) are preserved."""
     _neg_signal = ('reject', 'invalid', 'error', 'fail', 'denied', 'unauthorized',
                    'not allowed', 'timeout', 'must not', 'does not', 'should not',
+                   'does not send', 'not send', 'not notify', 'not trigger',
+                   'not provision', 'no notification', 'no new notification',
                    'negative:', 'err_')
-    _pos_signal = ('off notification', 'mhs_pfo_off', 'remove', 'restore priority',
+    _pos_signal = ('off notification', 'mhs_pfo_off', 'restore priority',
                    'throttle flag to n', 'de-prioritized', 'deprioritized',
                    'notification should follow', 'content and format', 'same content')
     changed = 0
     for tc in test_cases:
         if (getattr(tc, 'category', '') or '') != 'Negative':
             continue
-        s = (getattr(tc, 'summary', '') or '').lower()
+        # Normalize underscores→spaces so 'does not' matches both 'does not' and 'does_not'
+        s = (getattr(tc, 'summary', '') or '').lower().replace('_', ' ')
         if any(n in s for n in _neg_signal):
             continue
         if any(p in s for p in _pos_signal):
@@ -564,6 +513,145 @@ def _retag_positive_flows(test_cases, log: Callable = print):
     if changed:
         log('[V8-ENGINE]   Re-tagged %d positive flow(s) Negative→Happy Path' % changed)
     return test_cases
+
+
+def _inject_eligibility_negatives(suite, jira, chalk, classification, log: Callable = print):
+    """Inject FEATURE-ELIGIBILITY negatives for line/subscriber features.
+
+    Fills a real coverage gap on MVNO / commercial-line / feature-gated features
+    (e.g. MWTGPROV-4373 "International Mobile Hotspot for commercial lines on TMO"):
+    sources rarely enumerate eligibility negatives, and in data_only mode template
+    generators are skipped — leaving 0-1 negatives. Eligibility gating (line type,
+    plan family, prerequisite entitlement, required params) is a first-class,
+    always-testable dimension, so this runs REGARDLESS of data_only.
+
+    Runs post-gate (like _inject_silence_assertions). Deliberately NOT applied to
+    mediation/CDR/notification/batch/UI features — those own a different negative
+    strategy. Nothing is fabricated: negatives are only synthesized for eligibility
+    signals actually present in the ticket/Chalk text.
+    """
+    from .data_models_v8 import TestCase
+    from .test_engine import TestStep
+
+    feature_id = jira.key if jira else ''
+    feature_short = (jira.summary if jira else '') or feature_id
+    # Trim a long Jira summary to a readable feature phrase
+    if ' - ' in feature_short:
+        feature_short = feature_short.split(' - ')[-1].strip()
+    feature_short = feature_short[:70]
+
+    _cls = (getattr(classification, 'classification', '') or '').lower()
+    if _cls == 'ui':
+        return
+
+    ac_text = ((jira.acceptance_criteria if jira and hasattr(jira, 'acceptance_criteria') else '') or '')
+    title_lower = ((jira.summary if jira else '') or '').lower()
+    text = ' '.join(filter(None, [
+        title_lower,
+        (jira.description if jira else '') or '',
+        ac_text,
+        (chalk.scope if chalk and hasattr(chalk, 'scope') else '') or '',
+    ])).lower()
+
+    # Pure mediation/CDR features (title-level) are handled by the CDR templates — skip.
+    # NOTE: we do NOT bail on a mere mention of "notification"/"mediation" in the AC —
+    # line-eligibility features (e.g. commercial-line Hotspot) legitimately mention those.
+    if any(kw in title_lower for kw in ['mediation', 'cdr', 'record type', 'billing record']):
+        return
+
+    has_commercial = 'commercial line' in text or 'commercial lines' in text
+    has_tmo = any(kw in text for kw in ['tmo', 't-mobile', 'mvno'])
+    # Device/line feature-gating signals — the strong indicator this is an eligibility feature.
+    is_feature_gated = any(kw in text for kw in ['hotspot', 'tethering', 'roaming',
+                                                 'entitlement', 'add-on', 'addon'])
+
+    # Require a STRONG line-eligibility signal before synthesizing — this naturally
+    # excludes pure mediation/report/notification features (they lack these terms).
+    if not (has_commercial or is_feature_gated):
+        return
+
+    existing = ' '.join((tc.summary or '').lower() + ' ' + (tc.description or '').lower()
+                        for tc in suite.test_cases if getattr(tc, 'category', '') == 'Negative')
+
+    _pending = []
+
+    def _add(token_guard, summary, description, preconditions, steps):
+        if token_guard in existing:
+            return
+        tc = TestCase(
+            summary=summary, description=description, preconditions=preconditions,
+            steps=steps, story_linkage=feature_id, label=feature_id, category='Negative')
+        try:
+            tc.priority = 'P2'
+        except Exception:
+            pass
+        _pending.append(tc)
+
+    if has_commercial:
+        _add('non-commercial',
+             '%s_Negative_%s_rejected_on_non-commercial_consumer_line' % (feature_id, feature_short.replace(' ', '_')),
+             'Attempt to enable/apply %s on a consumer (non-commercial) line. The feature is gated to commercial lines and must be rejected.' % feature_short,
+             '1.\tA consumer (non-commercial) subscriber line is Active.\n2.\tThe feature is scoped to commercial lines only.',
+             [
+                 TestStep(step_num=1, summary='Identify a consumer (non-commercial) line and confirm its account type in NBOP', expected='Line confirmed as non-commercial in the NBOP profile'),
+                 TestStep(step_num=2, summary='Attempt to apply %s to the consumer line via change-feature API' % feature_short, expected='Request is rejected with an eligibility error (ERR07 — not eligible)'),
+                 TestStep(step_num=3, summary='Verify NBOP Transaction History for the line', expected='No provisioning transaction recorded; line profile unchanged'),
+             ])
+
+    if has_tmo:
+        _add('non-tmo',
+             '%s_Negative_%s_rejected_on_non-TMO_non-eligible_network_line' % (feature_id, feature_short.replace(' ', '_')),
+             'Attempt to apply %s on a line not provisioned on the eligible TMO network. Must be rejected.' % feature_short,
+             '1.\tA line provisioned on a non-TMO / non-eligible network exists.',
+             [
+                 TestStep(step_num=1, summary='Identify a non-TMO / non-eligible network line and confirm provisioning in NBOP', expected='Line confirmed as non-TMO / non-eligible'),
+                 TestStep(step_num=2, summary='Attempt to apply %s to the line via change-feature API' % feature_short, expected='Request is rejected with an eligibility error (ERR07)'),
+                 TestStep(step_num=3, summary='Verify NBOP Transaction History for the line', expected='No provisioning transaction recorded; line unchanged'),
+             ])
+
+    if is_feature_gated:
+        _add('non-eligible plan',
+             '%s_Negative_%s_blocked_on_non-eligible_rate_plan' % (feature_id, feature_short.replace(' ', '_')),
+             'Attempt to apply %s on a line whose current rate plan does not entitle the feature. Must be rejected.' % feature_short,
+             '1.\tA line on a rate plan that does NOT entitle this feature is Active.',
+             [
+                 TestStep(step_num=1, summary='Confirm in NBOP the line\'s current rate plan does not include this feature entitlement', expected='Current non-eligible rate plan confirmed'),
+                 TestStep(step_num=2, summary='Attempt to apply %s to the line via change-feature API' % feature_short, expected='Request is rejected with an eligibility/plan error (ERR07)'),
+                 TestStep(step_num=3, summary='Verify NBOP Transaction History for the line', expected='No provisioning transaction recorded; rate plan unchanged'),
+             ])
+        _add('prerequisite',
+             '%s_Negative_%s_fails_when_prerequisite_entitlement_not_provisioned' % (feature_id, feature_short.replace(' ', '_')),
+             'Attempt to apply %s when a required prerequisite entitlement/dependency is missing on the line. Must fail gracefully with a clear error.' % feature_short,
+             '1.\tA line is missing the prerequisite entitlement/dependency for this feature.',
+             [
+                 TestStep(step_num=1, summary='Confirm in NBOP that the prerequisite entitlement is NOT provisioned on the line', expected='Missing prerequisite confirmed'),
+                 TestStep(step_num=2, summary='Attempt to apply %s to the line via change-feature API' % feature_short, expected='Request fails gracefully with a clear dependency/eligibility error'),
+                 TestStep(step_num=3, summary='Verify NBOP Transaction History and line profile', expected='No partial change applied; line remains consistent'),
+             ])
+
+    _add('required parameter',
+         '%s_Negative_%s_rejected_ERR06_when_required_parameter_missing' % (feature_id, feature_short.replace(' ', '_')),
+         'Submit the %s request with a required parameter omitted. NSL must reject with ERR06 (missing required field) and make no change.' % feature_short,
+         '1.\tAn eligible line is Active.\n2.\tA request payload with a required field omitted is prepared.',
+         [
+             TestStep(step_num=1, summary='Prepare the %s request omitting a required field' % feature_short, expected='Malformed request prepared'),
+             TestStep(step_num=2, summary='Submit the request to the change-feature API', expected='NSL rejects with responseCode ERR06 ("... is missing but it is required")'),
+             TestStep(step_num=3, summary='Verify NBOP Transaction History for the line', expected='No transaction recorded; line unchanged'),
+         ])
+
+    if _pending:
+        _max_sno = 0
+        for tc in suite.test_cases:
+            try:
+                if tc.sno and str(tc.sno).isdigit():
+                    _max_sno = max(_max_sno, int(tc.sno))
+            except Exception:
+                pass
+        for tc in _pending:
+            _max_sno += 1
+            tc.sno = str(_max_sno)
+            suite.test_cases.append(tc)
+        log('[V8-ENGINE]   Injected %d feature-eligibility negative TC(s)' % len(_pending))
 
 
 def _inject_silence_assertions(suite, jira, log: Callable = print):
@@ -634,13 +722,13 @@ def _inject_silence_assertions(suite, jira, log: Callable = print):
         _injected += 1
 
     # ── Rule 2: "No impacts to NBOP" — inversion TC ──
-    # SUPPRESSED when Rule 1 (MBO/NBOP silence) is already present — TC19 Step 3 already
-    # asserts "zero NBOP outbound calls" which covers TC20's entire assertion.
+    # Skip if Rule 1 (MBO/NBOP silence) was already injected: its Step 3 already asserts
+    # "Zero NBOP outbound calls. NBOP shows no de-prioritization message on UI", so a
+    # separate NBOP-display TC would be a duplicate assertion.
     _has_nbop_no_impact = any(kw in all_text_lower for kw in [
         'no impacts to nbop', 'no impact to nbop', 'nbop need not show',
     ])
-    _silence_already_covers_nbop = _has_mbo_silence  # Rule 1 already asserts no NBOP calls
-    if _has_nbop_no_impact and not _silence_already_covers_nbop and 'nbop_shows_no' not in _existing_text.replace(' ', '_'):
+    if _has_nbop_no_impact and not _has_mbo_silence and 'nbop_shows_no' not in _existing_text.replace(' ', '_'):
         tc = TestCase(
             summary='%s_Verify_NBOP_shows_no_de-prioritization_status_or_message_on_subscriber_profile' % feature_id,
             description='Per AC: "No impacts to NBOP. NBOP need not show any message on UI." '
@@ -1310,3 +1398,77 @@ def _remove_dimension_value(dimension_set, dim_name: str, remove_value: str, log
                 dim.values.remove(remove_value)
                 log('[V8-CUSTOM]   Removed %s=%s' % (dim_name, remove_value))
             return
+
+
+def _prune_near_duplicate_tcs(test_cases: List, threshold: float = 0.70, log: Callable = print) -> List:
+    """Remove near-duplicate test cases from the fully-built suite.
+
+    Compares each TC's title fingerprint (normalized summary + first-step words)
+    against all already-kept TCs using word-overlap (Jaccard on 4+-char words).
+    When a near-duplicate pair is found, the TC with more steps is kept.
+
+    Product-discriminating tokens are excluded from overlap so product-specific
+    TCs (Phone vs Tablet vs eSIM) are never collapsed together.
+
+    threshold: overlap fraction above which two TCs are treated as duplicates.
+               0.70 means 70%+ shared meaningful words → same test.
+    """
+    import re as _re
+
+    _PRODUCT_TOKENS = frozenset({
+        'phone', 'tablet', 'esim', 'psim', 'wearable', 'smartwatch', 'watch',
+        'tmo', 'vzw', 'verizon', 'sprint', 'tmobile',
+    })
+
+    def _fingerprint(tc) -> frozenset:
+        raw = _re.sub(r'^TC\d+_[A-Z]+-\d+[_ -]*', '', tc.summary or '').strip().lower()
+        raw = _re.sub(r'\s+', ' ', raw)
+        # Blend in first two step summaries for richer signal
+        for step in (tc.steps or [])[:2]:
+            raw += ' ' + (step.summary or '').lower()
+        words = set(_re.findall(r'\b[a-z0-9]{4,}\b', raw))
+        return frozenset(words - _PRODUCT_TOKENS)
+
+    kept: List = []
+    kept_fps: List[frozenset] = []
+
+    for tc in test_cases:
+        fp = _fingerprint(tc)
+        dup_idx = -1
+
+        _POS_CATS = {'Happy Path', 'Edge Case', ''}
+        tc_cat = (tc.category or '').strip()
+
+        if fp:
+            for i, kfp in enumerate(kept_fps):
+                if not kfp:
+                    continue
+                # Category protection: Negative/Regression must never merge into Happy Path
+                ref_cat = (kept[i].category or '').strip()
+                tc_is_pos = tc_cat in _POS_CATS
+                ref_is_pos = ref_cat in _POS_CATS
+                if tc_is_pos != ref_is_pos:
+                    continue
+                if tc_cat == 'Regression' or ref_cat == 'Regression':
+                    if tc_cat != ref_cat:
+                        continue
+
+                union_size = len(fp | kfp)
+                if union_size > 0 and len(fp & kfp) / union_size >= threshold:
+                    dup_idx = i
+                    break
+
+        if dup_idx == -1:
+            kept.append(tc)
+            kept_fps.append(fp)
+        else:
+            existing = kept[dup_idx]
+            new_steps = len(tc.steps or [])
+            existing_steps = len(existing.steps or [])
+            log('[V8-ENGINE]   NEAR-DUP: "%s" ≈ "%s"' % (
+                (tc.summary or '')[:60], (existing.summary or '')[:60]))
+            if new_steps > existing_steps:
+                kept[dup_idx] = tc
+                kept_fps[dup_idx] = fp
+
+    return kept

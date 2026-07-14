@@ -692,6 +692,16 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print, deep_mine_res
             except Exception as _neg_err:
                 log('[ENGINE]   WARNING: Negative scenario generation failed: %s — continuing' % str(_neg_err)[:100])
 
+        # ── Feature-eligibility negatives (runs REGARDLESS of the CR/notification skip) ──
+        # Line/subscriber features (MVNO, commercial-line, feature-gated) must prove
+        # eligibility gating even when generic negatives were skipped for a CR ticket.
+        try:
+            _elig_neg = _synthesize_eligibility_negatives(suite, jira, feature_short, _fc, log)
+            if _elig_neg:
+                suite.test_cases.extend(_elig_neg)
+        except Exception as _elig_err:
+            log('[ENGINE]   WARNING: Eligibility negative synthesis failed: %s — continuing' % str(_elig_err)[:100])
+
     log('[ENGINE] Step 6: Preparing for expansion...')
     log('[ENGINE]   Feature classification: %s (is_ui=%s)' % (_fc.feature_type, _fc.is_ui))
 
@@ -2463,6 +2473,12 @@ def _mine_jira_subtasks(jira, suite, log=print):
     next_idx = len(suite.test_cases) + 1
     new_tcs = []
 
+    # Prefixes that indicate UAT execution subtasks — test run evidence, not requirements
+    _UAT_KEY_PREFIXES_MINE = ('MOBLPLTFRM-', 'SPRINT-', 'QATEST-', 'TESTING-')
+    _UAT_SUMMARY_KW_MINE = ('uat cycle', 'uat testing', 'sprint testing', 'test cycle',
+                            'test execution', 'regression cycle', 'sanity cycle',
+                            'intg_uat', 'uat_progression', 'intg_uat_progression')
+
     for st in jira.subtasks:
         summary = st.get('summary', '')
         description = st.get('description', '')
@@ -2471,6 +2487,15 @@ def _mine_jira_subtasks(jira, suite, log=print):
         key = st.get('key', '')
 
         if not summary or len(summary) < 10:
+            continue
+
+        # Skip UAT execution subtasks — they record test evidence, not requirements.
+        # Mining them produces TCs from UAT cycle names and test run titles.
+        if any(key.startswith(p) for p in _UAT_KEY_PREFIXES_MINE):
+            log('[ENGINE]   Skipping UAT execution subtask: %s' % key)
+            continue
+        if any(kw in summary.lower() for kw in _UAT_SUMMARY_KW_MINE):
+            log('[ENGINE]   Skipping UAT execution subtask (summary): %s' % key)
             continue
 
         testable_items = []
@@ -2665,6 +2690,26 @@ def _mine_jira_subtasks(jira, suite, log=print):
         for item in unique_items[:20]:
             clean = _clean_tc_title(item, jira.key)
             if len(clean) < 10:
+                continue
+
+            # Skip items that are references to OTHER Jira feature tickets.
+            # e.g., NSLNM-646's post-conditions list dependent features:
+            #   "F-4279 TMO - PSIM Reuse swap mdn" — this is a link, not a test condition.
+            # Check BOTH clean (may have "Validate " prefix) and raw item.
+            _check_raw = item.strip()
+            _check_clean_no_verb = re.sub(r'^(validate|verify|ensure|confirm|check)\s+',
+                                          '', clean, flags=re.IGNORECASE).strip()
+            _jira_ref_pat = re.compile(
+                r'^(F|MWTGPROV|NSLNM|MOBLPLTFRM|SPRINT|QATEST)-\d+\b', re.IGNORECASE)
+            if _jira_ref_pat.match(_check_raw) or _jira_ref_pat.match(_check_clean_no_verb):
+                log('[ENGINE]   Skipping cross-feature reference item from %s: %s' % (key, clean[:60]))
+                continue
+            # Skip UAT test-number patterns like "N 54.2 MWTGPROV-4166 - <title>"
+            # or "53.x MWTGPROV-4166 - <title>" — sprint/PI test cycle names
+            _uat_num_pat = re.compile(
+                r'^(N\s+)?\d+[._]\d+[._x]?\s+\w+-\d+', re.IGNORECASE)
+            if _uat_num_pat.match(_check_raw) or _uat_num_pat.match(_check_clean_no_verb):
+                log('[ENGINE]   Skipping UAT test-number item from %s: %s' % (key, clean[:60]))
                 continue
 
             item_kw = set(re.findall(r'\b\w{4,}\b', clean.lower()))
@@ -2938,7 +2983,18 @@ def _build_from_jira_only(jira, feature_name='', log=print):
                 if re.search(_fp, _all_cr_text) and _field_name not in _seen_fields:
                     _found_fields.append(_field_name)
                     _seen_fields.add(_field_name)
-            if _found_fields and len(_found_fields) >= 2:
+            # Only generate Century Report TC when CR is explicitly about field mapping.
+            # MDN/IMEI/IMSI appear in almost every test as test data — they do NOT indicate
+            # a field-mapping CR. Require either (a) a specific non-generic field OR
+            # (b) the AC/description explicitly mentions Century Report / field mapping.
+            _generic_cr_fields = {'MDN', 'IMEI', 'ICCID', 'EID', 'IMSI', 'subscriberId', 'accountId'}
+            _specific_mapping_fields = [f for f in _found_fields if f not in _generic_cr_fields]
+            _century_explicitly_mentioned = bool(re.search(
+                r'century\s*report|service\s*grouping|field\s*map|field\s*name|'
+                r'field\s*value|correct\s*field|field\s*level',
+                _all_cr_text, re.I))
+            if _found_fields and len(_found_fields) >= 2 and (
+                    len(_specific_mapping_fields) >= 1 or _century_explicitly_mentioned):
                 _fields_str = ', '.join(_found_fields[:8])
                 log('[ENGINE]  [CR] Found %d API fields to verify: %s' % (len(_found_fields), _fields_str))
                 tcs.append(TestCase(
@@ -2965,7 +3021,40 @@ def _build_from_jira_only(jira, feature_name='', log=print):
                     story_linkage=jira.key, label=jira.key, category='Happy Path',
                 ))
                 idx += 1
-            # Return early — workflow-split TCs are sufficient for this CR
+            # Also generate a Negative TC for any quoted error message in AC.
+            # Even when the CR spans multiple workflows, there may be a SPECIFIC error
+            # (e.g., "Deactivation got failed with invalid MSISDN") that needs its own
+            # negative validation — the workflow TCs above only verify the happy path fix.
+            _error_msg_wf = ''
+            _err_match_wf = re.search(r'"([^"]+)"', jira.acceptance_criteria or '')
+            if _err_match_wf:
+                _error_msg_wf = _err_match_wf.group(1).strip()
+            if _error_msg_wf:
+                log('[ENGINE]  [CR] Also generating error-specific Negative TC: "%s"' % _error_msg_wf[:60])
+                _ac_clean_wf = re.sub(r'\{[^}]+\}', '', jira.acceptance_criteria or '')
+                _ac_clean_wf = re.sub(r'\*', '', _ac_clean_wf).strip()
+                _precond_wf = '1.\tCR fix deployed to test environment\n2.\tDefect preconditions met per AC'
+                if 'de-active in tmo' in _ac_clean_wf.lower() or 'deactivated in tmo' in _ac_clean_wf.lower():
+                    _precond_wf = '1.\tMDN is De-Active (Deactivated) in TMO\n2.\tMDN is Active in NBOP/NSL DB\n3.\tCR fix deployed'
+                tcs.append(TestCase(
+                    sno=str(idx),
+                    summary='TC%03d_%s_Negative: Verify old error "%s" no longer occurs' % (
+                        idx, jira.key, _error_msg_wf[:40]),
+                    description='Confirm the previously reported error ("%s") no longer occurs after the CR fix.' % _error_msg_wf,
+                    preconditions=_precond_wf,
+                    steps=[
+                        TestStep(1, 'Set up defect scenario per AC: establish the preconditions that previously triggered the error',
+                                 'Defect preconditions established'),
+                        TestStep(2, 'Trigger the API or operation that previously caused the error',
+                                 'API request sent'),
+                        TestStep(3, 'Verify the error "%s" does NOT appear in the response' % _error_msg_wf,
+                                 'No error. API/operation completes successfully.'),
+                        TestStep(4, 'Verify the expected post-fix behavior (status updated, data correct per AC)',
+                                 'System state reflects correct post-fix values as specified in AC'),
+                    ],
+                    story_linkage=jira.key, label=jira.key, category='Negative',
+                ))
+                idx += 1
             return tcs
         _defect_text = ''
         _repro_steps = []
@@ -4386,6 +4475,127 @@ def _generate_negative_scenarios(suite, feature_id, log=print):
             ])); next_idx += 1
 
     return neg_tcs
+
+
+def _synthesize_eligibility_negatives(suite, jira, feature_short, fc, log=print):
+    """Synthesize FEATURE-ELIGIBILITY negatives for line/subscriber features.
+
+    Fills a real coverage gap observed on MVNO / commercial-line features
+    (e.g. MWTGPROV-4373 "International Mobile Hotspot for commercial lines on TMO"):
+    sources rarely enumerate eligibility negatives explicitly, and CR/fix tickets
+    skip the generic negative pass entirely — leaving 0-1 negatives.
+
+    Eligibility gating (line type, plan family, prerequisite entitlement, required
+    params) is a first-class, always-testable dimension for such features, so this
+    runs REGARDLESS of the CR/notification skip. It is deliberately NOT applied to
+    mediation/CDR/notification/batch/ui features (those get their own templates).
+    Nothing is fabricated: negatives are only synthesized for signals actually present
+    in the ticket/Chalk-derived suite text.
+    """
+    added = []
+    fid = jira.key
+
+    # Exclude feature types that own a different negative strategy.
+    if getattr(fc, 'is_notification', False) or getattr(fc, 'is_batch', False) or \
+       getattr(fc, 'feature_type', '') in ('notification', 'batch_report', 'ui_portal'):
+        return added
+
+    jira_text = ' '.join(filter(None, [
+        jira.summary or '', jira.description or '',
+        getattr(jira, 'acceptance_criteria', '') or '',
+    ])).lower()
+    suite_text = ' '.join(tc.summary + ' ' + tc.description for tc in suite.test_cases).lower()
+    text = jira_text + ' ' + suite_text
+
+    # Mediation/CDR features are handled by the notification/CDR templates — skip here.
+    if any(kw in text for kw in ['mediation', ' cdr', 'record type', 'prr', 'billing record']):
+        return added
+
+    # Only apply to actual line/subscriber/feature-gated features.
+    if not any(kw in text for kw in ['commercial line', 'subscriber', 'line on tmo',
+                                     'feature', 'hotspot', 'tethering', 'roaming',
+                                     'entitlement', 'add-on', 'addon', 'rate plan',
+                                     'rateplan', 'eligible', 'provision']):
+        return added
+
+    has_commercial = 'commercial line' in text or 'commercial lines' in text
+    has_tmo = any(kw in text for kw in ['tmo', 't-mobile', 'mvno'])
+    is_feature_gated = any(kw in text for kw in ['feature', 'hotspot', 'tethering',
+                                                 'roaming', 'entitlement', 'add-on', 'addon',
+                                                 'international', 'ild'])
+
+    existing = ' '.join(tc.summary.lower() + ' ' + tc.description.lower()
+                        for tc in suite.test_cases if tc.category == 'Negative')
+
+    def _new(summary, description, preconditions, steps):
+        added.append(TestCase(
+            sno='', summary=summary, description=description,
+            preconditions=preconditions, story_linkage=fid, label=fid,
+            category='Negative', steps=steps))
+
+    # 1) Non-commercial (consumer/residential) line — feature must not be offered/applied.
+    if has_commercial and 'non-commercial' not in existing and 'consumer line' not in existing:
+        _new(
+            'TC__%s_Negative: Verify %s is rejected on a non-commercial (consumer) line' % (fid, feature_short),
+            'Attempt to enable/apply %s on a consumer (non-commercial) line. Feature is gated to commercial lines and must be rejected.' % feature_short,
+            '1.\tA consumer (non-commercial) subscriber line is Active.\n2.\tThe feature is scoped to commercial lines only.',
+            [
+                TestStep(1, 'Identify a consumer (non-commercial) line and confirm its account type in NBOP', 'Line confirmed as non-commercial in NBOP profile'),
+                TestStep(2, 'Attempt to apply %s to the consumer line' % feature_short, 'Request is rejected with an eligibility error (e.g. ERR07 Invalid/not eligible)'),
+                TestStep(3, 'Verify NBOP Transaction History for the line', 'No provisioning transaction recorded; line profile unchanged'),
+            ])
+
+    # 2) Non-TMO / non-eligible network line.
+    if has_tmo and 'non-tmo' not in existing and 'non-eligible network' not in existing:
+        _new(
+            'TC__%s_Negative: Verify %s is rejected on a non-TMO / non-eligible network line' % (fid, feature_short),
+            'Attempt to apply %s on a line not provisioned on the eligible TMO network. Must be rejected.' % feature_short,
+            '1.\tA line provisioned on a non-TMO / non-eligible network exists.',
+            [
+                TestStep(1, 'Identify a non-TMO / non-eligible network line and confirm provisioning in NBOP', 'Line confirmed as non-TMO / non-eligible'),
+                TestStep(2, 'Attempt to apply %s to the line' % feature_short, 'Request is rejected with an eligibility error (ERR07)'),
+                TestStep(3, 'Verify NBOP Transaction History for the line', 'No provisioning transaction recorded; line unchanged'),
+            ])
+
+    # 3) Non-eligible rate plan.
+    if is_feature_gated and 'non-eligible rate plan' not in existing and 'ineligible plan' not in existing:
+        _new(
+            'TC__%s_Negative: Verify %s is blocked when the line is on a non-eligible rate plan' % (fid, feature_short),
+            'Attempt to apply %s on a line whose current rate plan does not entitle the feature. Must be rejected.' % feature_short,
+            '1.\tA line on a rate plan that does NOT entitle this feature is Active.',
+            [
+                TestStep(1, 'Confirm the line\'s current rate plan in NBOP does not include this feature entitlement', 'Current non-eligible rate plan confirmed'),
+                TestStep(2, 'Attempt to apply %s to the line' % feature_short, 'Request is rejected with an eligibility/plan error (ERR07)'),
+                TestStep(3, 'Verify NBOP Transaction History for the line', 'No provisioning transaction recorded; rate plan unchanged'),
+            ])
+
+    # 4) Prerequisite entitlement / dependency not provisioned.
+    if is_feature_gated and 'prerequisite' not in existing and 'not provisioned' not in existing:
+        _new(
+            'TC__%s_Negative: Verify %s fails gracefully when its prerequisite entitlement is not provisioned' % (fid, feature_short),
+            'Attempt to apply %s when a required prerequisite entitlement/dependency is missing on the line. Must fail gracefully with a clear error.' % feature_short,
+            '1.\tA line is missing the prerequisite entitlement/dependency for this feature.',
+            [
+                TestStep(1, 'Confirm in NBOP that the prerequisite entitlement is NOT provisioned on the line', 'Missing prerequisite confirmed'),
+                TestStep(2, 'Attempt to apply %s to the line' % feature_short, 'Request fails gracefully with a clear dependency/eligibility error'),
+                TestStep(3, 'Verify NBOP Transaction History and line profile', 'No partial change applied; line remains consistent'),
+            ])
+
+    # 5) Missing required request parameter (contract-level ERR06).
+    if 'required parameter' not in existing and 'missing but it is required' not in existing and 'err06' not in existing:
+        _new(
+            'TC__%s_Negative: Verify request is rejected (ERR06) when a required parameter is missing' % fid,
+            'Submit the %s request with a required parameter omitted. NSL must reject with ERR06 (missing required field) and make no change.' % feature_short,
+            '1.\tAn eligible line is Active.\n2.\tA request payload with a required field omitted is prepared.',
+            [
+                TestStep(1, 'Prepare the %s request omitting a required field' % feature_short, 'Malformed request prepared'),
+                TestStep(2, 'Submit the request', 'NSL rejects with responseCode ERR06 ("... is missing but it is required")'),
+                TestStep(3, 'Verify NBOP Transaction History for the line', 'No transaction recorded; line unchanged'),
+            ])
+
+    if added:
+        log('[ENGINE]   Added %d feature-eligibility negative TCs' % len(added))
+    return added
 
 
 # ================================================================
