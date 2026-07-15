@@ -534,6 +534,24 @@ def extract_dimensions(
         len(dimensions), len(scenarios), len(negative_specs)))
     log('[DIM-EXTRACT]   Total testable items: %d' % data_inventory.total_testable_items)
 
+    # ── Universal chokepoint: drop 'product' dimension values that are part of the
+    # feature NAME itself (e.g. "Hotspot" in "International Mobile Hotspot"). These are
+    # the feature subject, not a device-type axis to vary over — real device coverage
+    # comes from the grounded scenarios. Catches ALL extraction paths (Chalk / Jira AC /
+    # attachment / deep-mine), not just the Jira-AC one.
+    _ftitle = (jira.summary if jira else '').lower()
+    if _ftitle and dimensions:
+        _kept_dims = []
+        for _d in dimensions:
+            if getattr(_d, 'name', '') == 'product':
+                _kv = [v for v in _d.values if v.lower() not in _ftitle]
+                if not _kv:
+                    log('[DIM-EXTRACT]   Dropped product dimension %r (feature-name subject, not a device axis)' % _d.values)
+                    continue
+                _d.values = _kv
+            _kept_dims.append(_d)
+        dimensions = _kept_dims
+
     return DimensionSet(
         feature_id=jira.key if jira else '',
         dimensions=dimensions,
