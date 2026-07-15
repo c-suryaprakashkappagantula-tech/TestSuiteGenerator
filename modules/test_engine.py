@@ -1615,11 +1615,12 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print, deep_mine_res
     except Exception as _tr_err:
         log('[ENGINE]   WARNING: traceability pass failed: %s — continuing' % str(_tr_err)[:80])
 
-    # ── Strip OAuth/token plumbing steps + sanitize malformed titles ──
+    # ── Strip OAuth/token plumbing steps + sanitize malformed titles/steps/preconditions ──
     try:
-        from .step_templates import strip_plumbing_steps, sanitize_tc_titles
+        from .step_templates import strip_plumbing_steps, sanitize_tc_titles, sanitize_steps_and_preconditions
         strip_plumbing_steps(suite.test_cases, log)
         sanitize_tc_titles(suite.test_cases, log)
+        sanitize_steps_and_preconditions(suite.test_cases, log)
     except Exception as _sp_err:
         log('[ENGINE]   WARNING: step/title cleanup failed: %s — continuing' % str(_sp_err)[:80])
 
@@ -1903,7 +1904,14 @@ def _chalk_scenario_to_tc(sc, idx, feature_id, channel='', feature_type=''):
     pre_lines = []
     if sc.prereq:
         raw = sc.prereq.replace('Pre-req:', '').replace('Pre-condition:', '').strip()
-        parts = [p.strip() for p in re.split(r'[.\n]', raw) if p.strip() and len(p.strip()) > 5]
+        # Strip leading markdown headers/bullets per line (e.g. "# Mediation is using...").
+        raw = re.sub(r'(?m)^\s*[#*\-]+\s*', '', raw)
+        # Protect common abbreviations so we don't split mid-"e.g." / "i.e." on the period.
+        _prot = raw
+        for _ab in ('e.g.', 'i.e.', 'etc.', 'vs.', 'Inc.', 'No.', 'U.S.'):
+            _prot = _prot.replace(_ab, _ab.replace('.', '\x00'))
+        parts = [p.replace('\x00', '.').strip() for p in re.split(r'[.\n]', _prot)
+                 if p.strip() and len(p.strip()) > 5]
         for i, p in enumerate(parts, 1):
             pre_lines.append('%d.\t%s' % (i, p))
     has_cdr = bool(sc.cdr_input) or 'cdr' in sc.title.lower() or 'prr' in (sc.validation or '').lower()

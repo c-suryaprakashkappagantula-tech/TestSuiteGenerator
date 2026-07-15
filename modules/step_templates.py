@@ -1751,3 +1751,55 @@ def sanitize_tc_titles(test_cases, log=print):
     if fixed and log:
         log('[CLEANUP] Sanitized %d malformed TC title(s)' % fixed)
     return test_cases
+
+
+def _clean_line(text: str) -> str:
+    """Strip leading markdown (#, *, -, >) and Jira/Confluence markup; tidy trailing punctuation."""
+    if not text:
+        return text
+    s = _TITLE_MARKUP_RE.sub('', text)                 # {panel} / {code} etc
+    s = _re_plumb.sub(r'^\s*[#>*\-\u2022]+\s*', '', s)  # leading markdown/bullets
+    s = _re_plumb.sub(r'\s{2,}', ' ', s).strip()
+    # Drop a dangling trailing colon ("Verify PRR output:" -> "Verify PRR output")
+    s = _re_plumb.sub(r'\s*:\s*$', '', s)
+    return s
+
+
+def sanitize_steps_and_preconditions(test_cases, log=print):
+    """Clean garbage that leaks from raw Chalk/Jira/subtask text into steps & preconditions:
+      - leading markdown ('# For TMO subscriber...', '* ', '- ')
+      - Jira/Confluence markup ('{panel}')
+      - dangling trailing colon on step summaries ('Verify PRR output:')
+    Never blanks out a step/precondition — only trims artifacts."""
+    fixed = 0
+    for tc in test_cases:
+        for s in (getattr(tc, 'steps', None) or []):
+            _sm = getattr(s, 'summary', None)
+            if _sm:
+                _c = _clean_line(_sm)
+                if _c and _c != _sm:
+                    s.summary = _c; fixed += 1
+            _ex = getattr(s, 'expected', None)
+            if _ex:
+                _c = _clean_line(_ex)
+                if _c and _c != _ex:
+                    s.expected = _c
+        _pre = getattr(tc, 'preconditions', None)
+        if _pre and ('#' in _pre or '{' in _pre or '\u2022' in _pre):
+            _lines = []
+            for ln in _pre.split('\n'):
+                # Preserve an "N.\t" list prefix, clean the text after it (handles
+                # "1.\t# Mediation is using..." where the '#' follows the number).
+                _m = _re_plumb.match(r'^(\s*\d+[.)]\s*\t?)(.*)$', ln)
+                if _m:
+                    _lines.append(_m.group(1) + _clean_line(_m.group(2)))
+                elif ln.strip().startswith(('#', '*', '-', '>', '\u2022')) or '{' in ln:
+                    _lines.append(_clean_line(ln))
+                else:
+                    _lines.append(ln)
+            _new = '\n'.join(_lines)
+            if _new != _pre:
+                tc.preconditions = _new; fixed += 1
+    if fixed and log:
+        log('[CLEANUP] Cleaned %d step/precondition artifact(s)' % fixed)
+    return test_cases

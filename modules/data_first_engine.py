@@ -398,11 +398,12 @@ def build_test_suite_v8(
     except Exception as _elig_err:
         log('[V8-ENGINE]   WARNING: eligibility negative injection failed: %s — continuing' % str(_elig_err)[:100])
 
-    # ── Strip OAuth/token plumbing steps + sanitize malformed titles ──
+    # ── Strip OAuth/token plumbing steps + sanitize malformed titles/steps/preconditions ──
     try:
-        from .step_templates import strip_plumbing_steps, sanitize_tc_titles
+        from .step_templates import strip_plumbing_steps, sanitize_tc_titles, sanitize_steps_and_preconditions
         strip_plumbing_steps(suite.test_cases, log)
         sanitize_tc_titles(suite.test_cases, log)
+        sanitize_steps_and_preconditions(suite.test_cases, log)
     except Exception as _sp_err:
         log('[V8-ENGINE]   WARNING: step/title cleanup failed: %s — continuing' % str(_sp_err)[:100])
 

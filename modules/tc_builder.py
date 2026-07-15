@@ -761,11 +761,12 @@ def _build_scenario_tc(
                 _val_norm = re.sub(r'\s+', ' ', _val_clean.lower())
                 _is_title_repeat = (_val_norm == _title_norm or _val_norm.startswith(_title_norm[:40]))
                 if not _is_title_repeat:
-                    # Use the (specific) validation text as the step summary when the title is a
-                    # bare verb like "Verify" — avoids stub steps 'Verify expected result: Verify'.
-                    _fb_summary = ('Verify expected result: %s' % scenario.title[:80]
-                                   if not _is_degenerate_title(scenario.title)
-                                   else 'Verify: %s' % _val_clean[:80])
+                    # Build the verification step from the ACTUAL validation content (not a
+                    # 'Verify expected result: <title>' stub). Strip a leading verb so we don't
+                    # get 'Verify: Verify ...'.
+                    _val_action = re.sub(r'^(verify|validate|check|ensure|confirm)\b[\s:,\-]*',
+                                         '', _val_clean, flags=re.IGNORECASE).strip()
+                    _fb_summary = 'Verify: %s' % ((_val_action or _val_clean)[:110])
                     steps.append(TestStep(
                         step_num=len(steps) + 1,
                         summary=_fb_summary,
@@ -1032,7 +1033,30 @@ def _build_scenario_tc(
             '3.\tLine Status: %s' % _derived_state
         )
     else:
-        preconditions = '1.\tActive TMO subscriber line in SIT environment\n2.\tAPI endpoint accessible\n3.\tLine Status: Active'
+        # Scenario-aware preconditions derived from the scenario title/validation so each TC
+        # isn't the same generic boilerplate (device / plan / existing-line context).
+        _t = (scenario.title + ' ' + (scenario.validation or '')).lower()
+        _pc = ['1.\tActive TMO subscriber line in SIT environment', '2.\tAPI endpoint accessible']
+        _extra = []
+        if 'tablet' in _t:
+            _extra.append('Tablet device on an eligible Tablet plan')
+        elif 'phone' in _t or ('mobile' in _t and 'hotspot' not in _t[:40]):
+            _extra.append('Mobile (Phone) device on an eligible plan')
+        if 'unlimited plus' in _t or 'unl+' in _t or 'unlp' in _t:
+            _extra.append('Line is on an Unlimited Plus rate plan')
+        elif 'unlimited' in _t or 'unl' in _t:
+            _extra.append('Line is on an Unlimited rate plan')
+        if 'existing' in _t or 'eft' in _t:
+            _extra.append('Existing active line (target feature not yet provisioned)')
+        elif 'new ' in _t and 'activation' in _t:
+            _extra.append('New subscriber ready to activate in SIT')
+        if 'change feature' in _t and not any('not yet provisioned' in e for e in _extra):
+            _extra.append('Target feature not yet provisioned on the line')
+        _n = 3
+        for _e in _extra[:3]:  # cap to keep it tight
+            _pc.append('%d.\t%s' % (_n, _e)); _n += 1
+        _pc.append('%d.\tLine Status: Active' % _n)
+        preconditions = '\n'.join(_pc)
 
     return TestCase(
         summary=summary,
