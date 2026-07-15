@@ -1715,3 +1715,39 @@ def strip_plumbing_steps(test_cases, log=print):
     if removed and log:
         log('[CLEANUP] Removed %d OAuth/plumbing step(s)' % removed)
     return test_cases
+
+
+# ================================================================
+# TITLE / SUMMARY SANITIZATION
+# ================================================================
+_TITLE_MARKUP_RE = _re_plumb.compile(r'\{[^}]*\}')          # {panel}, {panel:title=..}, {code}
+_TITLE_TRAILING_RE = _re_plumb.compile(r'[\s_\-,:;.]+$')     # trailing punctuation/underscores
+
+
+def sanitize_tc_titles(test_cases, log=print):
+    """Clean malformed scenario titles that leak in from raw Chalk/Jira source lines:
+      - remove Confluence/Jira markup artifacts like '{panel}' / '{panel:title=..}'
+      - drop mid-word ellipsis artifacts ('for c... Hotspot')
+      - strip trailing punctuation ('...request,' -> '...request')
+      - collapse doubled underscores
+    Applied to the TC summary (and a light pass on the description)."""
+    fixed = 0
+    for tc in test_cases:
+        s0 = tc.summary or ''
+        s = _TITLE_MARKUP_RE.sub('', s0)
+        s = s.replace('...', ' ').replace('..', ' ')
+        s = _re_plumb.sub(r'_{2,}', '_', s)
+        s = _re_plumb.sub(r'\s{2,}', ' ', s)
+        s = _TITLE_TRAILING_RE.sub('', s)
+        if s and s != s0:
+            tc.summary = s
+            fixed += 1
+        if getattr(tc, 'description', None):
+            d0 = tc.description
+            d = _TITLE_MARKUP_RE.sub('', d0).replace('...', ' ')
+            d = _TITLE_TRAILING_RE.sub('', d).strip()
+            if d and d != d0:
+                tc.description = d
+    if fixed and log:
+        log('[CLEANUP] Sanitized %d malformed TC title(s)' % fixed)
+    return test_cases

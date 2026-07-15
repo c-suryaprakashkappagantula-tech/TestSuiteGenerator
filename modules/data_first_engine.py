@@ -398,12 +398,13 @@ def build_test_suite_v8(
     except Exception as _elig_err:
         log('[V8-ENGINE]   WARNING: eligibility negative injection failed: %s — continuing' % str(_elig_err)[:100])
 
-    # ── Strip OAuth/token plumbing steps (not test actions) ──
+    # ── Strip OAuth/token plumbing steps + sanitize malformed titles ──
     try:
-        from .step_templates import strip_plumbing_steps
+        from .step_templates import strip_plumbing_steps, sanitize_tc_titles
         strip_plumbing_steps(suite.test_cases, log)
+        sanitize_tc_titles(suite.test_cases, log)
     except Exception as _sp_err:
-        log('[V8-ENGINE]   WARNING: plumbing-step strip failed: %s — continuing' % str(_sp_err)[:100])
+        log('[V8-ENGINE]   WARNING: step/title cleanup failed: %s — continuing' % str(_sp_err)[:100])
 
     # ── Prune degenerate/junk TCs (e.g. "Verify_Verify" from a Chalk Note row) ──
     try:

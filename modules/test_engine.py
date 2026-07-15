@@ -1615,12 +1615,13 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print, deep_mine_res
     except Exception as _tr_err:
         log('[ENGINE]   WARNING: traceability pass failed: %s — continuing' % str(_tr_err)[:80])
 
-    # ── Strip OAuth/token plumbing steps (not test actions) ──
+    # ── Strip OAuth/token plumbing steps + sanitize malformed titles ──
     try:
-        from .step_templates import strip_plumbing_steps
+        from .step_templates import strip_plumbing_steps, sanitize_tc_titles
         strip_plumbing_steps(suite.test_cases, log)
+        sanitize_tc_titles(suite.test_cases, log)
     except Exception as _sp_err:
-        log('[ENGINE]   WARNING: plumbing-step strip failed: %s — continuing' % str(_sp_err)[:80])
+        log('[ENGINE]   WARNING: step/title cleanup failed: %s — continuing' % str(_sp_err)[:80])
 
     return suite
 

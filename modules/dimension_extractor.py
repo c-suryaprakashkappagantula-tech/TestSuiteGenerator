@@ -58,6 +58,7 @@ def extract_dimensions(
     nmno_result=None,
     nbop_data=None,
     classification: str = None,
+    data_only: bool = True,
     log: Callable = print,
 ) -> DimensionSet:
     """Extract all testable dimensions from gathered data.
@@ -69,6 +70,11 @@ def extract_dimensions(
       - Jira AC for explicit dimension mentions
       - Subtask AC for component-specific dimensions
       - Deep mine API specs for request field variations
+
+    data_only (default True): when True, ONLY scenarios/dimensions grounded in
+      Chalk/Jira/mine text are produced. Template generators (D1 state-matrix,
+      D2 partial-failure, A1 field-validation, A2 idempotency, A3 concurrency)
+      are suppressed entirely. Set to False to re-enable analyst supplements.
 
     Returns a DimensionSet with all dimensions, scenarios, negative specs,
     and a data inventory tracking what was found from each source.
@@ -177,6 +183,22 @@ def extract_dimensions(
         ))
         log('[DIM-EXTRACT]   No Jira AC text available')
 
+    # ── 2b. Extract negative/constraint scenarios from Jira AC ──
+    # Captures "no notification", "NOT send", "no changes to X" clauses that
+    # define what must NOT happen — not caught by the dimension extractor.
+    if jira and jira.acceptance_criteria:
+        _neg_existing_titles = {s.title.strip() for s in scenarios}
+        _jira_neg_scenarios = _extract_no_notification_negative_from_jira_ac(
+            jira, _neg_existing_titles, log
+        )
+        if _jira_neg_scenarios:
+            _neg_title_set = {s.title.strip().lower() for s in scenarios}
+            for _sc in _jira_neg_scenarios:
+                if _sc.title.strip().lower() not in _neg_title_set:
+                    scenarios.append(_sc)
+                    _neg_title_set.add(_sc.title.strip().lower())
+            log('[DIM-EXTRACT]   Jira AC scenarios (all testable lines): %d scenario(s) added' % len(_jira_neg_scenarios))
+
     # ── 3. Extract from subtask mines ──
     if deep_mine_result and deep_mine_result.subtask_mines:
         sub_dims, sub_scenarios, sub_source = _extract_dimensions_from_subtasks(
@@ -198,6 +220,25 @@ def extract_dimensions(
             status='empty',
         ))
         log('[DIM-EXTRACT]   No subtask mines available')
+
+    # ── 3b. Direct subtask post-condition mining ──
+    # Runs when jira.subtasks is available but deep_mine_result has no subtask data.
+    # Parses Post-Conditions sections to extract scenarios not covered by Chalk:
+    # dual notifications at BCD, format sync, and VZW regression.
+    _has_live_subtask_mines = bool(deep_mine_result and getattr(deep_mine_result, 'subtask_mines', None))
+    _has_jira_subtasks = bool(jira and getattr(jira, 'subtasks', None))
+    if _has_jira_subtasks and not _has_live_subtask_mines:
+        _direct_existing = {s.title.strip() for s in scenarios}
+        _direct_sc, _direct_source = _extract_scenarios_from_direct_subtasks(
+            jira, _direct_existing, log
+        )
+        if _direct_sc:
+            _direct_title_set = {s.title.strip().lower() for s in scenarios}
+            for _sc in _direct_sc:
+                if _sc.title.strip().lower() not in _direct_title_set:
+                    scenarios.append(_sc)
+                    _direct_title_set.add(_sc.title.strip().lower())
+        sources_checked.append(_direct_source)
 
     # ── 3b. UI Scenario Aggregation (when classification is 'ui' OR subtasks have UI work) ──
     # Enrich scenario list with subtask AC and Jira AC items via aggregation
@@ -335,13 +376,16 @@ def extract_dimensions(
     # ── 7. Build data inventory ──
     data_inventory = _build_data_inventory(sources_checked)
 
-    # ── 8. D1: State-Transition Matrix injection (API + hybrid features) ──
-    # For API/hybrid features, generate the full 7-state matrix as scenarios
-    # This ensures line-state coverage is never missed regardless of what Chalk has
+    # ── 8–10. Template generators (D1/D2/A1/A2/A3) ──
+    # Skipped in data_only mode (default). Only run when data_only=False (analyst mode).
+    # In data_only mode these variables must still be initialised for later references.
     _classification = (classification or '').lower()
-    _is_provisioning = False  # BUG-2 fix: initialize before try block
-    _contract = None          # BUG-3 fix: initialize before try block
-    if _classification in ('api', 'hybrid', ''):
+    _is_provisioning = False
+    _contract = None
+
+    if data_only:
+        log('[DIM-EXTRACT]   data_only=True — D1/D2/A1/A2/A3 template generators skipped')
+    elif _classification in ('api', 'hybrid', ''):
         try:
             from .test_analyst import generate_state_transition_matrix
             from .integration_contract import resolve_operation
@@ -863,6 +907,12 @@ def _clean_ac_title(ac_text: str) -> str:
     cleaned = re.sub(r'^[\s]*(?:[-*•]\s*|\d+[.)]\s*)', '', cleaned).strip()
 
     if len(cleaned) <= 130:
+        # Still strip trailing conjunctions / prepositions even on short titles
+        _short_danglers = re.compile(
+            r'[,\s]+(?:and|or|but|the|a|an|in|on|to|for|by|with|that|from|as|at)\s*$',
+            re.IGNORECASE,
+        )
+        cleaned = _short_danglers.sub('', cleaned)
         return cleaned
 
     # Find last space before position 130 to cut on word boundary
@@ -1621,6 +1671,12 @@ def _extract_dimensions_from_jira(
                 cap = p.capitalize()
             if cap not in unique_products:
                 unique_products.append(cap)
+        # Drop product values that are part of the feature NAME itself — those are the
+        # feature subject (e.g. "Hotspot" in "International Mobile Hotspot"), not a
+        # device-type dimension to vary over. Real device coverage comes from the
+        # grounded Chalk/AC scenarios (Phone/Tablet activation), not a synthetic combo TC.
+        if unique_products:
+            unique_products = [p for p in unique_products if p.lower() not in _feature_title_lower]
         if unique_products:
             tr = create_traceability('Jira AC', jira.key, 'Products in AC: ' + ', '.join(unique_products))
             dimensions.append(Dimension(name='product', values=unique_products, source=tr))
@@ -1846,6 +1902,412 @@ def _extract_dimensions_from_subtasks(
     )
 
     return dimensions, scenarios, source_entry
+
+
+# ================================================================
+# DIRECT SUBTASK POST-CONDITION MINING
+# ================================================================
+
+
+def _extract_scenarios_from_direct_subtasks(
+    jira,
+    existing_scenario_titles: Set[str],
+    log: Callable = print,
+) -> tuple:
+    """Comprehensively mine ALL Post-Conditions bullets from every subtask.
+
+    Generates one ExtractedScenario per meaningful bullet.  The priority-ordered
+    multi-signal dedup in combination_engine removes any that overlap with
+    Chalk scenarios — so there is no need to pre-filter here.
+
+    Special high-quality consolidated TCs are still added for well-known patterns
+    (dual BCD OFF notification, VZW format sync, VZW regression) because they
+    produce significantly better titles than raw bullet conversion.
+
+    Returns: (scenarios, data_source_entry)
+    """
+    scenarios: List[ExtractedScenario] = []
+    items_detail: List[str] = []
+
+    subtasks = getattr(jira, 'subtasks', None) or []
+    if not subtasks:
+        return scenarios, DataSourceEntry(
+            source_name='Direct Subtask Mine',
+            source_type='subtask',
+            items_extracted=0,
+            items_detail=[],
+            status='empty',
+        )
+
+    norm_existing = {re.sub(r'\s+', ' ', t.lower()).strip() for t in existing_scenario_titles}
+
+    # Minimum bullet length — very short post-conditions are usually
+    # confirmation phrases ("successful", "done"), not testable scenarios.
+    _MIN_BULLET_LEN = 25
+
+    # Keywords that indicate a bullet is informational or is a sub-clause fragment
+    _SKIP_PREFIXES = re.compile(
+        r'^(note[:\s]|see\s|refer\s|as\s+per\s|per\s+the\s|tbd[:\s]|n/a|'
+        r'if\s+(yes|no)[,\s]|yes\s*[,:]|no\s*[,:])',
+        re.IGNORECASE,
+    )
+
+    def _add_scenario(title, validation, category, source_type, source_id, steps_hint=None):
+        norm_t = re.sub(r'\s+', ' ', title.lower()).strip()
+        if norm_t in norm_existing or not title.strip():
+            return False
+        tr = create_traceability(
+            source_type=source_type,
+            source_id=source_id,
+            extracted_text=validation[:200],
+        )
+        scenarios.append(ExtractedScenario(
+            title=title,
+            validation=validation,
+            category=category,
+            source=tr,
+            steps_hint=steps_hint or [],
+        ))
+        norm_existing.add(norm_t)
+        return True
+
+    _vzw_sync_found = False
+
+    # Project key prefixes that indicate UAT execution subtasks — these contain
+    # test run results and UAT cycle names, NOT functional requirements.
+    _UAT_KEY_PREFIXES = ('MOBLPLTFRM-', 'SPRINT-', 'QATEST-', 'TESTING-')
+    # Summary keywords that also signal UAT execution (not requirements)
+    _UAT_SUMMARY_KW = ('uat cycle', 'uat testing', 'sprint testing', 'test cycle',
+                       'test execution', 'regression cycle', 'sanity cycle')
+
+    for st in subtasks:
+        st_key = getattr(st, 'key', '') or ''
+        st_summary = getattr(st, 'summary', '') or ''
+        st_desc = (
+            getattr(st, 'description', '') or
+            getattr(st, 'acceptance_criteria', '') or ''
+        )
+        if not st_desc:
+            continue
+
+        # Skip UAT execution subtasks — they list test cycle names and results,
+        # not functional acceptance criteria. Mining them produces spurious TCs.
+        if any(st_key.startswith(p) for p in _UAT_KEY_PREFIXES):
+            log('[DIM-EXTRACT]   Skipping UAT execution subtask: %s' % st_key)
+            continue
+        if any(kw in st_summary.lower() for kw in _UAT_SUMMARY_KW):
+            log('[DIM-EXTRACT]   Skipping UAT execution subtask (by summary): %s' % st_key)
+            continue
+
+        # ── Parse Post-Conditions section ──
+        pc_match = re.search(
+            r'\*Post[.\s\-]?Conditions?:?\*[^\r\n]*\r?\n(.*?)(?=\r?\n[^\r\n]*\*(?:Assumptions|User Story|Pre[.\s\-]?Conditions?))',
+            st_desc, re.IGNORECASE | re.DOTALL,
+        )
+        if not pc_match:
+            pc_match = re.search(
+                r'Post\s+Conditions?\s*:\s*\n(.*?)(?=\n\s*(?:Assumptions?|User Story|Pre.Conditions?|h[234]\.|$))',
+                st_desc, re.IGNORECASE | re.DOTALL,
+            )
+        if not pc_match:
+            continue
+
+        post_cond_text = pc_match.group(1).strip()
+
+        bullets = re.findall(r'^\s*#\s+(.+)$', post_cond_text, re.MULTILINE)
+        if not bullets:
+            bullets = re.findall(r'^\s*[*\-]\s+(.+)$', post_cond_text, re.MULTILINE)
+        if not bullets:
+            bullets = [ln.strip() for ln in post_cond_text.split('\n')
+                       if ln.strip() and len(ln.strip()) > _MIN_BULLET_LEN]
+        if not bullets:
+            continue
+
+        # Clean NBSP and stray markup from bullets
+        bullets = [re.sub(r'\xa0', ' ', b).strip() for b in bullets]
+        bullets = [re.sub(r'\*([^*]+)\*', r'\1', b).strip() for b in bullets]
+
+        bullet_combined = ' '.join(bullets).lower()
+        desc_lower = st_desc.lower()
+
+        # ── Detect VZW format-sync subtask ──
+        if (('vzw' in desc_lower or 'verizon' in desc_lower) and
+                any(kw in desc_lower for kw in ['same content and format', 'synchronize', 'sync']) and
+                'notification' in desc_lower):
+            _vzw_sync_found = True
+
+        # ── Special case 1: Dual BCD OFF notification — consolidated TC ──
+        off_notif_bullets = [b for b in bullets if
+                             'off notification' in b.lower() or 'mhs_pfo_off' in b.lower()]
+        if len(off_notif_bullets) >= 2:
+            title = ('Verify Mediation sends BOTH Primary data OFF and MHS_PFO_OFF notifications '
+                     'to NSL at BCD reset for de-prioritized TMO subscriber')
+            added = _add_scenario(
+                title=title,
+                validation='\n'.join(off_notif_bullets),
+                category='Happy Path',
+                source_type='Subtask AC',
+                source_id=st_key,
+                steps_hint=[
+                    'Set up TMO subscriber with both Primary and MHS buckets at 100%% (de-prioritized state)',
+                    'Trigger BCD reset event in Mediation',
+                    'Verify Mediation sends a Primary PDL_OFF notification to NSL for the subscriber',
+                    'Verify Mediation sends a separate MHS_PFO_OFF notification to NSL for the subscriber',
+                    'Verify Throttle flag transitions to N after both OFF notifications are sent',
+                    'Verify NSL removes NC_DEPRIOR via change-feature API after receiving both notifications',
+                ],
+            )
+            if added:
+                items_detail.append('%s: dual BCD OFF notification TC' % st_key)
+                log('[DIM-EXTRACT]   Direct subtask mine: dual OFF notification TC from %s' % st_key)
+            # Still fall through to extract remaining bullets individually
+
+        # ── Special case 2: VZW format sync — consolidated TC ──
+        is_format_sync = (
+            any(kw in bullet_combined for kw in [
+                'same content and format', 'all fields', 'pass-through', 'promo/cbrs',
+            ]) and
+            any(kw in bullet_combined for kw in ['vzw', 'verizon', 'tmo notification', 'format'])
+        )
+        if is_format_sync:
+            title = ('Verify TMO notification content and format matches VZW specification — '
+                     'all required fields present in both pass-through and Mediation-generated notifications')
+            steps = [
+                'Capture a sample TMO ON/OFF (or MHS_PFO_ON/OFF) notification emitted by Mediation',
+                'Compare TMO notification payload field-by-field against VZW notification format (Solution Doc §30.7)',
+                'Verify every field listed in the VZW sample is present in the TMO Notification Response',
+            ]
+            if 'promo' in bullet_combined or 'cbrs' in bullet_combined:
+                steps.append('Verify Promo/CBRS-related fields are present and set to 0 (until feature available)')
+            if 'pass-through' in bullet_combined or 'pass through' in bullet_combined:
+                steps.append('Verify pass-through notifications also carry the extended format fields')
+            added = _add_scenario(
+                title=title,
+                validation='\n'.join(bullets[:5]),
+                category='Happy Path',
+                source_type='Subtask AC',
+                source_id=st_key,
+                steps_hint=steps,
+            )
+            if added:
+                items_detail.append('%s: notification format verification TC' % st_key)
+                log('[DIM-EXTRACT]   Direct subtask mine: notification format TC from %s' % st_key)
+            # Still fall through to extract remaining bullets individually
+
+        # ── Comprehensive: one candidate per bullet ──
+        for bullet in bullets:
+            b_stripped = re.sub(r'\s+', ' ', bullet).strip()
+            if len(b_stripped) < _MIN_BULLET_LEN:
+                continue
+            if _SKIP_PREFIXES.match(b_stripped):
+                continue
+
+            # Skip bullets that are Jira ticket references to OTHER features.
+            # e.g. "F-4279 TMO - PSIM Reuse swap mdn" in a related subtask
+            # that lists dependent features — these are links, not test conditions.
+            if re.match(r'^(F|MWTGPROV|NSLNM|MOBLPLTFRM|SPRINT|QATEST)-\d+\b', b_stripped, re.IGNORECASE):
+                continue
+            # Skip UAT test-number patterns like "N 54.2 MWTGPROV-4166"
+            if re.match(r'^N\s+\d+\.\d+\s+\w+-\d+', b_stripped, re.IGNORECASE):
+                continue
+
+            b_lower = b_stripped.lower()
+            title = _clean_ac_title(b_stripped)
+
+            # Convert to "Verify..." if not already starting with an action verb
+            if not re.match(r'^(verify|validate|ensure|confirm|check)\b', title, re.IGNORECASE):
+                # Detect explicitly negative assertion (must NOT happen)
+                if re.search(r'\b(not|no|never|without)\b', b_lower):
+                    # Keep the phrasing — category will be Negative
+                    title = 'Verify that: ' + title[0].lower() + title[1:]
+                else:
+                    title = 'Verify ' + title[0].lower() + title[1:]
+
+            category = _infer_category_from_ac(b_stripped)
+            # Override: explicit "no X" / "not send" → always Negative
+            if re.search(r'\b(no\s+new|not\s+be\s+sent|not\s+send|should\s+not|must\s+not)\b', b_lower):
+                category = 'Negative'
+
+            steps_hint = _derive_steps_hint_from_ac(b_stripped, b_lower)
+
+            added = _add_scenario(
+                title=title,
+                validation=b_stripped,
+                category=category,
+                source_type='Subtask AC',
+                source_id=st_key,
+                steps_hint=steps_hint,
+            )
+            if added:
+                items_detail.append('%s: %s' % (st_key, title[:60]))
+                log('[DIM-EXTRACT]   Direct subtask mine: "%s" from %s' % (title[:70], st_key))
+
+    # ── VZW regression TC (once, if any format-sync subtask detected) ──
+    if _vzw_sync_found:
+        title = ('Verify existing VZW de-prioritization notification workflow is unaffected '
+                 'by TMO format synchronization changes')
+        added = _add_scenario(
+            title=title,
+            validation='VZW regression: after TMO notification format is updated to match VZW, existing VZW de-prioritization flow must remain unchanged',
+            category='Regression',
+            source_type='Jira AC',
+            source_id=jira.key if jira else '',
+            steps_hint=[
+                'Identify a VZW subscriber that triggers de-prioritization in SIT',
+                'Verify VZW subscriber receives correct ON notification — payload fields and format unchanged',
+                'Trigger BCD reset — verify VZW subscriber receives correct OFF notification',
+                'Compare VZW notification fields against pre-change baseline (no unintended field additions or removals)',
+                'Confirm VZW subscriber de-prioritization state transitions remain correct end-to-end',
+            ],
+        )
+        if added:
+            items_detail.append('VZW regression TC (format sync risk)')
+            log('[DIM-EXTRACT]   Direct subtask mine: VZW regression TC added')
+
+    total = len(scenarios)
+    source_entry = DataSourceEntry(
+        source_name='Direct Subtask Mine',
+        source_type='subtask',
+        items_extracted=total,
+        items_detail=items_detail,
+        status='success' if total > 0 else 'empty',
+    )
+    return scenarios, source_entry
+
+
+def _extract_no_notification_negative_from_jira_ac(
+    jira,
+    existing_scenario_titles: Set[str],
+    log: Callable = print,
+) -> List[ExtractedScenario]:
+    """Extract ALL testable scenarios from Jira AC — positive, negative, and regression.
+
+    Previously limited to "no notification" negative patterns only.  Now generates a
+    scenario candidate for every substantive AC line so the priority-ordered semantic
+    dedup engine can decide which ones are already covered by Chalk (Chalk wins when
+    semantically equivalent).
+
+    Returns: list of ExtractedScenario (category varies per line).
+    """
+    result: List[ExtractedScenario] = []
+    ac_text = (getattr(jira, 'acceptance_criteria', '') or '') if jira else ''
+    if not ac_text:
+        return result
+
+    norm_existing = {re.sub(r'\s+', ' ', t.lower()).strip() for t in existing_scenario_titles}
+
+    # Action verbs that confirm a line describes testable behavior
+    _TESTABLE_VERBS = re.compile(
+        r'\b(send|receive|trigger|provision|remove|process|transition|update|display|'
+        r'show|hide|notif|validate|verify|ensure|confirm|check|set|reset|add|delete|'
+        r'enable|disable|block|allow|reject|accept|handle|store|return|generate|emit|'
+        r'populate|clear|flag|unflag|apply|remove|strip|propagate|replac)\b',
+        re.IGNORECASE,
+    )
+
+    # Skip informational / discussion lines — not verifiable behavior
+    _SKIP_PATTERNS = re.compile(
+        r'^(note[:\s]|see\s|refer\s|as\s+per\s|per\s+the\s|tbd[:\s]|n/a|'
+        r'this\s+(feature|ticket|story|task|jira)|implementation|background|'
+        r'out\s+of\s+scope|in\s+scope|'
+        # Comment/discussion artifacts from Jira comment fields embedded in AC
+        r'\[confirmed|per\s+confirmation|confirmed\s+in\s+comments|'
+        r'yes[,\s]|no[,\s]?\s*(nothing|not\s+required|n/a)|'
+        r'\[per\s+|from\s+comments?|comment\s+from)',
+        re.IGNORECASE,
+    )
+
+    # Minimum length for a line to be considered testable
+    _MIN_LEN = 30
+
+    # Well-known domain-specific "no notification to X" patterns get better titles
+    _KNOWN_NEG_TITLES = {
+        'no new notification': 'Verify NSL does NOT send any notification to MBO when de-prioritization is provisioned or removed',
+        'no impacts to nbop': 'Verify NBOP shows no de-prioritization-related changes or messages (NBOP not impacted)',
+        'no impacts to mbo': 'Verify NSL does NOT send any notification to MBO when de-prioritization is provisioned or removed',
+        'no change for vzw': 'Verify existing VZW de-prioritization notification workflow is unaffected by this change',
+        'no changes for vzw': 'Verify existing VZW de-prioritization notification workflow is unaffected by this change',
+    }
+
+    for raw_line in ac_text.split('\n'):
+        line_stripped = re.sub(r'^[\s#*\-•\xa0]+', '', raw_line).strip()
+        # Remove trailing Jira wiki markup artifacts
+        line_stripped = re.sub(r'\xa0$', '', line_stripped).strip()
+
+        if not line_stripped or len(line_stripped) < _MIN_LEN:
+            continue
+        if _SKIP_PATTERNS.match(line_stripped):
+            continue
+        # Must contain at least one action verb OR a negation keyword to be testable
+        has_verb = bool(_TESTABLE_VERBS.search(line_stripped))
+        has_negation = bool(re.search(r'\b(no|not|never|without|zero)\b', line_stripped, re.IGNORECASE))
+        if not (has_verb or has_negation):
+            continue
+
+        # ── Build title ──────────────────────────────────────────────
+        title = _clean_ac_title(line_stripped)
+        t_lower = title.lower()
+
+        if not re.match(r'^(verify|validate|ensure|confirm|check)\b', title, re.IGNORECASE):
+            # Check domain-specific known-negative phrases first
+            matched_neg = next((v for k, v in _KNOWN_NEG_TITLES.items() if k in t_lower), None)
+            if matched_neg:
+                title = matched_neg
+            elif has_negation:
+                title = 'Verify that: ' + title[0].lower() + title[1:]
+            else:
+                title = 'Verify ' + title[0].lower() + title[1:]
+
+        norm_title = re.sub(r'\s+', ' ', title.lower()).strip()
+        if norm_title in norm_existing or len(norm_title) < 15:
+            continue
+
+        # ── Category ──────────────────────────────────────────────────
+        category = _infer_category_from_ac(line_stripped)
+        # Explicit negation → always Negative (unless already Regression)
+        if category not in ('Regression',):
+            if has_negation and re.search(
+                    r'\b(no\s+new|not\s+(?:be\s+sent|send|notify|trigger|impact)|'
+                    r'should\s+not|must\s+not|does\s+not|will\s+not|zero\s+notif)\b',
+                    line_stripped, re.IGNORECASE):
+                category = 'Negative'
+
+        # ── Steps ─────────────────────────────────────────────────────
+        steps_hint = _derive_steps_hint_from_ac(line_stripped, t_lower)
+
+        # Domain-specific steps for known patterns not caught by _derive_steps_hint_from_ac
+        if not steps_hint:
+            if 'mbo' in t_lower and has_negation:
+                steps_hint = [
+                    'Provision NC_DEPRIOR on a TMO subscriber (trigger de-prioritization)',
+                    'Monitor MBO notification log / event bus during provisioning and removal',
+                    'Verify zero notifications are sent from NSL to MBO for the NC_DEPRIOR event',
+                    'Trigger BCD reset (OFF notification path) — verify MBO remains silent',
+                ]
+            elif 'nbop' in t_lower and has_negation:
+                steps_hint = [
+                    'Provision NC_DEPRIOR on a TMO subscriber (trigger de-prioritization)',
+                    'Navigate to NBOP for the subscriber — check all relevant screens',
+                    'Verify NBOP shows no de-prioritization-related messages, banners, or status changes',
+                    'Remove NC_DEPRIOR — verify NBOP still shows no related messages',
+                ]
+
+        tr = create_traceability(
+            source_type='Jira AC',
+            source_id=jira.key,
+            extracted_text=line_stripped[:200],
+        )
+        result.append(ExtractedScenario(
+            title=title,
+            validation=line_stripped,
+            category=category,
+            source=tr,
+            steps_hint=steps_hint,
+        ))
+        norm_existing.add(norm_title)
+        log('[DIM-EXTRACT]   Jira AC scenario [%s]: "%s"' % (category, title[:70]))
+
+    return result
 
 
 # ================================================================
