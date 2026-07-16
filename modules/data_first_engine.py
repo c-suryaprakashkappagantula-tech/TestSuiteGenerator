@@ -143,6 +143,27 @@ def build_test_suite_v8(
         log=log,
     )
 
+    # ── Step 1a: Drop generic STRUCTURAL dimensions when grounded scenarios exist ──
+    # The combination engine turns single-value structural dimensions (channel=ITMBO,
+    # product=Phone/Smartwatch, input_type=MDN) into generic "Validate <feature> via ITMBO /
+    # for product=X / with MDN" combo TCs. When the feature already has grounded scenarios,
+    # these add nothing — the scenarios ARE the real tests. Structural dimensions also pick
+    # up noise from generic/shared API specs (device types, channels) that aren't feature-
+    # specific. So drop channel/product/input_type when scenarios exist; keep genuine
+    # functional dimensions (line_state, plan, http_method, etc.).
+    _STRUCTURAL_DIMS = {'channel', 'product', 'input_type'}
+    try:
+        if dimension_set.scenarios:
+            _dropped = [d.name for d in dimension_set.dimensions
+                        if getattr(d, 'name', '') in _STRUCTURAL_DIMS]
+            if _dropped:
+                dimension_set.dimensions = [d for d in dimension_set.dimensions
+                                            if getattr(d, 'name', '') not in _STRUCTURAL_DIMS]
+                log('[V8-ENGINE]   Dropped generic structural dimension(s) %s — %d grounded scenarios provide the real coverage' % (
+                    _dropped, len(dimension_set.scenarios)))
+    except Exception:
+        pass
+
     # ── Step 1b: Apply custom instructions to dimensions ──
     custom_text = options.get('custom_instructions', '')
     if custom_text and custom_text.strip():
