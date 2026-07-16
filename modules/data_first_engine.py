@@ -257,6 +257,24 @@ def build_test_suite_v8(
             log('[V8-ENGINE]   Merged %d unique V7 supplementary TCs (deduped %d)' % (
                 _merged_count, len(_v7_supplement_tcs) - _merged_count))
 
+    # ── Step 3a: OUTPUT-LEVEL prune of the generic structural dimension TC ──
+    # The 'FEATUREID_ITMBO_Validate <feature> <dim>=<val>' / '_NBOP_Validate' TC is generic
+    # boilerplate. Dropping the source dimension isn't enough — with browser deep-mine the
+    # api-spec/endpoint builders can still emit it. So remove it at the OUTPUT level (matching
+    # its unmistakable '_ITMBO_Validate'/'_NBOP_Validate'/'_API_Validate' summary) whenever the
+    # feature has grounded scenario TCs, which are the real coverage. Source-agnostic → immune
+    # to whichever path produced it.
+    try:
+        if dimension_set.scenarios:
+            import re as _re_gd
+            _gd_pat = _re_gd.compile(r'_(ITMBO|NBOP|API)_Validate\b', _re_gd.IGNORECASE)
+            _before_gd = len(test_cases)
+            test_cases = [tc for tc in test_cases if not _gd_pat.search(tc.summary or '')]
+            if len(test_cases) < _before_gd:
+                log('[V8-ENGINE]   Pruned %d generic structural dimension TC(s) at output level (scenarios provide coverage)' % (_before_gd - len(test_cases)))
+    except Exception:
+        pass
+
     # ── Step 3b: Cross-path near-duplicate pruning ──
     # Catches near-identical TCs that survived earlier per-path dedup because they
     # came from different generation paths (dimension TC vs scenario TC, etc.).
