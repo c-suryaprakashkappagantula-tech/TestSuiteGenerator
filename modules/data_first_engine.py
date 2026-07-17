@@ -437,6 +437,12 @@ def build_test_suite_v8(
     except Exception as _elig_err:
         log('[V8-ENGINE]   WARNING: eligibility negative injection failed: %s — continuing' % str(_elig_err)[:100])
 
+    # ── Feature-operation-specific negatives (narrowly gated: reconnect, optional-field queries) ──
+    try:
+        _inject_operation_negatives(suite, jira, chalk, classification, log)
+    except Exception as _opn_err:
+        log('[V8-ENGINE]   WARNING: operation negative injection failed: %s — continuing' % str(_opn_err)[:100])
+
     # ── Strip OAuth/token plumbing steps + sanitize malformed titles/steps/preconditions ──
     try:
         from .step_templates import strip_plumbing_steps, sanitize_tc_titles, sanitize_steps_and_preconditions
@@ -641,6 +647,105 @@ def _finalize_priorities(suite, feature_priority='', log: Callable = print):
         counts[tc.priority] = counts.get(tc.priority, 0) + 1
     log('[V8-ENGINE]   Priority (feature=%s): P1=%d | P2=%d | P3=%d' % (
         feature_priority or 'Medium', counts['P1'], counts['P2'], counts['P3']))
+
+
+def _inject_operation_negatives(suite, jira, chalk, classification, log: Callable = print):
+    """Feature-operation-specific negatives, keyed on HIGH-CONFIDENCE keyword patterns so
+    they only fire on the right features (no generic filler). Currently covers:
+      - Reconnect operations: state precondition + device/SIM eligibility.
+      - Query/inquiry APIs that return OPTIONAL data ('...when available'): optional-absent
+        graceful path + invalid-identifier error.
+    """
+    from .data_models_v8 import TestCase
+    from .test_engine import TestStep
+
+    fid = jira.key
+    feat = (jira.summary if jira else '') or fid
+    if ' - ' in feat:
+        feat = feat.split(' - ')[-1].strip()
+    feat = feat[:70]
+    text = ' '.join(filter(None, [
+        (jira.summary if jira else '') or '', (jira.description if jira else '') or '',
+        (jira.acceptance_criteria if jira and hasattr(jira, 'acceptance_criteria') else '') or '',
+        (chalk.scope if chalk and hasattr(chalk, 'scope') else '') or '',
+    ])).lower()
+    existing = ' '.join((tc.summary or '').lower() + ' ' + (tc.description or '').lower()
+                        for tc in suite.test_cases if getattr(tc, 'category', '') == 'Negative')
+    pending = []
+
+    def _add(token, summary, desc, pre, steps):
+        if token in existing:
+            return
+        tc = TestCase(summary=summary, description=desc, preconditions=pre,
+                      steps=steps, story_linkage=fid, label=fid, category='Negative')
+        try:
+            tc.priority = 'P2'
+        except Exception:
+            pass
+        try:
+            tc.traceability = TraceabilityRecord(source_type='Jira AC', source_id=fid,
+                                                 extracted_text=desc[:100], confidence=0.8)
+        except Exception:
+            pass
+        pending.append(tc)
+
+    # ── Reconnect operations (line-state precondition + device/SIM eligibility) ──
+    if 'reconnect' in text and any(k in text for k in ['disconnect', 'new imei', 'new iccid', 'new device', 'new sim']):
+        _add('not in a disconnected',
+             '%s_Negative_Reconnect_rejected_when_line_is_not_disconnected' % fid,
+             'Attempt Reconnect on a line that is NOT in a disconnected/deactivated state. NSL must reject the request (no re-registration performed).',
+             '1.\tA TMO line that is currently Active (not disconnected) exists.',
+             [
+                 TestStep(step_num=1, summary='Confirm the target TMO line is Active (not disconnected) in NBOP', expected='Line confirmed Active / not eligible for reconnect'),
+                 TestStep(step_num=2, summary='Invoke the Reconnect API for the Active line', expected='Request is rejected with an appropriate error (line not in a reconnectable state)'),
+                 TestStep(step_num=3, summary='Verify NBOP Transaction History and Syniverse state', expected='No reconnect transaction recorded; no Syniverse dereg/re-reg triggered; line unchanged'),
+             ])
+        _add('ineligible',
+             '%s_Negative_Reconnect_rejected_with_ineligible_or_invalid_new_IMEI_ICCID' % fid,
+             'Attempt Reconnect (new device / new SIM) using an ineligible or invalid new IMEI/ICCID (e.g. blacklisted IMEI or unknown ICCID). NSL must reject and not re-register.',
+             '1.\tA disconnected TMO line eligible for reconnect.\n2.\tAn ineligible/invalid new IMEI or ICCID is prepared.',
+             [
+                 TestStep(step_num=1, summary='Prepare a Reconnect request with an ineligible/invalid new IMEI or ICCID', expected='Request payload prepared with invalid device/SIM identifier'),
+                 TestStep(step_num=2, summary='Invoke the Reconnect API', expected='Request is rejected with a device/SIM validation error (e.g. ERR07)'),
+                 TestStep(step_num=3, summary='Verify no re-registration and NBOP Transaction History', expected='No Syniverse re-registration; no reconnect transaction recorded; line remains disconnected'),
+             ])
+
+    # ── Query/inquiry APIs returning OPTIONAL data (e.g. OSP remarks "when available") ──
+    _has_optional = any(k in text for k in ['when available', 'if available', 'when present', 'optional'])
+    _is_query = any(k in text for k in ['query', 'inquiry', 'queryportinstatus', 'status api', 'response includes', 'remark'])
+    if _has_optional and _is_query:
+        _add('not available',
+             '%s_Negative_Query_returns_gracefully_when_optional_data_is_not_available' % fid,
+             'Query for a record where the optional data (e.g. OSP remarks) is NOT available from the source. The API must return success with the optional field absent/empty and portals must render gracefully (no error).',
+             '1.\tA valid record whose optional field (e.g. OSP remarks) is not populated by the source.',
+             [
+                 TestStep(step_num=1, summary='Query the record whose optional field is not available from the carrier/source', expected='API returns HTTP 200'),
+                 TestStep(step_num=2, summary='Inspect the response for the optional field', expected='Optional field is absent or empty; no error, no null-pointer/500'),
+                 TestStep(step_num=3, summary='Verify the field renders gracefully in the consuming portals', expected='Portals display the record with the optional field blank/omitted; no UI error'),
+             ])
+        _add('invalid identifier',
+             '%s_Negative_Query_returns_appropriate_error_for_invalid_or_nonexistent_identifier' % fid,
+             'Query using an invalid / non-existent identifier (e.g. bad port-in transaction id). The API must return an appropriate not-found/error response rather than a generic failure.',
+             '1.\tAn invalid / non-existent identifier is prepared.',
+             [
+                 TestStep(step_num=1, summary='Query using an invalid / non-existent identifier', expected='Request submitted'),
+                 TestStep(step_num=2, summary='Verify the API response', expected='Appropriate not-found / validation error returned (not a 500 / stack trace)'),
+                 TestStep(step_num=3, summary='Verify no partial/incorrect data is returned', expected='Response contains no stale or fabricated record data'),
+             ])
+
+    if pending:
+        _max = 0
+        for tc in suite.test_cases:
+            try:
+                if tc.sno and str(tc.sno).isdigit():
+                    _max = max(_max, int(tc.sno))
+            except Exception:
+                pass
+        for tc in pending:
+            _max += 1
+            tc.sno = str(_max)
+            suite.test_cases.append(tc)
+        log('[V8-ENGINE]   Injected %d operation-specific negative TC(s)' % len(pending))
 
 
 def _inject_eligibility_negatives(suite, jira, chalk, classification, log: Callable = print):
