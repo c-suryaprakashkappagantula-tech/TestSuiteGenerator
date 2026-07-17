@@ -699,8 +699,18 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print, deep_mine_res
             _elig_neg = _synthesize_eligibility_negatives(suite, jira, feature_short, _fc, log)
             if _elig_neg:
                 suite.test_cases.extend(_elig_neg)
+                suite._synth_neg = getattr(suite, '_synth_neg', 0) + len(_elig_neg)
         except Exception as _elig_err:
             log('[ENGINE]   WARNING: Eligibility negative synthesis failed: %s — continuing' % str(_elig_err)[:100])
+
+        # ── Mediation/CDR negatives (for mediation features that skip generic negatives) ──
+        try:
+            _med_neg = _synthesize_mediation_negatives(suite, jira, feature_short, _fc, log)
+            if _med_neg:
+                suite.test_cases.extend(_med_neg)
+                suite._synth_neg = getattr(suite, '_synth_neg', 0) + len(_med_neg)
+        except Exception as _mn_err:
+            log('[ENGINE]   WARNING: Mediation negative synthesis failed: %s — continuing' % str(_mn_err)[:100])
 
     log('[ENGINE] Step 6: Preparing for expansion...')
     log('[ENGINE]   Feature classification: %s (is_ui=%s)' % (_fc.feature_type, _fc.is_ui))
@@ -1376,6 +1386,12 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print, deep_mine_res
         _CR_TC_CAP += _custom_add_count
         log('[ENGINE]   CR cap raised to %d (+ %d custom Add: instructions)' % (_CR_TC_CAP, _custom_add_count))
 
+    # Synthesized eligibility/mediation negatives should ADD to coverage, not evict positives.
+    _synth_neg = getattr(suite, '_synth_neg', 0)
+    if _synth_neg > 0:
+        _CR_TC_CAP += _synth_neg
+        log('[ENGINE]   CR cap raised to %d (+ %d synthesized negative TCs)' % (_CR_TC_CAP, _synth_neg))
+
     if _is_cr_or_bug and len(suite.test_cases) > _CR_TC_CAP:
         log('[ENGINE] Step 9b: CR/Bug fix detected — filtering to defect scope...')
         log('[ENGINE]   Before filter: %d TCs' % len(suite.test_cases))
@@ -1432,34 +1448,28 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print, deep_mine_res
                          or 'workflow' in tc.summary.lower()]
         _non_workflow_scored = [(_s, tc) for _s, tc in _scored if tc not in _workflow_tcs]
 
-        # Start with all workflow TCs (guaranteed to survive)
-        _kept = list(_workflow_tcs)
-        _cats_seen = set(tc.category for tc in _kept)
-
-        # Ensure category diversity: at least 1 happy path, 1 negative, 1 E2E/regression
-        _must_have_cats = {'Happy Path', 'Negative'}
-        for _score, tc in _non_workflow_scored:
-            if len(_kept) >= _CR_TC_CAP + len(_workflow_tcs):
-                break
-            if tc.category in _must_have_cats and tc.category not in _cats_seen:
-                _kept.append(tc)
-                _cats_seen.add(tc.category)
-            elif tc.category not in _must_have_cats and len(_kept) < _CR_TC_CAP + len(_workflow_tcs):
-                _kept.append(tc)
-                _cats_seen.add(tc.category)
-            elif tc.category in _cats_seen and len(_kept) < _CR_TC_CAP + len(_workflow_tcs):
-                _kept.append(tc)
-
-        # Fill remaining slots from top-scored TCs not yet included
+        # Start with workflow TCs + ALL Negative TCs. For a defect-focused CR the negative /
+        # error scenarios are the most valuable coverage, so they must never be capped out.
+        _negative_tcs = [tc for _s, tc in _non_workflow_scored if tc.category == 'Negative']
+        _kept = list(_workflow_tcs) + list(_negative_tcs)
         _kept_set = set(id(tc) for tc in _kept)
+        _effective_cap = _CR_TC_CAP + len(_workflow_tcs)
+
+        # Fill remaining slots (up to the cap) with the highest-scored non-negative TCs,
+        # guaranteeing at least one Happy Path is present.
+        _cats_seen = set(tc.category for tc in _kept)
+        if 'Happy Path' not in _cats_seen:
+            for _score, tc in _non_workflow_scored:
+                if tc.category == 'Happy Path':
+                    _kept.append(tc); _kept_set.add(id(tc)); _cats_seen.add('Happy Path'); break
         for _score, tc in _non_workflow_scored:
-            if len(_kept) >= _CR_TC_CAP + len(_workflow_tcs):
+            if len(_kept) >= _effective_cap:
                 break
             if id(tc) not in _kept_set:
                 _kept.append(tc)
                 _kept_set.add(id(tc))
 
-        suite.test_cases = _kept[:_CR_TC_CAP + len(_workflow_tcs)]
+        suite.test_cases = _kept
         log('[ENGINE]   After CR filter: %d TCs (%d workflow-split preserved + %d others capped at %d)' % (
             len(suite.test_cases), len(_workflow_tcs),
             len(suite.test_cases) - len(_workflow_tcs), _CR_TC_CAP))
@@ -4762,6 +4772,75 @@ def _synthesize_eligibility_negatives(suite, jira, feature_short, fc, log=print)
 
     if added:
         log('[ENGINE]   Added %d feature-eligibility negative TCs' % len(added))
+    return added
+
+
+def _synthesize_mediation_negatives(suite, jira, feature_short, fc, log=print):
+    """Synthesize MEDIATION/CDR negatives for mediation features.
+
+    Mediation/CDR features (e.g. MWTGPROV-4429 ILD SMS Identification) skip the generic
+    negative pass (CR ticket) and are excluded from the eligibility synthesizer, so they
+    can end up with ZERO negatives. Their real error paths are data-quality issues in the
+    CDR feed, not line/plan eligibility. Synthesize those: malformed record, unrecognised /
+    missing derivation key, and misclassification guard. Grounded in the mediation pipeline
+    (CDR ingest -> derivation -> PRR output); nothing fabricated beyond the feature's own
+    domain.
+    """
+    added = []
+    fid = jira.key
+    text = ' '.join(filter(None, [
+        (feature_short or ''), (jira.summary or ''),
+        (jira.acceptance_criteria or ''), ' '.join(jira.labels or []),
+    ])).lower()
+    _is_mediation = any(kw in text for kw in ['mediation', 'cdr', ' prr', 'record type',
+                                              ' ild', 'derivation', 'mapping table', 'usage file'])
+    if not _is_mediation:
+        return added
+
+    existing = ' '.join((tc.summary or '').lower() + ' ' + (tc.description or '').lower()
+                        for tc in suite.test_cases if getattr(tc, 'category', '') == 'Negative')
+
+    def _new(token, summary, description, steps):
+        if token in existing:
+            return
+        added.append(TestCase(
+            sno='', summary=summary, description=description,
+            preconditions='1.\tMediation and PRR batch jobs are running.\n'
+                          '2.\tA TMO CDR input file with the error condition is staged for the TMO workflow.',
+            story_linkage=fid, label=fid, category='Negative', steps=steps))
+
+    # 1) Malformed / unparseable record
+    _new('malformed',
+         'TC__%s_Negative: Verify Mediation handles a malformed/unparseable CDR record gracefully' % fid,
+         'Feed a TMO CDR file containing a malformed/unparseable record. Mediation must log/skip the bad record and continue processing the rest of the batch without crashing.',
+         [
+             TestStep(1, 'Stage a TMO CDR file with one malformed record among valid records', 'File staged in the mediation ingest location'),
+             TestStep(2, 'Run the mediation batch job (TMO workflow)', 'Batch runs to completion; the malformed record is logged/rejected, valid records are processed'),
+             TestStep(3, 'Verify the PRR output and mediation logs', 'Valid records produce correct PRR output; the malformed record is flagged in the error log — no crash, no batch abort'),
+         ])
+
+    # 2) Unrecognised derivation key (e.g. destination number with no matching country prefix)
+    _new('unrecognized',
+         'TC__%s_Negative: Verify Mediation handles an unrecognised destination number (no matching prefix)' % fid,
+         'Feed a record whose destination number (CALL_TO_TN) matches no known country prefix / derivation rule. Mediation must apply the defined default/fallback rather than mis-derive or crash.',
+         [
+             TestStep(1, 'Stage a TMO CDR record with a destination number not matching any country prefix', 'Record staged'),
+             TestStep(2, 'Run the mediation batch job (TMO workflow)', 'Record is processed via the defined fallback (e.g. flagged/defaulted), not mis-classified'),
+             TestStep(3, 'Verify the PRR output for the record', 'Output reflects the fallback rule; no incorrect country_code derived; error/exception logged as designed'),
+         ])
+
+    # 3) Missing required derivation field
+    _new('missing',
+         'TC__%s_Negative: Verify Mediation handles a record with the derivation key field missing' % fid,
+         'Feed a record with the required derivation field (e.g. CALL_TO_TN) missing/empty. Mediation must skip/flag the record gracefully and continue the batch.',
+         [
+             TestStep(1, 'Stage a TMO CDR record with the required derivation field missing/empty', 'Record staged'),
+             TestStep(2, 'Run the mediation batch job (TMO workflow)', 'Record is skipped/flagged; batch continues; no crash'),
+             TestStep(3, 'Verify mediation error log and PRR output', 'Missing-field record is logged; it does not appear (or appears flagged) in PRR output; other records unaffected'),
+         ])
+
+    if added:
+        log('[ENGINE]   Added %d mediation/CDR negative TCs' % len(added))
     return added
 
 
