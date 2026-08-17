@@ -12,6 +12,11 @@ Rules:
 3. Don't flood — cap at 50% of existing count
 4. Every added TC must be justifiable from sample patterns
 """
+# `re` is used by the rollback-scenario branch (re.sub on the title) but was never
+# imported, so that branch raised NameError the moment it ran. py_compile does not catch
+# this because Python resolves names at runtime. Found by tools/scan_hard_crashes.py.
+import re
+
 from .step_templates import get_step_chain
 
 
