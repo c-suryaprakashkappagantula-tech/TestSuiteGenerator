@@ -5361,9 +5361,17 @@ def _quality_gate(test_cases, feature_name, feature_id, log=print):
         _is_feature_cdr = any(kw in feature_name.lower() for kw in
             ['cdr', 'mediation', 'prr', 'ild', 'roaming', 'usage file', 'call type',
              'metering', 'mhs data', 'country translation', 'country code'])
-        _is_feature_notification = _fc.is_notification if '_fc' in dir() else False
+        # DORMANT BRANCH — behaviour preserved exactly, NameError risk removed.
+        # `_fc` is a local of build_test_suite and does NOT exist in this scope. The old
+        # guard `'_fc' in dir() else False` was therefore ALWAYS False (dir() with no
+        # argument lists only the current local scope), so notification-based cleanup has
+        # never run, and the `not _fc.is_api` term was only reachable in a branch that
+        # short-circuits before evaluating it. Written out explicitly so the dead reference
+        # cannot raise, and so the dormancy is visible rather than disguised as working code.
+        # To actually enable it, pass the feature classification into this function.
+        _is_feature_notification = False
 
-        if (_is_feature_cdr or (_is_feature_notification and not _fc.is_api)) and not _is_ui_mirror_tc:
+        if _is_feature_cdr and not _is_ui_mirror_tc:
             # CDR/Notification features should NOT have UI or API verification language
             _api_contam_terms = ['century report', 'service grouping', 'ne portal',
                                   'nbop mig', 'mig table', 'mig_device', 'mig_sim', 'mig_line',

@@ -93,7 +93,10 @@ def _neg(idx, fid, title, val, ctx):
         else:
             _restore = 'original subscriber state'
         _op_name = re.sub(r'(?i)^.*?rollback\s*(?:failure\s*)?(?:for\s*)?(?:of\s*)?', '', title).strip()
-        _op_name = _op_name[:50] if _op_name else fname
+        # `fname` is a local of enrich_scenarios, NOT of _neg — referencing it here raised
+        # NameError whenever the regex stripped the title to nothing. _neg's own `title` is
+        # the correct fallback.
+        _op_name = _op_name[:50] if _op_name else title
         steps = [
             TestStep(1, 'Trigger %s and simulate mid-operation failure' % _op_name[:50], 'Operation fails during processing'),
             TestStep(2, 'Verify NSL detects failure and initiates rollback', 'Rollback triggered — inconsistency detected'),
