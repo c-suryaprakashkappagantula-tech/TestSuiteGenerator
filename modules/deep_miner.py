@@ -712,11 +712,14 @@ _TESTABLE_KEYWORDS = (
     'shall', 'must', 'should', 'verify', 'validate', 'ensure', 'check',
     'given', 'when', 'then', 'is able to', 'able to', 'displays', 'display',
     'sends', 'send', 'updates', 'update', 'rejects', 'reject', 'returns', 'return',
-    'expected', 'assert', 'confirm', 'allow', 'allows',
+    'expected', 'assert', 'confirm', 'allow', 'allows', 'show', 'shows',
 )
 
-# A standalone AC item does not begin with a conjunction/preposition — those are
-# continuation lines produced when a wrapped sentence is split on '\n'.
+# Conjunctions/prepositions that mark a continuation line — but ONLY when they appear in
+# lowercase. Case is the reliable signal: a wrapped sentence continues in lowercase
+# ("in the requestType field use 'TMO'."), whereas a genuine requirement that happens to
+# open with a preposition is capitalised ("On selecting the option, show the same fields").
+# Matching case-insensitively discarded that second form, which is a real requirement.
 _CONTINUATION_STARTS = (
     'and ', 'or ', 'but ', 'in ', 'on ', 'at ', 'to ', 'for ', 'with ', 'from ',
     'as ', 'if ', 'so ', 'than ', 'that ', 'which ', 'while ', 'though ',
@@ -735,24 +738,35 @@ def _is_testable_ac_item(text: str) -> bool:
         "Verify # Same rules applicable for TMO though we don't have SOLO or Second line"
             -> a note, asserting nothing
 
-    Two gates, both needed:
-      1. Not a continuation — a real AC item starts with a capital or a keyword, never
-         with a conjunction/preposition.
-      2. Contains an assertion word, mirroring linked_fetcher's existing gate. A line
-         that asserts nothing is documentation, not a test.
+    Three gates, all required:
+      1. Not a CONDITION HEADER. A line ending in ':' introduces the child bullets that
+         follow — it states a precondition, not a test. Keeping one produced the junk TC
+         "Verify in CS is ON, and line is identified as ... when 'MNO TMO' permission":
+         that is the header "When 'MNO_TMO' permission in CS is ON, and line is identified
+         as 'TMO' based on networkProvider value:" with its clauses reordered by the title
+         builder.
+      2. Not a lowercase continuation. CASE is the signal: a wrapped sentence resumes in
+         lowercase ("in the requestType field use 'TMO'."), while a real requirement that
+         opens with a preposition is capitalised ("On selecting the option, show the same
+         fields..."). An earlier case-INSENSITIVE version of this rule discarded that second
+         form, silently dropping a genuine requirement — worse than the junk it removed.
+      3. Asserts something, mirroring linked_fetcher's existing keyword gate. A line that
+         asserts nothing is documentation ("Same rules applicable for TMO though we don't
+         have SOLO or Second line in TMO").
     """
     t = (text or '').strip().strip('#*-\u2022 \t')
     if len(t) < 15:
         return False
     low = t.lower()
-    # Gate 1: continuation fragment
-    if low.startswith(_CONTINUATION_STARTS):
+    # Gate 1: condition header introducing child bullets
+    if t.rstrip().endswith(':'):
         return False
-    # A standalone statement starts with an uppercase letter, a digit or a keyword.
+    # Gate 2: lowercase continuation fragment
     first_alpha = next((c for c in t if c.isalpha()), '')
-    if first_alpha and first_alpha.islower() and not low.startswith(_TESTABLE_KEYWORDS):
-        return False
-    # Gate 2: must assert something
+    if first_alpha and first_alpha.islower():
+        if low.startswith(_CONTINUATION_STARTS) or not low.startswith(_TESTABLE_KEYWORDS):
+            return False
+    # Gate 3: must assert something
     return any(k in low for k in _TESTABLE_KEYWORDS)
 
 
