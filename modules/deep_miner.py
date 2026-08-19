@@ -706,6 +706,56 @@ def _find_related_chalk_in_db(jira, log=print) -> List[Dict]:
 # SOURCE 3: SUBTASK DEEP MINING
 # ================================================================
 
+# Words that mark a line as an assertion rather than prose. Same vocabulary
+# linked_fetcher._extract_content already uses, so the two agree on what "testable" means.
+_TESTABLE_KEYWORDS = (
+    'shall', 'must', 'should', 'verify', 'validate', 'ensure', 'check',
+    'given', 'when', 'then', 'is able to', 'able to', 'displays', 'display',
+    'sends', 'send', 'updates', 'update', 'rejects', 'reject', 'returns', 'return',
+    'expected', 'assert', 'confirm', 'allow', 'allows',
+)
+
+# A standalone AC item does not begin with a conjunction/preposition — those are
+# continuation lines produced when a wrapped sentence is split on '\n'.
+_CONTINUATION_STARTS = (
+    'and ', 'or ', 'but ', 'in ', 'on ', 'at ', 'to ', 'for ', 'with ', 'from ',
+    'as ', 'if ', 'so ', 'than ', 'that ', 'which ', 'while ', 'though ',
+    'because ', 'however ', 'also ', 'i.e', 'e.g', 'etc',
+)
+
+
+def _is_testable_ac_item(text: str) -> bool:
+    """True when a mined line is a standalone, testable AC statement.
+
+    Previously ANY line over 15 characters became an AC item, so wrapped prose and
+    notes entered the test-case pool as titles. For MWTGPROV-4190 that produced two
+    nonsense test cases:
+        "Verify in CS is ON, and line is identified as '_ when MNO TMO permission"
+            -> a continuation fragment; the sentence started on the previous line
+        "Verify # Same rules applicable for TMO though we don't have SOLO or Second line"
+            -> a note, asserting nothing
+
+    Two gates, both needed:
+      1. Not a continuation — a real AC item starts with a capital or a keyword, never
+         with a conjunction/preposition.
+      2. Contains an assertion word, mirroring linked_fetcher's existing gate. A line
+         that asserts nothing is documentation, not a test.
+    """
+    t = (text or '').strip().strip('#*-\u2022 \t')
+    if len(t) < 15:
+        return False
+    low = t.lower()
+    # Gate 1: continuation fragment
+    if low.startswith(_CONTINUATION_STARTS):
+        return False
+    # A standalone statement starts with an uppercase letter, a digit or a keyword.
+    first_alpha = next((c for c in t if c.isalpha()), '')
+    if first_alpha and first_alpha.islower() and not low.startswith(_TESTABLE_KEYWORDS):
+        return False
+    # Gate 2: must assert something
+    return any(k in low for k in _TESTABLE_KEYWORDS)
+
+
 def _mine_subtask(subtask: Dict, log=print) -> SubtaskMine:
     """Deep-mine a single subtask for all testable content."""
     mine = SubtaskMine(
@@ -735,14 +785,14 @@ def _mine_subtask(subtask: Dict, log=print) -> SubtaskMine:
     items = re.split(r'(?:^|\n)\s*(?:#|\d+\.)\s*', ac_text)
     for item in items:
         item = item.strip()
-        if item and len(item) > 15:
+        if _is_testable_ac_item(item):
             mine.ac_items.append(item)
 
     # If no numbered items, try line-by-line
     if not mine.ac_items:
         for line in ac_text.split('\n'):
             line = line.strip()
-            if line and len(line) > 15 and not line.startswith('http'):
+            if not line.startswith('http') and _is_testable_ac_item(line):
                 mine.ac_items.append(line)
 
     # Parse description for pre/post conditions and user story
