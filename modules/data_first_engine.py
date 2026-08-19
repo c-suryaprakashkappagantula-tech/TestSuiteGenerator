@@ -168,6 +168,7 @@ def build_test_suite_v8(
     custom_text = options.get('custom_instructions', '')
     if custom_text and custom_text.strip():
         log('[V8-ENGINE] Step 1b: Applying custom instructions...')
+        options['_jira'] = jira  # let the custom scenario builder use feature context
         dimension_set = _apply_custom_instructions(dimension_set, custom_text, options, log)
 
     # ── Zero-items check ──
@@ -592,6 +593,10 @@ def _prune_degenerate_tcs(suite, feature_id, log: Callable = print):
         return
     kept, dropped = [], 0
     for tc in suite.test_cases:
+        # Never prune a user-requested scenario.
+        if getattr(tc, 'user_requested', False):
+            kept.append(tc)
+            continue
         _s = tc.summary or ''
         _s = _re_deg.sub(r'^%s[_\s]*' % _re_deg.escape(feature_id or ''), '', _s, flags=_re_deg.IGNORECASE)
         _s = _re_deg.sub(r'^(ITMBO|NBOP|API)[_\s]*', '', _s, flags=_re_deg.IGNORECASE)
@@ -1572,26 +1577,20 @@ def _apply_custom_instructions(
             _ensure_dimension_value(dimension_set, dim_name, dim_value, log)
             log('[V8-CUSTOM]   Ensuring %s=%s has scenarios' % (dim_name, dim_value))
 
-    # ── Parse explicit "Add:" lines as extra scenarios ──
-    for line in custom_text.split('\n'):
-        line_stripped = line.strip()
-        if line_stripped.lower().startswith(('add:', 'include:', 'also:')):
-            desc = line_stripped.split(':', 1)[1].strip()
-            if desc and len(desc) > 10:
-                from .traceability import create_traceability
-                from .data_models_v8 import ExtractedScenario
-                tr = create_traceability(
-                    source_type='Jira AC',
-                    source_id='custom_instruction',
-                    extracted_text='User instruction: %s' % desc[:200],
-                )
-                dimension_set.scenarios.append(ExtractedScenario(
-                    title=desc[:120],
-                    validation='Verify that %s' % desc[:100] if not desc.lower().startswith('verify') else desc[:120],
-                    category='Happy Path',
-                    source=tr,
-                ))
-                log('[V8-CUSTOM]   Added custom scenario: "%s"' % desc[:60])
+    # ── Build full, user-requested scenarios from the instruction text ──
+    # Recognises lifecycle operations (activation, deactivation, reactivation,
+    # change rate plan upgrade/downgrade, port-in/out, suspend/resume, hotline,
+    # SIM swap, …) and explicit "Add:/Include:/Also:" lines, emitting complete
+    # multi-step scenarios (correct category + priority). These are flagged
+    # user_requested=True and are protected from grounding/dedup pruning.
+    try:
+        from .custom_scenario_builder import build_custom_scenarios
+        _jira = options.get('_jira')  # optional; builder tolerates None
+        user_scenarios = build_custom_scenarios(custom_text, _jira, log)
+        if user_scenarios:
+            dimension_set.scenarios.extend(user_scenarios)
+    except Exception as _cs_err:
+        log('[V8-CUSTOM]   WARNING: custom scenario builder failed: %s — continuing' % str(_cs_err)[:120])
 
     return dimension_set
 
@@ -1681,7 +1680,31 @@ def _prune_near_duplicate_tcs(test_cases: List, threshold: float = 0.70, log: Ca
     kept: List = []
     kept_fps: List[frozenset] = []
 
+    def _is_chalk_ground_truth(tc) -> bool:
+        """A TC traced to a Chalk scenario is documented ground truth, not a derivative.
+
+        Chalk validations for one feature are deliberately incremental — 'get into the
+        screen', 'select the value', 'submit the request', 'verify it completed' share most
+        of their vocabulary, so a 70% word-overlap test collapses them even though they are
+        distinct tests. For MWTGPROV-4190 that discarded 3 of the 6 documented validations
+        (current value un-editable / submit the request / BCD updated on the line) while
+        keeping lower-authority Jira-AC fragments. The dedup priority table already ranks
+        'Chalk Scenario' first; this makes the pruner respect it.
+        """
+        if getattr(tc, 'from_chalk', False):
+            return True
+        tr = getattr(tc, 'traceability', None)
+        st = str(getattr(tr, 'source_type', '') or '').strip().lower()
+        return st in ('chalk scenario', 'business rule', 'chalk')
+
     for tc in test_cases:
+        # User-requested scenarios always survive dedup (kept as-is, and never
+        # used to displace another TC).
+        if getattr(tc, 'user_requested', False) or _is_chalk_ground_truth(tc):
+            kept.append(tc)
+            kept_fps.append(_fingerprint(tc))
+            continue
+
         fp = _fingerprint(tc)
         dup_idx = -1
 

@@ -1228,12 +1228,31 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print, deep_mine_res
             (s.summary or '').lower() + ' ' + (s.expected or '').lower()
             for s in tc.steps
         )
+    def _is_chalk_ground_truth(tc) -> bool:
+        """A TC traced to a documented Chalk scenario is ground truth, not a derivative.
+
+        The keyword rules above were written to drop 'single-concern' TCs on the assumption
+        they add nothing once a comprehensive TC covers the same ground. That assumption is
+        wrong when the single concern is one of the feature's DOCUMENTED validations: for
+        MWTGPROV-4190 these rules silently deleted 'Current DPFO Reset Day is displayed and
+        un-editable' and 'NBOP sends the requestType as TMO', two of the six validations
+        written on the Chalk page. Being a step inside a bigger TC is not the same as being
+        tested — QA signs off against the documented list.
+        """
+        if getattr(tc, 'from_chalk', False):
+            return True
+        tr = getattr(tc, 'traceability', None)
+        st = str(getattr(tr, 'source_type', '') or '').strip().lower()
+        return st in ('chalk scenario', 'business rule', 'chalk')
+
     _subset_remove = set()
     for i, tc in enumerate(suite.test_cases):
         _tc_lower = tc.summary.lower()
         _tc_step_count = len(tc.steps) if tc.steps else 0
         if _tc_step_count > 6:  # Don't remove large TCs
             continue
+        if _is_chalk_ground_truth(tc):
+            continue                      # documented Chalk validation — never auto-remove
         for _sk_tc, _sk_step in _subset_keywords:
             if _sk_tc in _tc_lower:
                 # Check if any LARGER TC has this as a step
@@ -2165,7 +2184,7 @@ def _chalk_scenario_to_tc(sc, idx, feature_id, channel='', feature_type=''):
                 'EVENT_MESSAGES entry found with correct EVENT_TYPE, EVENT_STATUS=Success, '
                 'and REQUEST_MSG JSON includes "networkProvider":"TMO" for TMO transactions'))
 
-    return TestCase(
+    _tc = TestCase(
         sno=str(idx),
         summary='TC%03d_%s_%s' % (idx, feature_id, clean_title),
         description=description,
@@ -2175,6 +2194,15 @@ def _chalk_scenario_to_tc(sc, idx, feature_id, channel='', feature_type=''):
         label=feature_id,
         category=sc.category or 'Happy Path',
     )
+    # Mark provenance AT CREATION. Dedup and subset-removal run BEFORE traceability is
+    # attached (that happens in a later step), so a traceability-based check there always
+    # read empty and Chalk validations were pruned anyway. This flag is available from the
+    # moment the TC exists.
+    try:
+        _tc.from_chalk = True
+    except Exception:
+        pass
+    return _tc
 
 
 def _scenario_context(sc):

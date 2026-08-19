@@ -5,6 +5,7 @@ Zero setup — single .db file, ships with Python.
 """
 import sqlite3
 import json
+import re
 import time
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -457,8 +458,70 @@ def load_chalk(feature_id: str, pi_label: str) -> Optional[Dict]:
     return dict(row)
 
 
+_MOJIBAKE = {
+    '\xa0': ' ',        # non-breaking space, shows as 'á' when mis-decoded
+    '\u00e1': ' ',      # the mis-decoded form already baked into old cache rows
+    '\u0092': "'", '\u0091': "'", '\u2018': "'", '\u2019': "'",
+    '\u0093': '"', '\u0094': '"', '\u201c': '"', '\u201d': '"',
+    '\u00e6': "'", '\u00c6': "'",   # cp1252 smart quotes mis-decoded (æ / Æ)
+    '\u0096': '-', '\u0097': '-', '\u2013': '-', '\u2014': '-',
+}
+
+
+def _clean_chalk_text(s: str) -> str:
+    """Normalise text that was cached with mis-decoded cp1252 bytes.
+
+    Old chalk_cache rows (written 2026-04) contain 'á' for a non-breaking space and
+    'æ'/'Æ' for smart quotes, which then flow straight into generated TC titles.
+    """
+    out = str(s or '')
+    for bad, good in _MOJIBAKE.items():
+        out = out.replace(bad, good)
+    return ' '.join(out.split())
+
+
+def is_junk_chalk_scenario(title: str, feature_id: str = '') -> bool:
+    """True when a cached 'scenario' is really page furniture, not a test scenario.
+
+    The Chalk crawler captures every bullet/line in the feature block, so a feature's
+    scenario list also picks up the feature TITLE, a bare linked-feature ID, and section
+    headings. For MWTGPROV-4190 that meant 4 of 10 'scenarios' were noise:
+        [NBOP, INTG]: New MVNO - Change BCD - Split 1   (the feature title)
+        Linked Feature in PI-51:                       (a label)
+        MWTGPROV-3948                                  (a feature id)
+        NBOP Implementation:                           (a section heading)
+
+    These rules are lifted verbatim from the proven gate in
+    test_engine.build_test_suite, and are applied here — at the single point every engine
+    loads Chalk data — so the V8/V9 Data-First engines get the same protection instead of
+    only the legacy path.
+    """
+    t = _clean_chalk_text(title)
+    low = t.lower()
+    fid = str(feature_id or '').strip().lower()
+    return bool(
+        # Pure Jira/feature ID reference, e.g. 'MWTGPROV-3948'
+        re.match(r'^[A-Z]+-\d+$', t.strip()) or
+        # Section heading ending in a colon, e.g. 'NBOP Implementation:'
+        (t.endswith(':') and len(t) < 40) or
+        'linked feature' in low or
+        # Too short to be a scenario
+        len(t) < 10 or
+        # Just the feature id, with or without a trailing colon
+        (fid and low.strip(':').strip() == fid) or
+        # The feature TITLE line: Chalk tag block followed by the feature name,
+        # e.g. '[NBOP, INTG]: New MVNO - Change BCD - Split 1'
+        bool(re.match(r'^\[[A-Z, ]+\]\s*:', t))
+    )
+
+
 def load_chalk_as_object(feature_id: str, pi_label: str):
-    """Load cached Chalk data and reconstruct as ChalkData object. Returns None if not cached."""
+    """Load cached Chalk data and reconstruct as ChalkData object. Returns None if not cached.
+
+    Scenarios are sanitised on the way out: page furniture is dropped and mis-decoded
+    characters are normalised. Doing it here fixes ALREADY-CACHED rows without a re-crawl,
+    and covers every engine, since they all load Chalk through this function.
+    """
     from .chalk_parser import ChalkData, ChalkScenario
     raw = load_chalk(feature_id, pi_label)
     if not raw:
@@ -475,20 +538,29 @@ def load_chalk_as_object(feature_id: str, pi_label: str):
     except:
         data.tables = []
     try:
+        _dropped = []
         for s in json.loads(raw.get('scenarios_json', '[]')):
+            _title = _clean_chalk_text(s.get('title', ''))
+            if is_junk_chalk_scenario(_title, feature_id):
+                _dropped.append(_title[:60])
+                continue
             data.scenarios.append(ChalkScenario(
                 scenario_id=s.get('scenario_id', ''),
-                title=s.get('title', ''),
-                prereq=s.get('prereq', ''),
+                title=_title,
+                prereq=_clean_chalk_text(s.get('prereq', '')),
                 cdr_input=s.get('cdr_input', ''),
                 derivation_rule=s.get('derivation_rule', ''),
                 steps=s.get('steps', []),
                 variations=s.get('variations', []),
-                validation=s.get('validation', ''),
+                validation=_clean_chalk_text(s.get('validation', '')),
                 category=s.get('category', ''),
             ))
-    except:
-        pass
+        if _dropped:
+            print('[CHALK-CACHE] %s/%s: dropped %d non-scenario line(s): %s'
+                  % (feature_id, pi_label, len(_dropped), '; '.join(_dropped)))
+    except Exception as _sc_err:
+        print('[CHALK-CACHE] %s/%s: scenario parse failed: %s'
+              % (feature_id, pi_label, str(_sc_err)[:120]))
     return data
 
 
