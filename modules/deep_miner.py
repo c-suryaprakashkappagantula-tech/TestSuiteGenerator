@@ -727,6 +727,294 @@ _CONTINUATION_STARTS = (
 )
 
 
+_NBSP = '\u00a0'
+_ZWSP = '\u200b'
+
+# Colon-terminated AC lines come in two kinds and must not be treated alike.
+_ENUM_HEADER_MARKERS = (
+    'the following', 'following:', 'as follows', 'below:', 'as below',
+    'listed below',
+)
+
+# 'Screens impacted:' and friends are scope metadata, not an enumeration of
+# requirements. Classified as an enumeration they produced a test case reading
+# 'Verify Screens impacted: New Line Activation, Add Line Activation, ...', and they
+# also swallowed the genuine requirement that followed them. They fall through to the
+# condition default instead, which only ever drops.
+
+# Non-functional acceptance notes. A functional suite has nothing to execute for
+# 'KPIs and SLAs should be BAU' - it asserts that nothing changes, about metrics
+# rather than behaviour - yet it satisfies the assertion gate through 'should'.
+_NON_FUNCTIONAL_SUBJECTS = ('kpi', 'kpis', 'sla', 'slas')
+_BAU_MARKERS = ('bau', 'business as usual')
+
+_HEADER_NONE = ''
+_HEADER_CONDITION = 'condition'
+_HEADER_ENUMERATION = 'enumeration'
+
+# At most this many list items are folded into one composed AC item; beyond that the
+# item is summarised, so a 200-row table cannot become a 20,000-character "title".
+_MAX_ENUM_CHILDREN = 20
+
+# Requirement verbs this AC actually uses. Each was observed in the before/after diff
+# dropping a real requirement that the looser substring match had been keeping by
+# accident - e.g. 'In NBOP UI, add a MNO migration radio button', 'VZW commercial lines
+# to be migrated to TMO', 'NBOP/NSL to include feature code'.
+_REQUIREMENT_VERBS = (
+    'add', 'create', 'remove', 'enable', 'disable', 'support', 'provide',
+    'include', 'populate', 'migrate',
+)
+
+# Matched as stems with an optional inflection. Plain substring matching had been
+# passing 'Authentication: JWT' because 'Authentication' contains 'then'; plain word
+# boundaries then went too far and lost 'NSL has updated ...', because 'updated' is
+# not the listed form of 'update'. Stem + inflection keeps both correct.
+_KEYWORD_STEMS = tuple(sorted(
+    {k.strip().rstrip('s') for k in _TESTABLE_KEYWORDS if ' ' not in k.strip()}
+    | set(_REQUIREMENT_VERBS),
+    key=len, reverse=True,
+))
+_KEYWORD_PHRASES = tuple(k.strip() for k in _TESTABLE_KEYWORDS if ' ' in k.strip())
+
+_KEYWORD_RE = re.compile(
+    r'\b(?:%s)(?:s|es|ed|ing|d)?\b|\b(?:%s)\b' % (
+        '|'.join(re.escape(s) for s in _KEYWORD_STEMS),
+        '|'.join(re.escape(p) for p in _KEYWORD_PHRASES),
+    ),
+    re.IGNORECASE,
+)
+
+
+def _is_table_markup(text: str) -> bool:
+    """True for a Jira table row or header.
+
+    Jira renders tables as '|cell|cell|' and headers as '||cell||'. A row is data, not
+    a requirement: MWTGPROV-4086 links its related stories in a table, and its rows
+    ('|MWTGNBOP-5584|NBOP - TMO - Enable EID for TMO Transaction|') are not tests.
+    """
+    t = (text or '').strip()
+    if not t:
+        return False
+    return t.startswith('|') or t.count('|') >= 2
+
+
+def _is_table_fragment(text: str) -> bool:
+    """True when a line is part of a table, judged inside a header's list.
+
+    Stricter than _is_table_markup on purpose. Jira wraps wide tables one cell per
+    line, so MWTGPROV-4406's rows arrive as 'Default Value : 1 |' - a single pipe. Within
+    a list a single pipe already means table, whereas the gate must stay conservative
+    because a requirement sentence could legitimately contain one.
+    """
+    return '|' in (text or '')
+
+
+def _is_non_functional_note(text: str) -> bool:
+    """True for non-functional acceptance boilerplate.
+
+    'KPIs and SLAs should be BAU' passes the assertion gate on 'should' but there is
+    nothing for a functional suite to execute: it asserts that non-functional metrics
+    are unchanged. Deliberately narrow - it needs a non-functional subject AND a
+    business-as-usual claim, so a real requirement that merely mentions an SLA is
+    unaffected.
+    """
+    low = (text or '').lower()
+    words = set(re.findall(r'[a-z]+', low))
+    if not words & set(_NON_FUNCTIONAL_SUBJECTS):
+        return False
+    return any(marker in low for marker in _BAU_MARKERS)
+
+
+def _normalise_ac_text(text: str) -> str:
+    """Replace the invisible characters Jira AC is full of with plain equivalents.
+
+    Non-breaking (U+00A0) and zero-width (U+200B) spaces appear throughout this AC -
+    'Mediation\u00a0Function:\u00a0usage-history', 'NBOP_Advanced_Support\u200b'.
+    Left in place they survive into test-case titles and defeat word-boundary matching.
+    """
+    return (text or '').replace(_NBSP, ' ').replace(_ZWSP, '')
+
+
+def _flatten_ac(text: str) -> str:
+    """Collapse an item to a single line. Titles are derived from this."""
+    return re.sub(r'\s+', ' ', (text or '').replace('\n', ' ')).strip()
+
+
+def _strip_ac_bullet(text: str) -> str:
+    """Strip leading bullet/number decoration from an item."""
+    return re.sub(r'^\s*(?:#+|\*+|\d+[.)]|[-\u2022\u2023\u25cf])\s*', '',
+                  (text or '').strip()).strip().strip('#*-\u2022 \t')
+
+
+def _first_sentence_ac(text: str) -> str:
+    """The first sentence of the first line - what the item is actually about.
+
+    Gate 3 is anchored here. Judging the whole item let sprint-planning notes
+    ('The following stories are Fast Tracked to 53.3', 24 lines) pass because some
+    unrelated line further down happened to say 'display'.
+    """
+    line = _strip_ac_bullet((text or '').strip().split('\n', 1)[0])
+    match = re.match(r'(.+?[.!?])(?:\s|$)', line)
+    return (match.group(1) if match else line).strip()
+
+
+def _asserts_something(text: str) -> bool:
+    """True when the text states a checkable expectation, on word boundaries."""
+    return bool(_KEYWORD_RE.search(text or ''))
+
+
+def _header_kind(text: str) -> str:
+    """Classify a colon-terminated AC line.
+
+    ENUMERATION introduces the list that carries the requirement's detail
+    ('... for the following roles:', 'The response fields ... as follows:'). The
+    header alone is not a test; the header plus its items is one.
+
+    CONDITION states a precondition ("When 'MNO_TMO' permission in CS is ON, and line
+    is identified as 'TMO' based on networkProvider value:"). That line is exactly
+    what became the junk TC07 on MWTGPROV-4190, so it must never become a title.
+
+    Anything colon-terminated that is not an enumeration is treated as a condition.
+    That is the safe default: a condition can only ever be dropped, never titled.
+    """
+    first = _strip_ac_bullet(_flatten_ac((text or '').strip().split('\n', 1)[0]))
+    if not first.endswith(':'):
+        return _HEADER_NONE
+    if any(marker in first.lower() for marker in _ENUM_HEADER_MARKERS):
+        return _HEADER_ENUMERATION
+    return _HEADER_CONDITION
+
+
+def _split_ac_items(ac_text: str):
+    """Split AC text into one item per requirement.
+
+    Splitting only on '#' and '1.' left bare '-'/'*' bullets and blank-line separated
+    paragraphs glued into a single item. Runs before asterisks are stripped, because
+    a leading '*' is a bullet here even though '*text*' is Jira bold.
+    """
+    text = _normalise_ac_text(ac_text)
+    parts = re.split(
+        r'(?:^|\n)[ \t]*(?:#+[ \t]*|\*+[ \t]+|\d+[.)][ \t]+|[-\u2022\u2023\u25cf][ \t]+)'
+        r'|\n[ \t]*\n',
+        text,
+    )
+    out = []
+    for part in parts:
+        if not part:
+            continue
+        part = part.replace('*', '').strip()
+        if part:
+            out.append(part)
+    return out
+
+
+# A row of a list: short, or 'Name - description' / 'Key: value' shaped. Length alone
+# is not enough - 'GB_Promo_Remaining - Usage remaining across all Promos in a bill
+# cycle.' is 94 characters and is unmistakably a row, while 'In NBOP UI, MNO migration
+# selection will be based on EnableMNO_Migration menu access.' is a requirement that
+# merely follows one.
+_LIST_ENTRY_RE = re.compile(r'^[A-Za-z0-9_.%/\- ]{2,40}\s*[-\u2013:]\s+\S')
+_LIST_ENTRY_MAX_PLAIN = 80
+
+
+def _is_list_entry(text: str) -> bool:
+    """True when the line looks like an entry in the list a header introduced."""
+    t = (text or '').strip()
+    if not t:
+        return False
+    if len(t) <= _LIST_ENTRY_MAX_PLAIN:
+        return True
+    return bool(_LIST_ENTRY_RE.match(t))
+
+
+def _absorb_enumeration_block(items, start: int):
+    """Collect the list items belonging to the enumeration header at items[start].
+
+    Absorption stops at the next header, or at the next item that stands on its own as
+    a requirement. Everything in between is detail the gate would otherwise discard -
+    the point of the change is that it survives attached to its parent instead of
+    vanishing along with the parent.
+
+    Returns (children, index_after_block).
+    """
+    children = []
+    # Lines glued into the header item itself are its first children. Table markup is
+    # skipped here for the same reason it is skipped below: it is data, not a
+    # requirement, and MWTGPROV-4406 reaches this function with its table already glued
+    # to the header.
+    for line in (items[start] or '').split('\n')[1:]:
+        line = _strip_ac_bullet(_flatten_ac(line))
+        if _is_table_fragment(line):
+            break  # everything from here on is table, not requirement detail
+        if line:
+            children.append(line)
+
+    index = start + 1
+    while index < len(items):
+        candidate = items[index]
+        if _header_kind(candidate) != _HEADER_NONE:
+            break
+        if _is_testable_ac_item(candidate):
+            break
+        line = _strip_ac_bullet(_flatten_ac(candidate))
+        if _is_table_fragment(line) or not _is_list_entry(line):
+            break
+        if len(line) >= 3:
+            children.append(line)
+        index += 1
+    return children, index
+
+
+# A header owns the list that follows it. Two or more consecutive list-shaped entries
+# are a list; one is not. Without this, the entries of a condition header's list are
+# gated individually and leak through as requirements - 'Screens impacted:' followed by
+# eight screen names produced the test case 'Verify Add Line Activation', because 'add'
+# is a requirement verb and 'Add Line Activation' is a screen name.
+_MIN_LIST_RUN = 2
+
+
+def _absorb_header_list(items, start: int):
+    """Collect the run of list entries following the header at items[start].
+
+    Unlike _absorb_enumeration_block this ignores the assertion gate, because a list
+    entry that happens to read like an assertion is still a list entry. It is therefore
+    restricted to genuine runs, and stops at the first item that is not list-shaped.
+
+    Returns (entries, index_after_run) - entries is empty unless the run is long enough.
+    """
+    entries = []
+    index = start + 1
+    while index < len(items):
+        candidate = items[index]
+        if _header_kind(candidate) != _HEADER_NONE:
+            break
+        line = _strip_ac_bullet(_flatten_ac(candidate))
+        if not line or _is_table_fragment(line) or not _is_list_entry(line):
+            break
+        entries.append(line)
+        index += 1
+    if len(entries) < _MIN_LIST_RUN:
+        return [], start + 1
+    return entries, index
+
+
+def _compose_enumeration_item(header: str, children) -> str:
+    """One AC item = the header plus the items it introduces.
+
+    Deliberately a single item. The header alone would be a contentless test ('Use the
+    following parameters'), and the children alone are attribute names that assert
+    nothing - which is why both sides were being dropped. Together they are one
+    testable requirement, and _clean_ac_title truncates on a word boundary so the
+    header still reads as the title.
+    """
+    head = _strip_ac_bullet(_flatten_ac(header)).rstrip(':').strip()
+    kept = children[:_MAX_ENUM_CHILDREN]
+    composed = '%s: %s' % (head, ', '.join(kept))
+    if len(children) > len(kept):
+        composed += ', ... (+%d more)' % (len(children) - len(kept))
+    return composed
+
+
 def _is_testable_ac_item(text: str) -> bool:
     """True when a mined line is a standalone, testable AC statement.
 
@@ -754,20 +1042,29 @@ def _is_testable_ac_item(text: str) -> bool:
          asserts nothing is documentation ("Same rules applicable for TMO though we don't
          have SOLO or Second line in TMO").
     """
-    t = (text or '').strip().strip('#*-\u2022 \t')
+    raw = _normalise_ac_text(text)
+    t = _strip_ac_bullet(_flatten_ac(raw))
     if len(t) < 15:
         return False
-    low = t.lower()
-    # Gate 1: condition header introducing child bullets
-    if t.rstrip().endswith(':'):
+    # Gate 1: a colon-terminated line is a header, not a test in its own right.
+    # The caller decides what to do with it: an enumeration header is paired with the
+    # items it introduces, a condition header becomes a precondition.
+    if _header_kind(raw) != _HEADER_NONE:
         return False
     # Gate 2: lowercase continuation fragment
+    low = t.lower()
     first_alpha = next((c for c in t if c.isalpha()), '')
     if first_alpha and first_alpha.islower():
         if low.startswith(_CONTINUATION_STARTS) or not low.startswith(_TESTABLE_KEYWORDS):
             return False
-    # Gate 3: must assert something
-    return any(k in low for k in _TESTABLE_KEYWORDS)
+    # Gate 4: table markup is data, not a requirement
+    if _is_table_markup(t):
+        return False
+    # Gate 5: non-functional boilerplate is out of scope for a functional suite
+    if _is_non_functional_note(t):
+        return False
+    # Gate 3: asserts something - judged on the first sentence, not the whole blob
+    return _asserts_something(_first_sentence_ac(raw))
 
 
 def _mine_subtask(subtask: Dict, log=print) -> SubtaskMine:
@@ -791,23 +1088,65 @@ def _mine_subtask(subtask: Dict, log=print) -> SubtaskMine:
         mine.component = 'DB'
 
     # Parse AC
-    ac_text = subtask.get('acceptance_criteria', '') or ''
-    ac_text = re.sub(r'\{[^}]+\}', '', ac_text)  # Remove Jira formatting
-    ac_text = re.sub(r'\*', '', ac_text)
+    ac_raw = subtask.get('acceptance_criteria', '') or ''
+    ac_raw = re.sub(r'\{[^}]+\}', '', ac_raw)  # Remove Jira formatting macros
+    # Asterisk-free copy for the whole-text scans further down. The splitter gets the
+    # raw copy, because a leading '*' is a bullet even though '*text*' is Jira bold.
+    ac_text = re.sub(r'\*', '', ac_raw)
 
-    # Extract numbered items (# item or 1. item)
-    items = re.split(r'(?:^|\n)\s*(?:#|\d+\.)\s*', ac_text)
-    for item in items:
-        item = item.strip()
+    def _add_ac_item(value):
+        # Trailing ':' would otherwise leave a title ending in a dangling colon.
+        value = _strip_ac_bullet(_flatten_ac(value)).rstrip(':').strip()
+        if value and value not in mine.ac_items:
+            mine.ac_items.append(value)
+
+    items = _split_ac_items(ac_raw)
+    i = 0
+    while i < len(items):
+        item = items[i]
+        kind = _header_kind(item)
+
+        if kind == _HEADER_ENUMERATION:
+            children, next_index = _absorb_enumeration_block(items, i)
+            if children:
+                # Header + its list = one requirement. Dropping the header on its own
+                # deleted whole requirement blocks (MWTGPROV-4230, 4349, 3971).
+                _add_ac_item(_compose_enumeration_item(item, children))
+                i = next_index
+                continue
+            # Nothing to absorb - the list was unusable (a raw JSON payload, say).
+            # Judge the header on its own merits rather than discarding it: without
+            # this, MWTGPROV-4406 loses 'The following information will be provided by
+            # the API response...' entirely.
+            bare = _strip_ac_bullet(_flatten_ac(item)).rstrip(':').strip()
+            if _is_testable_ac_item(bare):
+                _add_ac_item(bare)
+            i += 1
+            continue
+
+        if kind == _HEADER_CONDITION:
+            # A precondition, never a test case. This is TC07's source line on 4190.
+            condition = _strip_ac_bullet(_flatten_ac(item))
+            entries, next_index = _absorb_header_list(items, i)
+            if entries:
+                # The list belongs to the header. Left loose, its entries get gated one
+                # by one and screen names surface as requirements (MWTGPROV-4349).
+                condition = '%s %s' % (condition, ', '.join(entries))
+            if condition and condition not in mine.preconditions:
+                mine.preconditions.append(condition)
+            i = max(next_index, i + 1)
+            continue
+
         if _is_testable_ac_item(item):
-            mine.ac_items.append(item)
+            _add_ac_item(item)
+        i += 1
 
-    # If no numbered items, try line-by-line
+    # If nothing was mined, try line-by-line
     if not mine.ac_items:
         for line in ac_text.split('\n'):
             line = line.strip()
             if not line.startswith('http') and _is_testable_ac_item(line):
-                mine.ac_items.append(line)
+                _add_ac_item(line)
 
     # Parse description for pre/post conditions and user story
     desc = subtask.get('description', '') or ''
