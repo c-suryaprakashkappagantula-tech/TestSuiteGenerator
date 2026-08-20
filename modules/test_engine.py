@@ -1494,11 +1494,21 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print, deep_mine_res
         log('[ENGINE]   After CR filter: %d TCs (%d workflow-split preserved + %d others capped at %d)' % (
             len(suite.test_cases), len(_workflow_tcs),
             len(suite.test_cases) - len(_workflow_tcs), _CR_TC_CAP))
-        suite.warnings.append('CR/Bug fix mode: TCs filtered to defect scope (max %d)' % _CR_TC_CAP)
+        # Report the limit actually applied, not the base cap. _effective_cap adds the
+        # workflow-split TCs that are preserved unconditionally, so quoting _CR_TC_CAP made
+        # a suite sitting exactly on its limit look like it had breached one.
+        suite.warnings.append(
+            'CR/Bug fix mode: TCs filtered to defect scope (max %d)' % _effective_cap)
 
-        # Re-number
+        # Re-number. The TCnnn_ prefix baked into each summary at construction time must
+        # move with sno, or the titles collide - two TC001_ and two TC009_ on MWTGPROV-4166
+        # before this. The digit width each generator chose is preserved.
         for i, tc in enumerate(suite.test_cases, 1):
             tc.sno = str(i)
+            _m = re.match(r'^TC(\d+)_', tc.summary or '')
+            if _m:
+                tc.summary = re.sub(r'^TC\d+_', 'TC%0*d_' % (len(_m.group(1)), i),
+                                    tc.summary, count=1)
             for j, step in enumerate(tc.steps, 1):
                 step.step_num = j
 
