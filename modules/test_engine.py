@@ -697,7 +697,8 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print, deep_mine_res
         # Line/subscriber features (MVNO, commercial-line, feature-gated) must prove
         # eligibility gating even when generic negatives were skipped for a CR ticket.
         try:
-            _elig_neg = _synthesize_eligibility_negatives(suite, jira, feature_short, _fc, log)
+            _elig_neg = _synthesize_eligibility_negatives(suite, jira, feature_short, _fc, log,
+                                                     chalk=chalk)
             if _elig_neg:
                 suite.test_cases.extend(_elig_neg)
                 suite._synth_neg = getattr(suite, '_synth_neg', 0) + len(_elig_neg)
@@ -4717,7 +4718,8 @@ def _generate_negative_scenarios(suite, feature_id, log=print):
     return neg_tcs
 
 
-def _synthesize_eligibility_negatives(suite, jira, feature_short, fc, log=print):
+def _synthesize_eligibility_negatives(suite, jira, feature_short, fc, log=print,
+                                      chalk=None):
     """Synthesize FEATURE-ELIGIBILITY negatives for line/subscriber features.
 
     Fills a real coverage gap observed on MVNO / commercial-line features
@@ -4747,15 +4749,33 @@ def _synthesize_eligibility_negatives(suite, jira, feature_short, fc, log=print)
     suite_text = ' '.join(tc.summary + ' ' + tc.description for tc in suite.test_cases).lower()
     text = jira_text + ' ' + suite_text
 
+    # Eligibility gating must be evidenced by SOURCE material - the ticket and the Chalk
+    # scenarios - never by test cases this run has already generated. On MWTGPROV-4166 the
+    # ticket matched no eligibility keyword; the gate opened on 'subscriber' and 'eligible'
+    # appearing in test cases produced moments earlier, and the four negatives it then
+    # injected raised the CR cap by four (see line 1412). Generated text authorising further
+    # generation is how an unrelated defect ticket acquired eligibility coverage.
+    _chalk_titles = ' '.join(
+        (getattr(s, 'title', '') or '') + ' ' + (getattr(s, 'validation', '') or '')
+        for s in (getattr(chalk, 'scenarios', None) or [])
+    ).lower()
+    source_text = jira_text + ' ' + _chalk_titles
+
     # Mediation/CDR features are handled by the notification/CDR templates — skip here.
     if any(kw in text for kw in ['mediation', ' cdr', 'record type', 'prr', 'billing record']):
         return added
 
     # Only apply to actual line/subscriber/feature-gated features.
-    if not any(kw in text for kw in ['commercial line', 'subscriber', 'line on tmo',
-                                     'feature', 'hotspot', 'tethering', 'roaming',
-                                     'entitlement', 'add-on', 'addon', 'rate plan',
-                                     'rateplan', 'eligible', 'provision']):
+    #
+    # 'feature' is deliberately NOT in this list. Every ticket here is about feature
+    # provisioning, so the bare word signals nothing about eligibility gating - it fired on
+    # 48% of the cache and was the sole trigger for 71 features, including MWTGPROV-4166, a
+    # guaranteed-delivery defect that received four eligibility negatives unrelated to its
+    # acceptance criteria. The keywords kept below each state a gating condition outright.
+    if not any(kw in source_text for kw in ['commercial line', 'subscriber', 'line on tmo',
+                                            'hotspot', 'tethering', 'roaming',
+                                            'entitlement', 'add-on', 'addon', 'rate plan',
+                                            'rateplan', 'eligible', 'provision']):
         return added
 
     has_commercial = 'commercial line' in text or 'commercial lines' in text
