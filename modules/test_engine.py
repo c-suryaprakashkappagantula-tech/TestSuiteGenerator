@@ -4513,6 +4513,37 @@ def _cross_check_attachments(suite, docs, feature_id, log=print):
     return gap_tcs
 
 
+# A report/DB column identifier: ROOT_TRANSACTION_ID, REQ_SENT_DATE, RESP_RECEIVED_DATE.
+_COLUMN_ID_RE = re.compile(r'\b[A-Z]{2,}(?:_[A-Z0-9]{2,})+\b')
+_COLUMN_ID_LIMIT = 3
+_CAPS_RATIO_LIMIT = 0.30
+
+
+def _is_report_dump(text: str) -> bool:
+    """True when an "open item" is really a dumped report table, not a requirement.
+
+    Attachments include Service-Grouping HTML exports, and flattening one yields its
+    header row followed by cell values - 'COPY OF SERVICE GROUPING FILTER CONDITIONS
+    ROOT_TRANSACTION_ID CONTAINS ... TRANSACTION_NAME APPLICATION_NAME OUTBOUND_URL'.
+    That is data, and it was becoming a test case titled after its own column headers.
+
+    Measured against all four attachment-derived test cases in the cache: the report dump
+    carries 14 column identifiers and 45% capitalised tokens, while the three genuine
+    notes carry none and at most 11%. Either signal alone separates them; both are
+    required here so a requirement that merely names one column is not discarded.
+    """
+    if not text:
+        return False
+    column_ids = len(_COLUMN_ID_RE.findall(text))
+    if column_ids >= _COLUMN_ID_LIMIT:
+        return True
+    tokens = [t for t in re.findall(r"[A-Za-z_][A-Za-z_']+", text) if len(t) > 1]
+    if not tokens:
+        return False
+    caps_ratio = sum(1 for t in tokens if t.isupper()) / len(tokens)
+    return caps_ratio >= _CAPS_RATIO_LIMIT and column_ids >= 1
+
+
 def _build_open_item_tc(item, idx, feature_id, filename):
     """Build a specific TC for an open item (not generic)."""
     item_low = item.lower()
@@ -4571,6 +4602,9 @@ def _build_open_item_tc(item, idx, feature_id, filename):
     clean = re.sub(r'^open\s*item\s*:?\s*', '', item, flags=re.IGNORECASE).strip()
     if not clean or len(clean) < 10:
         return None  # skip garbage open items
+    if _is_report_dump(clean):
+        # A flattened Service-Grouping / report export, not a requirement.
+        return None
 
     # Truncate for summary but keep full text in description
     short = clean[:60] if len(clean) <= 60 else clean[:57] + '...'
