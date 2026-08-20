@@ -8,6 +8,7 @@ import re
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple
 from .jira_fetcher import JiraIssue, validate_jira_issue
+from .step_templates import truncate_at_word as _trim_title
 from .chalk_parser import ChalkData, ChalkScenario
 from .doc_parser import ParsedDoc
 from .step_templates import get_step_chain
@@ -445,7 +446,7 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print, deep_mine_res
                     if not _already_covered:
                         _tc = TestCase(
                             sno=str(_next_contract_idx),
-                            summary='TC%03d_%s_Negative: %s' % (_next_contract_idx, jira.key, neg_desc[:80]),
+                            summary='TC%03d_%s_Negative: %s' % (_next_contract_idx, jira.key, _trim_title(neg_desc, 80)),
                             description='Contract-mandated negative: %s' % neg_desc,
                             preconditions='1.\tPrepare test data for negative scenario.',
                             story_linkage=jira.key, label=jira.key, category='Negative',
@@ -587,7 +588,7 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print, deep_mine_res
                     if _fc.feature_type == 'ui_portal':
                         _tc = TestCase(
                             sno=str(_next_contract_idx),
-                            summary='TC%03d_%s_Negative: %s' % (_next_contract_idx, jira.key, neg_desc[:80]),
+                            summary='TC%03d_%s_Negative: %s' % (_next_contract_idx, jira.key, _trim_title(neg_desc, 80)),
                             description='Contract-mandated negative: %s' % neg_desc,
                             preconditions='1.\tNBOP portal accessible.\n2.\tPrepare test data for negative scenario.',
                             story_linkage=jira.key, label=jira.key, category='Negative',
@@ -602,7 +603,7 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print, deep_mine_res
                     else:
                         _tc = TestCase(
                             sno=str(_next_contract_idx),
-                            summary='TC%03d_%s_Negative: %s' % (_next_contract_idx, jira.key, neg_desc[:80]),
+                            summary='TC%03d_%s_Negative: %s' % (_next_contract_idx, jira.key, _trim_title(neg_desc, 80)),
                             description='Contract-mandated negative: %s' % neg_desc,
                             preconditions='1.\tPrepare test data for negative scenario.',
                             story_linkage=jira.key, label=jira.key, category='Negative',
@@ -751,7 +752,7 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print, deep_mine_res
                 _steps = [TestStep(i+1, s, e) for i, (s, e) in enumerate(_step_tuples)]
                 tc = TestCase(
                     sno=str(_next_idx),
-                    summary='TC%03d_%s_%s' % (_next_idx, jira.key, sg['title'][:90]),
+                    summary='TC%03d_%s_%s' % (_next_idx, jira.key, _trim_title(sg['title'], 90)),
                     description=_desc, preconditions=_precon,
                     story_linkage=jira.key, label=jira.key, category=sg['category'],
                     test_category=sg.get('test_category', ''),
@@ -812,7 +813,7 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print, deep_mine_res
                 _steps = [TestStep(i+1, s, e) for i, (s, e) in enumerate(_step_tuples)]
                 tc = TestCase(
                     sno=str(_next_idx),
-                    summary='TC%03d_%s_%s' % (_next_idx, jira.key, sg['title'][:90]),
+                    summary='TC%03d_%s_%s' % (_next_idx, jira.key, _trim_title(sg['title'], 90)),
                     description=_desc, preconditions=_precon,
                     story_linkage=jira.key, label=jira.key, category=sg['category'],
                     test_category=sg.get('test_category', ''),
@@ -901,7 +902,7 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print, deep_mine_res
             _custom_chain = _gsc_custom(desc, '', (jira.key + ' ' + desc).lower())
             _custom_steps = [TestStep(i, s, e) for i, (s, e) in enumerate(_custom_chain, 1)]
             suite.test_cases.append(TestCase(
-                sno=str(_next), summary='TC%02d_%s - Custom: %s' % (_next, jira.key, desc[:60]),
+                sno=str(_next), summary='TC%02d_%s - Custom: %s' % (_next, jira.key, _trim_title(desc, 60)),
                 description=desc, preconditions='As per custom instruction',
                 story_linkage=jira.key, label=jira.key, category='Happy Path',
                 steps=_custom_steps))
@@ -2590,7 +2591,7 @@ def _mine_jira_comments(jira, suite, log=print):
                 if overlap < 0.5:
                     new_tcs.append(TestCase(
                         sno=str(next_idx),
-                        summary='TC%02d_%s - Comment: %s' % (next_idx, jira.key, line[:70]),
+                        summary='TC%02d_%s - Comment: %s' % (next_idx, jira.key, _trim_title(line, 70)),
                         description='From Jira comment by %s (%s): %s' % (
                             comment.get('author', 'Unknown'), comment.get('created', ''), line),
                         preconditions='1.\tRefer to Jira comment for context\n2.\tSystem in ready state',
@@ -3465,7 +3466,7 @@ def _build_from_jira_only(jira, feature_name='', log=print):
 
         tcs.append(TestCase(
             sno=str(idx),
-            summary='TC%03d_%s_Verify CR fix: %s' % (idx, jira.key, fname[:60]),
+            summary='TC%03d_%s_Verify CR fix: %s' % (idx, jira.key, _trim_title(fname, 60)),
             description='Reproduce the defect scenario and verify the fix. '
                         'Defect: %s. '
                         'Expected after fix: %s' % (
@@ -3505,7 +3506,7 @@ def _build_from_jira_only(jira, feature_name='', log=print):
         if _error_msg:
             tcs.append(TestCase(
                 sno=str(idx),
-                summary='TC%03d_%s_Negative: Verify old error "%s" no longer occurs' % (idx, jira.key, _error_msg[:40]),
+                summary='TC%03d_%s_Negative: Verify old error "%s" no longer occurs' % (idx, jira.key, _trim_title(_error_msg, 40)),
                 description='Confirm the previously reported error ("%s") no longer occurs after the fix.' % _error_msg,
                 preconditions=_precond_text or '1.\tMDN is De-Active in TMO\n2.\tMDN is Active in NBOP/NSL DB',
                 steps=[
@@ -3632,7 +3633,7 @@ def _build_from_jira_only(jira, feature_name='', log=print):
         for _wf_name in _unique_wf_normal:
             tcs.append(TestCase(
                 sno=str(idx),
-                summary='TC%03d_%s_Verify %s workflow for %s' % (idx, jira.key, _wf_name, fname[:40]),
+                summary='TC%03d_%s_Verify %s workflow for %s' % (idx, jira.key, _wf_name, _trim_title(fname, 40)),
                 description='Verify %s correctly handles the %s workflow/API. '
                             'Each workflow is a separate API that must be validated individually.' % (fname, _wf_name),
                 preconditions='1.\tSubscriber line in required state for %s\n'
@@ -4069,7 +4070,7 @@ def _build_from_deep_mine(deep_mine_result, jira, feature_short, log=print):
 
             tc = TestCase(
                 sno=str(idx),
-                summary='TC%03d_%s_%s' % (idx, jira.key, title[:80]),
+                summary='TC%03d_%s_%s' % (idx, jira.key, _trim_title(title, 80)),
                 description='[From Chalk API spec: %s] %s' % (spec.api_name, validation[:200] if validation else title),
                 preconditions='1.\tAPI endpoint available: %s\n2.\tValid test data prepared\n3.\t%s' % (
                     spec.endpoint or spec.api_name,
@@ -4116,7 +4117,7 @@ def _build_from_deep_mine(deep_mine_result, jira, feature_short, log=print):
             if overlap < 0.5 and len(rule) > 20:
                 tc = TestCase(
                     sno=str(idx),
-                    summary='TC%03d_%s_Verify: %s' % (idx, jira.key, rule[:70]),
+                    summary='TC%03d_%s_Verify: %s' % (idx, jira.key, _trim_title(rule, 70)),
                     description='[From Chalk API spec: %s] Validate business rule: %s' % (spec.api_name, rule),
                     preconditions='1.\tAPI endpoint available\n2.\tTest data prepared per rule',
                     story_linkage=jira.key, label=jira.key, category='Happy Path',
@@ -4163,7 +4164,7 @@ def _build_from_deep_mine(deep_mine_result, jira, feature_short, log=print):
 
             tc = TestCase(
                 sno=str(idx),
-                summary='TC%03d_%s_%s' % (idx, jira.key, title[:80]),
+                summary='TC%03d_%s_%s' % (idx, jira.key, _trim_title(title, 80)),
                 description='[From related feature %s] %s' % (source_feature, validation[:200] if validation else title),
                 preconditions='1.\tActive subscriber line\n2.\tRefer to %s for detailed setup' % source_feature,
                 story_linkage=jira.key, label=jira.key, category='Happy Path',
@@ -4205,7 +4206,7 @@ def _build_from_deep_mine(deep_mine_result, jira, feature_short, log=print):
                 _ac_steps = [TestStep(i, s, e) for i, (s, e) in enumerate(_ac_chain, 1)]
                 tc = TestCase(
                     sno=str(idx),
-                    summary='TC%03d_%s_Verify: %s' % (idx, jira.key, ac_item[:70]),
+                    summary='TC%03d_%s_Verify: %s' % (idx, jira.key, _trim_title(ac_item, 70)),
                     description='[From subtask %s/%s] %s' % (mine.key, mine.component, ac_item),
                     preconditions='\n'.join('%d.\t%s' % (i+1, p) for i, p in enumerate(mine.preconditions[:3])) if mine.preconditions else '1.\tRefer to %s for setup' % mine.key,
                     story_linkage=jira.key, label=jira.key, category=category,
@@ -5668,7 +5669,7 @@ def _synthesize_e2e_lifecycle(test_cases, feature_id: str, feature_name: str, lo
     ))
 
     tc = TestCase(
-        summary='%s_E2E_Full_%s_Lifecycle' % (feature_id, feature_name.replace(' ', '_')[:40]),
+        summary='%s_E2E_Full_%s_Lifecycle' % (feature_id, _trim_title(feature_name.replace(' ', '_'), 40)),
         description='End-to-end lifecycle test covering the full %s flow: '
                     'setup → core operations → error recovery → clean state verification. '
                     'Validates the complete chain across all systems.' % feature_name,

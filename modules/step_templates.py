@@ -1724,6 +1724,30 @@ _TITLE_MARKUP_RE = _re_plumb.compile(r'\{[^}]*\}')          # {panel}, {panel:ti
 _TITLE_TRAILING_RE = _re_plumb.compile(r'[\s_\-,:;.]+$')     # trailing punctuation/underscores
 
 
+def truncate_at_word(text, limit):
+    """Cut `text` to at most `limit` characters without splitting a word.
+
+    Raw slices produced titles like 'Verify: ... indicating that any flo' and
+    '... is blocked when the line is on a non-eli'. This cuts at the last space before
+    the limit and drops a trailing dangling connective, so a shortened title still ends
+    on a whole word. Returns text unchanged when it already fits.
+    """
+    if not text:
+        return text
+    text = str(text)
+    if len(text) <= limit:
+        return text
+    window = text[:limit]
+    cut = window.rfind(' ')
+    # No space to cut on (one very long token): fall back to the hard slice.
+    out = window[:cut].rstrip() if cut >= int(limit * 0.5) else window
+    out = re.sub(
+        r'[\s,;:]+(?:and|or|but|the|a|an|in|on|at|to|for|by|with|that|which|from|as|of|'
+        r'is|are|was|were|be|been|if|when|then|any|all|each|per|via|into|onto)$',
+        '', out, flags=re.IGNORECASE)
+    return out.rstrip(' ,;:-')
+
+
 def sanitize_tc_titles(test_cases, log=print):
     """Clean malformed scenario titles that leak in from raw Chalk/Jira source lines:
       - remove Confluence/Jira markup artifacts like '{panel}' / '{panel:title=..}'

@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Callable, Any, Tuple
 
 from .traceability import TraceabilityRecord, create_traceability
+from .step_templates import truncate_at_word as _trim_title
 from .data_models_v8 import (
     Dimension, ExtractedScenario, NegativeSpec, CombinationPlan,
     TestStep, TestCase,
@@ -466,6 +467,7 @@ def build_test_cases(
                         subtask_key=_get_subtask_key_for_scenario(scenario),
                         log=log,
                     )
+                    tc.user_requested = getattr(scenario, 'user_requested', False)
                     test_cases.append(tc)
                     tc_idx += 1
             else:
@@ -475,6 +477,7 @@ def build_test_cases(
                     subtask_key=_get_subtask_key_for_scenario(scenario),
                     log=log,
                 )
+                tc.user_requested = getattr(scenario, 'user_requested', False)
                 test_cases.append(tc)
                 tc_idx += 1
 
@@ -484,6 +487,8 @@ def build_test_cases(
         for scenario in plan.scenario_tcs:
             tc = _build_scenario_tc(scenario, jira, feature_name, nbop_knowledge, api_context, feature_intent,
                                     feature_type=classification.classification)
+            if not getattr(tc, 'user_requested', False):
+                tc.user_requested = getattr(scenario, 'user_requested', False)
             test_cases.append(tc)
         log('[TC-BUILD]   Built %d scenario TCs' % len(plan.scenario_tcs))
 
@@ -766,7 +771,7 @@ def _build_scenario_tc(
                     # get 'Verify: Verify ...'.
                     _val_action = re.sub(r'^(verify|validate|check|ensure|confirm)\b[\s:,\-]*',
                                          '', _val_clean, flags=re.IGNORECASE).strip()
-                    _fb_summary = 'Verify: %s' % ((_val_action or _val_clean)[:110])
+                    _fb_summary = 'Verify: %s' % (_trim_title((_val_action or _val_clean), 110))
                     steps.append(TestStep(
                         step_num=len(steps) + 1,
                         summary=_fb_summary,
@@ -816,7 +821,7 @@ def _build_scenario_tc(
             error_ref = violation_code or 'invalid request'
             steps = [
                 TestStep(step_num=1,
-                         summary='Preconditions: Prepare invalid request data — %s' % scenario_title[:60],
+                         summary='Preconditions: Prepare invalid request data — %s' % _trim_title(scenario_title, 60),
                          expected='Invalid/error-triggering data prepared',
                          data_reference='Scenario: %s' % scenario_title[:40]),
                 TestStep(step_num=2,
@@ -896,7 +901,7 @@ def _build_scenario_tc(
             # Generic API scenario with scenario-specific expected result
             steps = [
                 TestStep(step_num=1,
-                         summary='Preconditions: Set up test data — %s' % scenario_title[:60],
+                         summary='Preconditions: Set up test data — %s' % _trim_title(scenario_title, 60),
                          expected='Test environment configured for: %s' % scenario_title[:50],
                          data_reference='Scenario: %s' % scenario_title[:40]),
                 TestStep(step_num=2,
@@ -908,7 +913,7 @@ def _build_scenario_tc(
                          expected='Success response confirms: %s' % scenario_title[:50],
                          data_reference='Response validation'),
                 TestStep(step_num=4,
-                         summary='Verify: %s' % scenario_title[:70],
+                         summary='Verify: %s' % _trim_title(scenario_title, 70),
                          expected=scenario.validation or 'Scenario condition verified successfully',
                          data_reference=scenario.source.source_id),
             ]
@@ -927,7 +932,7 @@ def _build_scenario_tc(
     if not steps:
         _one_summary = scenario.title
         if _is_degenerate_title(scenario.title) and (scenario.validation or '').strip():
-            _one_summary = 'Verify: %s' % scenario.validation.strip()[:80]
+            _one_summary = 'Verify: %s' % _trim_title(scenario.validation.strip(), 80)
         steps = [TestStep(step_num=1, summary=_one_summary,
                  expected=scenario.validation, data_reference=scenario.source.source_id)]
 
@@ -1066,8 +1071,10 @@ def _build_scenario_tc(
         story_linkage=feature_id,
         label=feature_id,
         category=scenario.category,
+        priority=(getattr(scenario, 'priority_hint', '') or 'P2'),
         traceability=scenario.source,
         dimension_values={},
+        user_requested=getattr(scenario, 'user_requested', False),
     )
 
 
@@ -1110,7 +1117,7 @@ def _build_negative_tc(
         error_details = business_rule.error_details or ''
         source_section = business_rule.source_section or ''
 
-        summary = '%s_Negative - %s: %s' % (feature_id, error_code, rule_name or condition[:50])
+        summary = '%s_Negative - %s: %s' % (feature_id, error_code, rule_name or _trim_title(condition, 50))
 
         description = 'Validate %s API returns error %s when %s. Source: %s' % (
             feature_name, error_code, condition, source_section
@@ -1225,7 +1232,7 @@ def _build_negative_tc(
         steps = [
             TestStep(
                 step_num=1,
-                summary='Preconditions: Set up error condition — %s' % condition[:70],
+                summary='Preconditions: Set up error condition — %s' % _trim_title(condition, 70),
                 expected='System is in state to trigger error %s' % error_code,
                 data_reference='%s: %s' % (error_code, condition[:50]),
             ),
@@ -1617,7 +1624,7 @@ def _build_api_spec_steps(
 
     steps = [
         TestStep(step_num=1,
-            summary='Prepare %s request to %s for scenario: %s' % (method, _endpoint_ref, scenario_title[:50]),
+            summary='Prepare %s request to %s for scenario: %s' % (method, _endpoint_ref, _trim_title(scenario_title, 50)),
             expected='Request payload prepared per API specification',
             data_reference='%s %s' % (method, _endpoint_ref)),
         TestStep(step_num=2,
@@ -1625,7 +1632,7 @@ def _build_api_spec_steps(
             expected='API responds with expected status code',
             data_reference='API: %s' % spec.api_name),
         TestStep(step_num=3,
-            summary='Validate response matches scenario: %s' % scenario_title[:60],
+            summary='Validate response matches scenario: %s' % _trim_title(scenario_title, 60),
             expected='Response fields match expected values per %s specification' % spec.api_name,
             data_reference='Scenario: %s' % scenario_title[:40]),
     ]
@@ -2376,7 +2383,7 @@ def _build_ui_scenario_tc(
     category = scenario.get('category', 'Happy Path')
     steps_hint = scenario.get('steps_hint', [])
 
-    summary = '%s_TC%02d_NBOP_%s' % (feature_id, idx + 1, title[:60])
+    summary = '%s_TC%02d_NBOP_%s' % (feature_id, idx + 1, _trim_title(title, 60))
 
     description = 'UI verification: %s via NBOP portal' % title
 
@@ -2443,7 +2450,7 @@ def _build_ui_scenario_tc(
         if validation:
             steps.append(TestStep(
                 step_num=step_num,
-                summary='Verify: %s' % validation[:80],
+                summary='Verify: %s' % _trim_title(validation, 80),
                 expected=validation if validation else 'Expected behavior confirmed',
                 data_reference='Scenario validation: %s' % title[:40],
             ))
@@ -2643,14 +2650,14 @@ def _validate_step_quality(
             if subtask_ac_text:
                 enriched_steps.append(TestStep(
                     step_num=step.step_num,
-                    summary='Verify: %s' % subtask_ac_text[:80],
+                    summary='Verify: %s' % _trim_title(subtask_ac_text, 80),
                     expected='Verification condition met per AC',
                     data_reference=step.data_reference,
                 ))
             else:
                 enriched_steps.append(TestStep(
                     step_num=step.step_num,
-                    summary='Verify: %s' % scenario_title[:80],
+                    summary='Verify: %s' % _trim_title(scenario_title, 80),
                     expected='Expected behavior confirmed per scenario',
                     data_reference=step.data_reference,
                 ))
@@ -2725,7 +2732,7 @@ def _validate_step_quality(
         # Pad with context steps
         enriched_steps.append(TestStep(
             step_num=0,
-            summary='Verify page displays all expected information for: %s' % scenario_title[:50],
+            summary='Verify page displays all expected information for: %s' % _trim_title(scenario_title, 50),
             expected='All relevant data visible on screen',
             data_reference='Context padding step',
         ))
@@ -2978,7 +2985,7 @@ def _build_ui_scenario_tc_enriched(
                 expected = 'Expected outcome confirmed per scenario specification'
             steps.append(TestStep(
                 step_num=step_num,
-                summary=hint_text[:120],
+                summary=_trim_title(hint_text, 120),
                 expected=expected,
                 data_reference='Evidence document',
             ))
@@ -3003,9 +3010,9 @@ def _build_ui_scenario_tc_enriched(
                     step_num += 1
                     # Append "on Historical Usage screen" context if not already present
                     if 'historical' not in hint_lower:
-                        hist_summary = '%s on Historical Usage screen' % hint_text[:100]
+                        hist_summary = '%s on Historical Usage screen' % _trim_title(hint_text, 100)
                     else:
-                        hist_summary = hint_text[:120]
+                        hist_summary = _trim_title(hint_text, 120)
                     if 'not displayed' in hint_lower or 'is not' in hint_lower:
                         expected = 'Element is NOT visible on Historical Usage screen'
                     elif 'is displayed' in hint_lower or 'should be displayed' in hint_lower:
@@ -3122,7 +3129,7 @@ def _build_ui_scenario_tc_enriched(
                 raw = point.get('raw_text', subtask_ac_text)
                 steps.append(TestStep(
                     step_num=step_num,
-                    summary='Verify: %s' % raw[:80],
+                    summary='Verify: %s' % _trim_title(raw, 80),
                     expected='Condition met: %s' % raw,
                     data_reference='AC text verification',
                 ))
@@ -3139,11 +3146,11 @@ def _build_ui_scenario_tc_enriched(
                      expected='Page loaded successfully',
                      data_reference='Navigation'),
             TestStep(step_num=3,
-                     summary='Perform action: %s' % title[:70],
+                     summary='Perform action: %s' % _trim_title(title, 70),
                      expected='Action completed',
                      data_reference='Scenario: %s' % title[:40]),
             TestStep(step_num=4,
-                     summary='Verify: %s' % (validation or title)[:80],
+                     summary='Verify: %s' % _trim_title((validation or title), 80),
                      expected='Expected behavior confirmed',
                      data_reference='Scenario validation'),
         ]
