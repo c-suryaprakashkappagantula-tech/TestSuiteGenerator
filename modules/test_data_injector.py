@@ -26,6 +26,42 @@ import re
 from typing import Dict, List, Optional, Any
 
 
+# ── Protected-identifier gate ──
+# Every value this module hands out is checked against the shared do-not-touch
+# registry first. The pools below are not the only source: values also arrive from
+# the cached `test_data_pool` table and from NMNO captured traffic, so the check is
+# applied at the point a value leaves this module rather than only at the literals.
+# Fails closed — see modules/protected_gate.py.
+
+def _assert_safe_value(value, where: str) -> None:
+    """Raise if a single value about to be injected is protected."""
+    if value is None or str(value).strip() == '':
+        return
+    from .protected_gate import assert_mapping_safe
+    assert_mapping_safe({'value': value}, where)
+
+
+def _assert_safe_mapping(mapping: Dict[str, str], where: str) -> Dict[str, str]:
+    """Raise if any value in a request-sample dict is protected; else return it."""
+    from .protected_gate import assert_mapping_safe
+    return assert_mapping_safe(mapping, where)
+
+
+def _is_protected_quiet(value) -> bool:
+    """True if ``value`` is protected, for the pool seeders.
+
+    Returns True when the registry cannot be loaded as well: 'unknown' is treated
+    as 'do not store it'. Fail-closed here costs nothing (the pool simply stays
+    unseeded and generation falls back to SIT_SAMPLES), whereas fail-open would
+    let a real identifier be cached for every future run.
+    """
+    try:
+        from .protected_gate import is_protected
+        return bool(is_protected(value))
+    except Exception:
+        return True
+
+
 # ── SIT fallback samples (always available) ──
 SIT_SAMPLES = {
     'MDN':      ['3036694392', '7206814569', '5551112345', '7203339999'],
@@ -133,26 +169,38 @@ def get_sample_data(data_type: str, environment: str = 'SIT') -> Dict[str, str]:
     Returns:
         {'type': data_type, 'value': '...', 'source': 'pool'|'fallback'}
     """
-    # Try DB pool first
+    # Try DB pool first.
+    # NOTE: the pool lookup is wrapped in a broad except (a missing/locked cache DB
+    # must not stop generation), so the protected check is deliberately OUTSIDE it.
+    # Inside, a ProtectedEntityError would be swallowed by `except Exception: pass`
+    # and the identifier would be handed out anyway.
+    result = None
     try:
         from .database import get_test_data
         rows = get_test_data(data_type.upper(), environment=environment)
         if rows:
-            return {
+            result = {
                 'type': data_type,
                 'value': rows[0]['value'],
                 'source': 'pool',
                 'id': rows[0].get('id'),
             }
     except Exception:
-        pass
+        result = None
 
-    # Fallback to hardcoded SIT samples
-    samples = SIT_SAMPLES.get(data_type.upper(), [])
-    if samples:
-        return {'type': data_type, 'value': samples[0], 'source': 'fallback'}
+    if result is None:
+        # Fallback to hardcoded SIT samples
+        samples = SIT_SAMPLES.get(data_type.upper(), [])
+        if samples:
+            result = {'type': data_type, 'value': samples[0], 'source': 'fallback'}
+        else:
+            result = {'type': data_type, 'value': '<test_%s>' % data_type.lower(),
+                      'source': 'placeholder'}
 
-    return {'type': data_type, 'value': '<test_%s>' % data_type.lower(), 'source': 'placeholder'}
+    _assert_safe_value(result['value'],
+                       'test_data_injector.get_sample_data(%s, source=%s)'
+                       % (data_type, result.get('source', '?')))
+    return result
 
 
 def get_operation_sample_request(
@@ -202,16 +250,27 @@ def get_operation_sample_request(
                     elif str_val and str_val not in ('null', 'None', ''):
                         result[key] = '<sample_%s>' % key.lower()[:20]  # mask unrecognised fields — PII safety
                 if result:
-                    return result
-        except Exception:
-            pass
+                    return _assert_safe_mapping(
+                        result,
+                        'test_data_injector.get_operation_sample_request'
+                        '(nmno_sample, api=%s)' % (api_name or '?'))
+        except Exception as _exc:
+            # Malformed captured JSON is expected and ignored, but a protected
+            # identifier (or an unloadable registry) must not be swallowed here.
+            if type(_exc).__name__ in ('ProtectedEntityError',
+                                       'ProtectedRegistryUnavailable'):
+                raise
 
     # 2. Try operation name match in OPERATION_SAMPLES
     api_name_lower = (api_name or '').lower().replace('_', '-').replace(' ', '-')
     endpoint_lower = (endpoint or '').lower()
     for op_key, op_sample in OPERATION_SAMPLES.items():
         if op_key in api_name_lower or op_key in endpoint_lower:
-            return dict(op_sample)
+            # These are module-level literals, not routed through get_sample_data,
+            # so this is the only place they are checked.
+            return _assert_safe_mapping(
+                dict(op_sample),
+                'test_data_injector.OPERATION_SAMPLES[%s]' % op_key)
 
     # 3. Build from request_fields list
     if request_fields:
@@ -255,7 +314,9 @@ def get_operation_sample_request(
             'RequestType': 'TMO',
         }
 
-    return result
+    return _assert_safe_mapping(
+        result,
+        'test_data_injector.get_operation_sample_request(api=%s)' % (api_name or '?'))
 
 
 def format_request_sample(sample: Dict[str, str], max_fields: int = 6) -> str:
@@ -298,6 +359,16 @@ def seed_from_nmno(nmno_result, feature_id: str = '') -> int:
                         continue
                     str_val = str(val)
                     key_lower = key.lower()
+                    # Captured traffic is the most likely way a real identifier
+                    # enters the pool. Skip rather than raise: this is an upstream
+                    # side-effect, and refusing to store it keeps the pool clean
+                    # without failing a run that never uses the value. If one ever
+                    # does reach a suite, generate_excel() still fails the run.
+                    if _is_protected_quiet(str_val):
+                        print('[PROTECTED] not seeding %s from NMNO/%s — '
+                              'registered do-not-touch'
+                              % (key, feature_id or 'unknown'))
+                        continue
                     if re.match(r'^\d{10}$', str_val) and ('mdn' in key_lower or 'msisdn' in key_lower):
                         add_test_data('MDN', str_val, environment='SIT',
                                      notes='From NMNO/%s' % (feature_id or spec.api_name or ''))
@@ -337,6 +408,10 @@ def seed_sit_defaults() -> int:
 
         for data_type, values in SIT_SAMPLES.items():
             for val in values[:2]:  # seed first 2 of each type
+                if _is_protected_quiet(val):
+                    print('[PROTECTED] not seeding %s %s — registered do-not-touch'
+                          % (data_type, val))
+                    continue
                 add_test_data(data_type, val, environment='SIT', notes='SIT default')
                 seeded += 1
     except Exception:
@@ -374,6 +449,12 @@ def get_varied_test_data(
     mdn = mdns[tc_index % len(mdns)]
     line_id = line_ids[tc_index % len(line_ids)]
     account = accounts[tc_index % len(accounts)]
+
+    # Rotation reads SIT_SAMPLES directly rather than via get_sample_data(), so the
+    # gate is applied here too. `account` is included even though it is not emitted
+    # below, so a protected account number is reported rather than silently unused.
+    _assert_safe_mapping({'MDN': mdn, 'lineId': line_id, 'accountNumber': account},
+                         'test_data_injector.get_varied_test_data(tc_index=%d)' % tc_index)
 
     # Base fields
     fields = {

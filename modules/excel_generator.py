@@ -48,7 +48,19 @@ _wf = PatternFill(start_color=WHITE, end_color=WHITE, fill_type='solid')
 
 
 def generate_excel(suite: TestSuite, log=print) -> Path:
-    """Generate the complete Excel workbook. Returns output path."""
+    """Generate the complete Excel workbook. Returns output path.
+
+    Gated on the shared do-not-touch registry: this is the one function every
+    write path goes through (pipeline, all dashboards, the dry-run scripts), so
+    checking here means a protected identifier cannot reach a tester via a suite.
+    Raising before the workbook is created also means no Feature Summary, no DB
+    row and no transaction-log entry for the run — those all follow the Excel
+    write in ``pipeline.block_generate_output``.
+    """
+    from .protected_gate import assert_suite_safe
+    assert_suite_safe(suite, context='Excel output for %s'
+                      % (getattr(suite, 'feature_id', '') or 'suite'), log=log)
+
     wb = openpyxl.Workbook()
 
     # ── Sheet 1: Summary ──
