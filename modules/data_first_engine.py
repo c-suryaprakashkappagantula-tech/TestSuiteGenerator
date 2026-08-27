@@ -528,6 +528,33 @@ def _build_cr_suite_v8(jira, chalk, parsed_docs, options, deep_mine_result, log)
         attachment_names=[a.filename for a in (getattr(jira, 'attachments', []) or [])] if hasattr(jira, 'attachments') else [],
     )
 
+    # ── Grounding gate, same as the non-CR path (Step 4b) ──
+    #
+    # Before this, `_build_cr_suite_v8` returned without ever calling `gate_suite`, so CR
+    # suites carried `grounding_score = -1` (the dataclass default) and the CR Coverage
+    # Scorecard had nothing to display.
+    #
+    # Be clear about what this does and does not do. MEASURED across the whole cache scoring
+    # every test case pre-gate: CR 51 features / 435 TCs, minimum score 63; non-CR 30
+    # features / 758 TCs, minimum score 88. Threshold is 40, so 0 of 1,193 test cases fall
+    # below it. This call drops nothing today and is not expected to.
+    #
+    # Its value is populating the score for display, plus catching a future regression that
+    # produces structurally empty test cases. It is NOT a quality gate: `score_tc` measures
+    # step non-fillerness, expected non-fillerness, source type, confidence and step count,
+    # all structural, so a well-formed but meaningless test case scores the same as a good
+    # one (measured: 88 each). Do not read a passing grade here as "these test cases are
+    # sound". See tsg-tse-hardening task 4b.
+    from .grounding_scorer import (gate_suite, suite_grounding_pct, grounding_badge,
+                                   GATE_THRESHOLD)
+    _cr_threshold = options.get('grounding_threshold', GATE_THRESHOLD)
+    _cr_before = len(suite.test_cases)
+    suite.test_cases = gate_suite(suite.test_cases, threshold=_cr_threshold, log=log)
+    suite._grounding_pct = suite_grounding_pct(suite.test_cases)
+    log('[V8-ENGINE] CR grounding gate (threshold=%d): %s %.1f%% | %d/%d TCs kept'
+        % (_cr_threshold, grounding_badge(suite._grounding_pct),
+           suite._grounding_pct, len(suite.test_cases), _cr_before))
+
     # Build routing audit for CR
     from .data_models_v8 import RoutingAudit
     suite.routing_audit = RoutingAudit(
