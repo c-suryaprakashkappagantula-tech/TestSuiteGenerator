@@ -21,6 +21,31 @@ from typing import Optional, List, Dict, Any, Callable
 MAX_RETRIES = 2
 RETRY_DELAY = 3  # seconds
 
+
+def _record_degraded(pass_name: str, exc: BaseException = None) -> None:
+    """Note an output-block pass that raised and was skipped.
+
+    Sits beside the existing log line; the handler still continues exactly as before
+    (tsg-tse-hardening Req 5.5).
+    """
+    try:
+        from .degraded_tracker import record
+        record(pass_name, exc)
+    except Exception:
+        pass
+
+
+def _attach_degraded(suite, log=print) -> int:
+    """Refresh the degraded-run warning on the suite. Returns the count."""
+    try:
+        from .degraded_tracker import attach_to_suite, summary_line
+        n = attach_to_suite(suite)
+        if n:
+            log('[PIPELINE] %s' % summary_line())
+        return n
+    except Exception:
+        return 0
+
 # ── Shared auto-spawned browser instance (reused across blocks in same run) ──
 _auto_browser_context = {
     'pw': None,
@@ -625,6 +650,7 @@ def block_generate_output(suite, feature_id, pi, strategy, jira=None, chalk=None
                             tc._is_new = True
     except Exception as _diff_err:
         log('[DIFF] Auto-diff skipped: %s' % str(_diff_err)[:80])
+        _record_degraded('auto-diff vs previous suite', _diff_err)
 
     # Defensive: ensure groups dict is stable before Excel generation
     if hasattr(suite, 'groups') and suite.groups:
@@ -648,8 +674,14 @@ def block_generate_output(suite, feature_id, pi, strategy, jira=None, chalk=None
         log('[SCORECARD]\n' + format_scorecard_text(scorecard))
     except Exception as _sc_err:
         log('[SCORECARD] Skipped: %s' % str(_sc_err)[:80])
+        _record_degraded('coverage scorecard', _sc_err)
         scorecard = None
         suite._coverage_scorecard = None
+
+    # Refresh the degraded-run warning now that the output-block passes above have run, so
+    # the Excel carries the final count rather than only what the engine recorded.
+    # Must be before generate_excel: the workbook is built from suite.warnings.
+    _attach_degraded(suite, log)
 
     out_path = generate_excel(suite, log=log)
     total_steps = sum(len(tc.steps) for tc in suite.test_cases)
@@ -660,6 +692,7 @@ def block_generate_output(suite, feature_id, pi, strategy, jira=None, chalk=None
         doc_path = generate_feature_doc(suite, jira, chalk, log=log)
     except Exception as e:
         log('[PIPELINE] Feature doc warning: %s' % str(e)[:60])
+        _record_degraded('Feature Summary document', e)
 
     suite_id = 0
     try:
@@ -667,13 +700,23 @@ def block_generate_output(suite, feature_id, pi, strategy, jira=None, chalk=None
         log('[PIPELINE] Suite saved to DB (ID: %d)' % suite_id)
     except Exception as e:
         log('[PIPELINE] DB save warning: %s' % str(e)[:60])
+        _record_degraded('suite saved to DB', e)
 
     log_generation(feature_id, pi, len(suite.test_cases), total_steps, strategy, str(out_path))
     log_generation_db(feature_id, pi, len(suite.test_cases), total_steps, strategy, str(out_path))
+
+    # The Feature Summary and the DB save happen AFTER the Excel is written, so a failure in
+    # either cannot appear in the workbook. Report them through the result instead, which is
+    # what the dashboard renders (Requirement 5.2). Everything earlier is in both places.
+    from .degraded_tracker import detail_lines as _degraded_details
+    from .degraded_tracker import pass_names as _degraded_names
 
     return {
         'out_path': out_path, 'doc_path': doc_path, 'suite_id': suite_id,
         'tc_count': len(suite.test_cases), 'total_steps': total_steps,
         'diff_report': diff_report,
         'scorecard': scorecard,
+        'degraded_count': len(_degraded_names()),
+        'degraded_passes': _degraded_names(),
+        'degraded_details': _degraded_details(),
     }

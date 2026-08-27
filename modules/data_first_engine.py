@@ -33,6 +33,38 @@ from .cr_detector import is_cr_or_bug
 ENGINE_VERSION = '9.0.0'
 
 
+def _record_degraded(pass_name: str, exc: BaseException = None) -> None:
+    """Note that an enrichment pass raised and was skipped.
+
+    Sits beside the existing log line in each handler; the handler's
+    continue-on-failure behaviour is untouched (tsg-tse-hardening Req 5.5). Swallows
+    everything, because a tracker fault must not become the thing that breaks a run it
+    was only meant to describe.
+    """
+    try:
+        from .degraded_tracker import record
+        record(pass_name, exc)
+    except Exception:
+        pass
+
+
+def _attach_degraded(suite, log: Callable = print) -> None:
+    """Put the degraded-pass summary into the suite's warnings before it is returned.
+
+    Warnings reach both the Excel and the dashboard, which is what Requirement 5.3 asks
+    for - visible without opening the CLI log. Says nothing when the run was clean (5.4).
+    """
+    try:
+        from .degraded_tracker import attach_to_suite, detail_lines, summary_line
+        n = attach_to_suite(suite)
+        if n:
+            log('[V8-ENGINE] %s' % summary_line())
+            for line in detail_lines():
+                log('[V8-ENGINE]   degraded: %s' % line)
+    except Exception:
+        pass
+
+
 # ================================================================
 # MAIN ENTRY POINT
 # ================================================================
@@ -69,6 +101,15 @@ def build_test_suite_v8(
 
     feature_id = jira.key if jira else ''
     feature_title = jira.summary if jira else ''
+
+    # Start a clean degraded-pass record for this run. Must happen before the CR branch
+    # below, so a CR run also starts from zero rather than inheriting the previous run's
+    # failures (Requirement 5.1).
+    try:
+        from .degraded_tracker import begin_run as _begin_degraded_run
+        _begin_degraded_run(feature_id)
+    except Exception:
+        pass
 
     log('═' * 60)
     log('[V8-ENGINE] Data-First Engine v%s starting...' % ENGINE_VERSION)
@@ -208,6 +249,7 @@ def build_test_suite_v8(
                 log('[V8-ENGINE]   V7 mining produced %d supplementary TCs' % len(_v7_supplement_tcs))
         except Exception as _v7_err:
             log('[V8-ENGINE]   V7 supplementary mining failed: %s — continuing' % str(_v7_err)[:100])
+            _record_degraded('V7 supplementary mining', _v7_err)
 
     # ── Step 2: Combination Planning ──
     log('[V8-ENGINE] Step 2: Planning smart combinations...')
@@ -397,6 +439,7 @@ def build_test_suite_v8(
             suite._llm_suggestions = []
     except Exception as _llm_err:
         log('[V8-ENGINE] LLM reviewer skipped: %s' % str(_llm_err)[:80])
+        _record_degraded('LLM gap review', _llm_err)
         suite._llm_suggestions = []
 
     # ── Final: Normalize invalid categories (safety net for cached data) ──
@@ -437,12 +480,14 @@ def build_test_suite_v8(
         _inject_eligibility_negatives(suite, jira, chalk, classification, log)
     except Exception as _elig_err:
         log('[V8-ENGINE]   WARNING: eligibility negative injection failed: %s — continuing' % str(_elig_err)[:100])
+        _record_degraded('eligibility negatives', _elig_err)
 
     # ── Feature-operation-specific negatives (narrowly gated: reconnect, optional-field queries) ──
     try:
         _inject_operation_negatives(suite, jira, chalk, classification, log)
     except Exception as _opn_err:
         log('[V8-ENGINE]   WARNING: operation negative injection failed: %s — continuing' % str(_opn_err)[:100])
+        _record_degraded('operation negatives', _opn_err)
 
     # ── Strip OAuth/token plumbing steps + sanitize malformed titles/steps/preconditions ──
     try:
@@ -452,18 +497,23 @@ def build_test_suite_v8(
         sanitize_steps_and_preconditions(suite.test_cases, log)
     except Exception as _sp_err:
         log('[V8-ENGINE]   WARNING: step/title cleanup failed: %s — continuing' % str(_sp_err)[:100])
+        _record_degraded('step/title cleanup', _sp_err)
 
     # ── Prune degenerate/junk TCs (e.g. "Verify_Verify" from a Chalk Note row) ──
     try:
         _prune_degenerate_tcs(suite, feature_id, log)
     except Exception as _pj_err:
         log('[V8-ENGINE]   WARNING: degenerate-TC prune failed: %s — continuing' % str(_pj_err)[:100])
+        _record_degraded('degenerate-TC prune', _pj_err)
 
     # ── Final criticality-aware priority pass over the complete TC list ──
     try:
         _finalize_priorities(suite, feature_priority=getattr(jira, 'priority', '') or '', log=log)
     except Exception as _pri_err:
         log('[V8-ENGINE]   WARNING: priority finalization failed: %s — continuing' % str(_pri_err)[:100])
+        _record_degraded('priority finalization', _pri_err)
+
+    _attach_degraded(suite, log)
 
     return suite
 
@@ -571,6 +621,12 @@ def _build_cr_suite_v8(jira, chalk, parsed_docs, options, deep_mine_result, log)
 
     log('[V8-ENGINE] CR delegation complete: %d TCs (capped at 8 for defect scope)' % len(suite.test_cases))
     log('═' * 60)
+
+    # Note the coverage limit here: the CR path delegates to the V7 engine, whose own
+    # log-and-continue handlers are NOT instrumented. A CR run reports degradation only for
+    # the passes this module and the output block record, so "no degraded passes" is a
+    # weaker statement for a CR suite than for a non-CR one.
+    _attach_degraded(suite, log)
 
     return suite
 
@@ -1618,6 +1674,7 @@ def _apply_custom_instructions(
             dimension_set.scenarios.extend(user_scenarios)
     except Exception as _cs_err:
         log('[V8-CUSTOM]   WARNING: custom scenario builder failed: %s — continuing' % str(_cs_err)[:120])
+        _record_degraded('custom scenario builder', _cs_err)
 
     return dimension_set
 
