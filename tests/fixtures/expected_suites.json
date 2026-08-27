@@ -260,8 +260,8 @@
    "TC011_MWTGPROV-4406_Verify usage-limit edits are correctly reflected when re-opening the Change Features settings panel",
    "TC012_MWTGPROV-4406_Verify: On the Network Only Activation screen only, a configurable flag",
    "TC013_MWTGPROV-4406_Verify CR - Optional Feature Provisioning completes successfully with valid inputs",
-   "TC014_MWTGPROV-4406_Verify existing Change Feature behavior for TMO lines with ACTIVE HSD accounts is not impacted by the permanent fix",
-   "TC015_MWTGPROV-4406_Verify usage notification threshold behavior options map to the correct downstream throttle",
+   "TC014_MWTGPROV-4406_Verify usage notification threshold behavior options map to the correct downstream throttle",
+   "TC015_MWTGPROV-4406_Verify existing Change Feature behavior for TMO lines with ACTIVE HSD accounts is not impacted by the permanent fix",
    "TC016_MWTGPROV-4406_Verify the auto-renew period dropdown accepts its boundary values 1 and 12",
    "TC017_MWTGPROV-4406_Verify: NBOP to build the capability in UI to display the default values"
   ]

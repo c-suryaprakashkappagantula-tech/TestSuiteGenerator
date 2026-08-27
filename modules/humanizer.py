@@ -88,7 +88,22 @@ def humanize_descriptions(test_cases, log=print):
             _used_prefixes.clear()
             available = pool
 
-        prefix = random.choice(available)
+        # Derive the choice from the test case itself rather than from global RNG state.
+        #
+        # This was `random.choice(available)` on the module-level generator, which is seeded
+        # from OS entropy at interpreter start. That made description wording differ between
+        # runs, and the wording is not cosmetic: the CR cap in test_engine.py scores each test
+        # case on text that includes its description, sorts on that score, and then stamps the
+        # TC number into the title. Two MWTGPROV-4406 cases score within a point of each other,
+        # so the random wording decided which became TC014 and which TC015. Regenerating a
+        # suite therefore reassigned TC numbers, and any external reference to a TC id moved.
+        #
+        # random.Random(str) seeds via sha512 of the string, so it is stable across processes
+        # and unaffected by PYTHONHASHSEED. Seeding on the summary keeps the variety the pool
+        # exists for (different cases still get different prefixes) while making the same
+        # input always produce the same output. Do not use hash() here - that would
+        # reintroduce PYTHONHASHSEED sensitivity.
+        prefix = random.Random(tc.summary or core).choice(available)
         _used_prefixes.add(prefix)
 
         # Rebuild description
