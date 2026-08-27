@@ -1903,10 +1903,18 @@ def _chalk_scenario_to_tc(sc, idx, feature_id, channel='', feature_type=''):
 
     # Description: build a proper test description
     clean_title = _clean_tc_title(sc.title, feature_id)
-    # Build description like a test analyst would write it
-    desc_title = clean_title.rstrip('.')
-    if desc_title.lower().startswith('validate '):
-        desc_title = desc_title[9:]
+    # Build description like a test analyst would write it.
+    #
+    # Every template below opens with its own verb - 'Validate %s completes successfully.',
+    # 'Validate %s through NBOP portal.', 'To validate that %s.' - so a title that already
+    # starts with one produces a doubled verb: 'Validate Verify request accepts accountType
+    # COMMERCIAL and responds normally completes successfully.'
+    #
+    # This already stripped a leading 'validate ' but nothing else, and scenario titles
+    # overwhelmingly begin 'Verify', which is why it kept happening. Measured before the fix:
+    # 48 of 435 CR test-case descriptions opened with a doubled verb, 46 of them in
+    # MWTGPROV-4168 alone.
+    desc_title = _strip_leading_verb_for_description(clean_title.rstrip('.'))
 
     # Clean validation: strip "Test Configurations" / "Combo" lines and "Expected Result:" prefix
     _clean_validation = ''
@@ -2322,6 +2330,34 @@ def _step_expected_result(step_text, sc):
 def _scenario_context_from_suite(suite):
     """Get feature context string from suite for enricher."""
     return suite.feature_title + ' ' + ' '.join(tc.summary for tc in suite.test_cases[:5])
+
+
+_DESC_LEADING_VERB_RE = re.compile(
+    r'^(?:verif(?:y|ies|ied)|validat(?:e|es|ed)|confirms?|ensur(?:e|es)|checks?)\b\s*'
+    r'(?:that\s+)?(.*)$',
+    re.IGNORECASE | re.DOTALL)
+
+
+def _strip_leading_verb_for_description(title):
+    """Drop a leading Verify/Validate/Confirm/Ensure/Check from a title used in a description.
+
+    The description templates supply their own verb, so a title that already carries one
+    reads as 'Validate Verify request accepts accountType COMMERCIAL ... completes
+    successfully.' The original code stripped only 'validate ' and scenario titles
+    overwhelmingly open with 'Verify', so the doubling survived.
+
+    Returns the title unchanged when stripping would leave nothing, or leave something too
+    short to read as a clause - better a doubled verb than a description of two words.
+    """
+    if not title:
+        return title
+    match = _DESC_LEADING_VERB_RE.match(str(title).strip())
+    if not match:
+        return title
+    rest = (match.group(1) or '').strip()
+    if len(rest) < 10:
+        return title
+    return rest
 
 
 def _clean_tc_title(raw_title, feature_id):
@@ -5331,7 +5367,11 @@ def _quality_gate(test_cases, feature_name, feature_id, log=print):
         # ── Check 4: Ensure description is not empty or just raw text ──
         if not tc.description or len(tc.description) < 10:
             desc_title = re.sub(r'^TC\d+[_\s-]+' + re.escape(feature_id) + r'[_\s-]*', '', tc.summary).strip()
-            tc.description = 'To validate that %s completes successfully.' % desc_title.rstrip('.')
+            # Same doubling as at the scenario description above: this template brings its
+            # own verb, and tc.summary almost always opens with 'Verify'.
+            tc.description = (
+                'To validate that %s completes successfully.'
+                % _strip_leading_verb_for_description(desc_title.rstrip('.')))
 
         # ── Check 4b: Ensure precondition is not empty — context-aware ──
         if not tc.preconditions or len(tc.preconditions.strip()) < 5:
