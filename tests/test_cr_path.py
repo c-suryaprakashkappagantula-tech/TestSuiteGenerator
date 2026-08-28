@@ -9,6 +9,7 @@ The cap warning also quoted the base cap while the filter applies
 _effective_cap = _CR_TC_CAP + len(_workflow_tcs), which made a suite sitting exactly on its
 limit look like it had breached one.
 """
+import os
 import re
 
 import pytest
@@ -132,3 +133,90 @@ def test_the_gate_is_structural_and_not_a_quality_check():
     assert score_tc(junk) >= GATE_THRESHOLD, (
         'If this now fails the gate, the scorer has learned to judge meaning and '
         'task 4b can be reconsidered - update this test deliberately')
+
+
+# ════════════════════════════════════════════════════════════════════
+#  The CR wrapper must not drop what V7 computed (task 6 enumeration)
+# ════════════════════════════════════════════════════════════════════
+#
+# `_build_cr_suite_v8` rebuilds a fresh TestSuite from the V7 result rather than returning it,
+# and five fields were never copied across. V7 computed them and the tester never saw them.
+#
+# Measured on MWTGPROV-4406: V7 produced groups=2, ac_traceability=1, combinations=4,
+# data_sources=9; the delivered suite carried 0 of each. In the workbook the sheets went from
+# ['Test Cases', 'Summary', 'Traceability', 'Combinations'] down to ['Test Cases', 'Summary'],
+# because excel_generator builds the Traceability sheet only `if suite.ac_traceability` and
+# the Combinations sheet only when `suite.combinations` has more than one entry.
+#
+# Test-case counts were never affected, which is exactly why it went unnoticed - the suite
+# looked complete and only its cross-reference sheets were missing. Verified across all 51
+# cached CR features after the fix: 0 test-case count changes, 0 fields still lost.
+
+CARRIED_FIELDS = ['groups', 'ac_traceability', 'combinations', 'data_sources',
+                  'open_items', 'open_item_coverage']
+
+
+def _build_v7_directly(feature_id):
+    """Build the same feature straight through V7, to compare against the wrapper."""
+    from modules.database import _conn, load_chalk_as_object
+    from modules.deep_miner import deep_mine
+    from modules.pipeline import block_jira_fetch
+    from modules.test_engine import build_test_suite
+    from tests.conftest import DEFAULT_OPTIONS
+
+    quiet = lambda *a, **k: None
+    jira = block_jira_fetch(page=None, feature_id=feature_id, log=quiet)['jira']
+    if jira is None:
+        pytest.skip('%s is not in the cache' % feature_id)
+    conn = _conn()
+    row = conn.execute(
+        "SELECT pi_label FROM chalk_cache WHERE feature_id=? "
+        "AND scenarios_json != '[]' LIMIT 1", (feature_id,)).fetchone()
+    conn.close()
+    chalk = load_chalk_as_object(feature_id, row['pi_label']) if row else None
+    mined = deep_mine(jira, chalk, page=None, log=quiet)
+    return build_test_suite(jira, chalk, [], dict(DEFAULT_OPTIONS), log=quiet,
+                            deep_mine_result=mined)
+
+
+@pytest.mark.cache
+@pytest.mark.slow
+@pytest.mark.parametrize('feature_id', CR_FEATURES)
+class TestTheCRWrapperCarriesV7Data:
+
+    def test_nothing_v7_produced_is_dropped(self, build_suite, feature_id):
+        delivered = build_suite(feature_id)
+        computed = _build_v7_directly(feature_id)
+
+        lost = []
+        for field in CARRIED_FIELDS:
+            had = len(getattr(computed, field, None) or [])
+            got = len(getattr(delivered, field, None) or [])
+            if got < had:
+                lost.append('%s: V7 computed %d, delivered %d' % (field, had, got))
+        assert not lost, '%s drops what V7 computed - %s' % (feature_id, lost)
+
+    def test_the_test_cases_themselves_are_unchanged(self, build_suite, feature_id):
+        """Carrying metadata must not touch the test cases. This is the safety assertion."""
+        delivered = build_suite(feature_id)
+        computed = _build_v7_directly(feature_id)
+        assert len(delivered.test_cases) == len(computed.test_cases)
+
+    def test_the_traceability_sheet_is_produced(self, build_suite, feature_id):
+        """The user-visible consequence: excel_generator skips the sheet on a falsy value."""
+        suite = build_suite(feature_id)
+        if not suite.ac_traceability:
+            pytest.skip('%s has no AC traceability to render' % feature_id)
+
+        import openpyxl
+
+        from modules.excel_generator import generate_excel
+        path = generate_excel(suite, log=lambda *a, **k: None)
+        try:
+            workbook = openpyxl.load_workbook(path)
+            sheets = workbook.sheetnames
+            workbook.close()
+        finally:
+            os.remove(path)
+        assert 'Traceability' in sheets, (
+            '%s produced no Traceability sheet; sheets were %s' % (feature_id, sheets))

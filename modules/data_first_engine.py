@@ -576,6 +576,25 @@ def _build_cr_suite_v8(jira, chalk, parsed_docs, options, deep_mine_result, log)
         jira_labels=getattr(jira, 'labels', []) or [],
         jira_links=[{'key': l.get('key', ''), 'summary': l.get('summary', '')} for l in (getattr(jira, 'linked_issues', []) or [])],
         attachment_names=[a.filename for a in (getattr(jira, 'attachments', []) or [])] if hasattr(jira, 'attachments') else [],
+        # ── Carried over from the V7 suite, and previously LOST here ──
+        #
+        # This wrapper rebuilds a fresh TestSuite from the V7 result rather than returning it,
+        # and these five fields were not copied. V7 computes them; the tester never saw them.
+        # Measured on MWTGPROV-4406: V7 produced groups=2, ac_traceability=1, combinations=4,
+        # data_sources=9 and the delivered suite carried 0 of each. In the workbook that meant
+        # the sheets went from ['Test Cases', 'Summary', 'Traceability', 'Combinations'] down
+        # to ['Test Cases', 'Summary'] - excel_generator builds the Traceability sheet only
+        # `if suite.ac_traceability` and the Combinations sheet only if `suite.combinations`
+        # has more than one entry, so both were silently skipped for every CR feature.
+        #
+        # Test-case counts were never affected, which is why this went unnoticed: the suite
+        # looked complete and only its cross-reference sheets were missing.
+        ac_traceability=getattr(v7_suite, 'ac_traceability', None) or {},
+        groups=getattr(v7_suite, 'groups', None) or {},
+        combinations=getattr(v7_suite, 'combinations', None) or [],
+        data_sources=getattr(v7_suite, 'data_sources', None) or [],
+        open_items=getattr(v7_suite, 'open_items', None) or [],
+        open_item_coverage=getattr(v7_suite, 'open_item_coverage', None) or {},
     )
 
     # ── Grounding gate, same as the non-CR path (Step 4b) ──
