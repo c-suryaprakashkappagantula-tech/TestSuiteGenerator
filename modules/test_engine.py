@@ -4783,55 +4783,34 @@ def _synthesize_eligibility_negatives(suite, jira, feature_short, fc, log=print,
     added = []
     fid = jira.key
 
-    # Exclude feature types that own a different negative strategy.
-    if getattr(fc, 'is_notification', False) or getattr(fc, 'is_batch', False) or \
-       getattr(fc, 'feature_type', '') in ('notification', 'batch_report', 'ui_portal'):
-        return added
-
-    jira_text = ' '.join(filter(None, [
-        jira.summary or '', jira.description or '',
-        getattr(jira, 'acceptance_criteria', '') or '',
-    ])).lower()
-    suite_text = ' '.join(tc.summary + ' ' + tc.description for tc in suite.test_cases).lower()
-    text = jira_text + ' ' + suite_text
-
-    # Eligibility gating must be evidenced by SOURCE material - the ticket and the Chalk
-    # scenarios - never by test cases this run has already generated. On MWTGPROV-4166 the
-    # ticket matched no eligibility keyword; the gate opened on 'subscriber' and 'eligible'
-    # appearing in test cases produced moments earlier, and the four negatives it then
-    # injected raised the CR cap by four (see line 1412). Generated text authorising further
-    # generation is how an unrelated defect ticket acquired eligibility coverage.
-    _chalk_titles = ' '.join(
-        (getattr(s, 'title', '') or '') + ' ' + (getattr(s, 'validation', '') or '')
-        for s in (getattr(chalk, 'scenarios', None) or [])
-    ).lower()
-    source_text = jira_text + ' ' + _chalk_titles
-
-    # Mediation/CDR features are handled by the notification/CDR templates — skip here.
-    if any(kw in text for kw in ['mediation', ' cdr', 'record type', 'prr', 'billing record']):
-        return added
-
-    # Only apply to actual line/subscriber/feature-gated features.
+    # The decision - does this feature need eligibility negatives, and which ones - now lives
+    # in modules/eligibility_negatives.py, shared with the V8 engine (Requirement 4.1). This
+    # function keeps only the construction of V7-shaped TestCase objects.
     #
-    # 'feature' is deliberately NOT in this list. Every ticket here is about feature
-    # provisioning, so the bare word signals nothing about eligibility gating - it fired on
-    # 48% of the cache and was the sole trigger for 71 features, including MWTGPROV-4166, a
-    # guaranteed-delivery defect that received four eligibility negatives unrelated to its
-    # acceptance criteria. The keywords kept below each state a gating condition outright.
-    if not any(kw in source_text for kw in ['commercial line', 'subscriber', 'line on tmo',
-                                            'hotspot', 'tethering', 'roaming',
-                                            'entitlement', 'add-on', 'addon', 'rate plan',
-                                            'rateplan', 'eligible', 'provision']):
+    # Two behaviour changes came with the move, both deliberate:
+    #
+    # 1. The signals are computed from SOURCE material only. Previously the outer keyword gate
+    #    read source text but `has_commercial` / `has_tmo` / `is_feature_gated` read
+    #    `jira_text + suite_text`, so generated test cases still decided WHICH negatives were
+    #    added - the same self-authorisation defect as before, one level down. That loop also
+    #    inflated the CR cap, because the caller feeds len(added) into `suite._synth_neg`.
+    # 2. A strong signal (commercial / TMO / feature-gated) is now required. Previously a bare
+    #    'subscriber' or 'provision' match was enough to emit the ERR06 negative on its own.
+    from .eligibility_negatives import (
+        evaluate as _evaluate_eligibility,
+        normalize_existing as _normalize_existing_negatives,
+        plan_rejection_covered as _plan_rejection_covered,
+    )
+
+    _signals = _evaluate_eligibility(jira, chalk=chalk, feature_class=fc)
+    if not _signals.applicable:
         return added
 
-    has_commercial = 'commercial line' in text or 'commercial lines' in text
-    has_tmo = any(kw in text for kw in ['tmo', 't-mobile', 'mvno'])
-    is_feature_gated = any(kw in text for kw in ['feature', 'hotspot', 'tethering',
-                                                 'roaming', 'entitlement', 'add-on', 'addon',
-                                                 'international', 'ild'])
+    has_commercial = _signals.has_commercial
+    has_tmo = _signals.has_tmo
+    is_feature_gated = _signals.is_feature_gated
 
-    existing = ' '.join(tc.summary.lower() + ' ' + tc.description.lower()
-                        for tc in suite.test_cases if tc.category == 'Negative')
+    existing = _normalize_existing_negatives(suite.test_cases)
 
     def _new(summary, description, preconditions, steps):
         added.append(TestCase(
@@ -4864,7 +4843,11 @@ def _synthesize_eligibility_negatives(suite, jira, feature_short, fc, log=print,
             ])
 
     # 3) Non-eligible rate plan.
-    if is_feature_gated and 'non-eligible rate plan' not in existing and 'ineligible plan' not in existing:
+    # `_plan_rejection_covered` comes from the V8 implementation and V7 had no equivalent:
+    # it suppresses this standalone negative when an existing negative already covers plan or
+    # line ineligibility, so the suite does not carry two near-duplicates.
+    if is_feature_gated and not _plan_rejection_covered(existing) \
+            and 'non-eligible rate plan' not in existing and 'ineligible plan' not in existing:
         _new(
             'TC__%s_Negative: Verify %s is blocked when the line is on a non-eligible rate plan' % (fid, feature_short),
             'Attempt to apply %s on a line whose current rate plan does not entitle the feature. Must be rejected.' % feature_short,

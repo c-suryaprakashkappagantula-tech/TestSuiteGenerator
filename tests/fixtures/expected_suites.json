@@ -162,8 +162,8 @@
   ]
  },
  "MWTGPROV-4329": {
-  "count": 40,
-  "steps": 175,
+  "count": 44,
+  "steps": 187,
   "titles": [
    "MWTGPROV-4329_Verify_VZW-to-TMO_eSIM_migration_for_commercial_Smartwatch_(wearable)_via_port-in_activation",
    "MWTGPROV-4329_Verify_MNO_Migration_radio_button_display_and_access_control_in_NBOP_UI",
@@ -204,7 +204,11 @@
    "MWTGPROV-4329_Verify_If_agent_accidentally_migrates_a_line_with_data_pack_and_day_pass,_those_are_removed",
    "MWTGPROV-4329_Verify_Phone/Tablet:_precheck_skipped_for_IMEI_+_MDN._Smartwatch:_precheck_skipped",
    "MWTGPROV-4329_Verify_Step_1:_Agent_enters_device_info_→_Expected:_SIM_Profile_Type_populated_as_SPEC3_from_validate-device/device-info",
-   "MWTGPROV-4329_Verify_System_behavior_defined_when_migrating_a_line_that_has_an_existing_pending_transaction._Since_IMEI_precheck_is_skipped,_the_pending"
+   "MWTGPROV-4329_Verify_System_behavior_defined_when_migrating_a_line_that_has_an_existing_pending_transaction._Since_IMEI_precheck_is_skipped,_the_pending",
+   "MWTGPROV-4329_Negative_Exception_Line_Ports_from_VZ_<->_TMO_rejected_on_non-TMO_non-eligible_network_line",
+   "MWTGPROV-4329_Negative_Exception_Line_Ports_from_VZ_<->_TMO_blocked_on_non-eligible_rate_plan",
+   "MWTGPROV-4329_Negative_Exception_Line_Ports_from_VZ_<->_TMO_fails_when_prerequisite_entitlement_not_provisioned",
+   "MWTGPROV-4329_Negative_Exception_Line_Ports_from_VZ_<->_TMO_rejected_ERR06_when_required_parameter_missing"
   ]
  },
  "MWTGPROV-4349": {

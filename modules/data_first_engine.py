@@ -880,47 +880,25 @@ def _inject_eligibility_negatives(suite, jira, chalk, classification, log: Calla
         feature_short = feature_short.split(' - ')[-1].strip()
     feature_short = feature_short[:70]
 
-    _cls = (getattr(classification, 'classification', '') or '').lower()
-    if _cls == 'ui':
+    # The decision - does this feature need eligibility negatives, and which ones - lives in
+    # modules/eligibility_negatives.py, shared with the V7 engine (Requirement 4.1). This
+    # function keeps only the construction of V8-shaped TestCase objects.
+    from .eligibility_negatives import (
+        evaluate as _evaluate_eligibility,
+        normalize_existing as _normalize_existing_negatives,
+        plan_rejection_covered as _is_plan_rejection_covered,
+    )
+
+    _signals = _evaluate_eligibility(jira, chalk=chalk, classification=classification)
+    if not _signals.applicable:
         return
 
-    ac_text = ((jira.acceptance_criteria if jira and hasattr(jira, 'acceptance_criteria') else '') or '')
-    title_lower = ((jira.summary if jira else '') or '').lower()
-    text = ' '.join(filter(None, [
-        title_lower,
-        (jira.description if jira else '') or '',
-        ac_text,
-        (chalk.scope if chalk and hasattr(chalk, 'scope') else '') or '',
-    ])).lower()
+    has_commercial = _signals.has_commercial
+    has_tmo = _signals.has_tmo
+    is_feature_gated = _signals.is_feature_gated
 
-    # Pure mediation/CDR features (title-level) are handled by the CDR templates — skip.
-    # NOTE: we do NOT bail on a mere mention of "notification"/"mediation" in the AC —
-    # line-eligibility features (e.g. commercial-line Hotspot) legitimately mention those.
-    if any(kw in title_lower for kw in ['mediation', 'cdr', 'record type', 'billing record']):
-        return
-
-    has_commercial = 'commercial line' in text or 'commercial lines' in text
-    has_tmo = any(kw in text for kw in ['tmo', 't-mobile', 'mvno'])
-    # Device/line feature-gating signals — the strong indicator this is an eligibility feature.
-    is_feature_gated = any(kw in text for kw in ['hotspot', 'tethering', 'roaming',
-                                                 'entitlement', 'add-on', 'addon'])
-
-    # Require a STRONG line-eligibility signal before synthesizing — this naturally
-    # excludes pure mediation/report/notification features (they lack these terms).
-    if not (has_commercial or is_feature_gated):
-        return
-
-    import re as _re_elig
-    # Normalize underscores→spaces: TC summaries are underscore-joined
-    # (e.g. "non-eligible_plan"), so space-delimited guard tokens must match.
-    existing = ' '.join((tc.summary or '').lower() + ' ' + (tc.description or '').lower()
-                        for tc in suite.test_cases if getattr(tc, 'category', '') == 'Negative')
-    existing = _re_elig.sub(r'[_]+', ' ', existing)
-    # If any lumped rejection negative already covers plan/line eligibility, don't
-    # add the standalone non-eligible-plan negative (avoids near-duplicate TCs).
-    _plan_rejection_covered = any(kw in existing for kw in [
-        'non-eligible plan', 'not eligible', 'ineligible', 'rejected per catalog',
-        'invalid retailplan', 'err07'])
+    existing = _normalize_existing_negatives(suite.test_cases)
+    _plan_rejection_covered = _is_plan_rejection_covered(existing)
 
     _pending = []
 
