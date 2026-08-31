@@ -1,7 +1,7 @@
 {
  "MWTGPROV-3969": {
-  "count": 8,
-  "steps": 32,
+  "count": 9,
+  "steps": 39,
   "titles": [
    "MWTGPROV-3969_Verify_Successful_display_of_subscriber_mediation_information_for_a_TMO_subscriber_under_valid_subscriber",
    "MWTGPROV-3969_Verify_Successful_display_of_subscriber_mediation_history_for_a_TMO_subscriber_under_multiple_historical_mediation_events,_ensuring",
@@ -10,12 +10,13 @@
    "MWTGPROV-3969_Verify_it_results_in_no_data_changes_and_the_UI_displays_'Subscriber_when_an_invalid_or_non-existent_subscriber_identifier_is_used_to_open",
    "MWTGPROV-3969_Verify_Successful_display_of_subscriber_mediation_information_and_history_for_a_VZW_subscriber_under_existing_BAU_conditions,_ensuring",
    "MWTGPROV-3969_Verify_Update_the_TMO_Subscriber_Inquiry_API_to_match_the_current_Verizon_Subscriber_Inquiry_API",
+   "MWTGPROV-3969_Verify_Use_the_following_parameters:_Mediation_Function:_tmo-subscriber-inquiry,_Path:_/wtg/med/services/v1-0/subscriber/mdn",
    "MWTGPROV-3969_Verify_Mediation_subscriber_summary_should_be_displayed_in_More_options_for_TMO_subscribers"
   ]
  },
  "MWTGPROV-3970": {
-  "count": 8,
-  "steps": 35,
+  "count": 10,
+  "steps": 45,
   "titles": [
    "MWTGPROV-3970_Verify_Successful_display_of_subscriber_mediation_information_for_a_TMO_subscriber_under_valid_subscriber",
    "MWTGPROV-3970_Verify_Successful_display_of_subscriber_mediation_history_for_a_TMO_subscriber_under_multiple_historical_mediation_events,_ensuring",
@@ -24,12 +25,14 @@
    "MWTGPROV-3970_Verify_it_results_in_no_data_changes_and_the_UI_displays_'Subscriber_when_an_invalid_or_non-existent_subscriber_identifier_is_used_to_open",
    "MWTGPROV-3970_Verify_Successful_display_of_subscriber_mediation_information_and_history_for_a_VZW_subscriber_under_existing_BAU_conditions,_ensuring",
    "MWTGPROV-3970_Verify_Update_the_TMO_Subscriber_History_API_to_match_the_current_Verizon_Subscriber_Inquiry_API",
-   "MWTGPROV-3970_Verify_Use_the_same_configurations_for_TMO_accounts_the_current_Verizon_configurations,_with_the_following_exceptions:_Mediation"
+   "MWTGPROV-3970_Verify_Use_the_same_configurations_for_TMO_accounts_the_current_Verizon_configurations,_with_the_following_exceptions:_Mediation",
+   "MWTGPROV-3970_Verify_NSL_has_ensured_that_MED_subscriber_history_api_when_called_for_TMO_subscribers,_NSL_fetches_the_response_from_MED._using_end",
+   "MWTGPROV-3970_Verify_nBOP_is_able_to_consume_the_new_API_and_display_the_subscriber_history"
   ]
  },
  "MWTGPROV-3971": {
-  "count": 8,
-  "steps": 43,
+  "count": 11,
+  "steps": 58,
   "titles": [
    "MWTGPROV-3971_Verify_Successful_invocation_of_the_mediation_usage_history_screen_when_the_user_clicks_Data_Details_and_then_View_Historical_Usage",
    "MWTGPROV-3971_Verify_Successful_display_of_mediation_usage_history_for_a_TMO_subscriber_under_current_billing_cycle_selection,_ensuring_separate_base",
@@ -38,7 +41,10 @@
    "MWTGPROV-3971_Verify_Successful_display_of_mediation_usage_history_for_a_VZW_subscriber_under_current_plus_two_previous_billing_cycles,_ensuring_separate",
    "MWTGPROV-3971_Verify_Create_a_new_tmo-usage-history_API_with_the_following_parameters:_Mediation_Function:_usage-history,_Path",
    "MWTGPROV-3971_Verify_Create_a_response_to_match_the_attaches_JSON",
-   "MWTGPROV-3971_Verify_The_response_fields_should_be_populated_as_follows:_GB_total_-_All_usage_data_without_Promos"
+   "MWTGPROV-3971_Verify_The_response_fields_should_be_populated_as_follows:_GB_total_-_All_usage_data_without_Promos",
+   "MWTGPROV-3971_Verify_NSL_has_ensured_that_MED_usage_history_api_when_called_for_TMO_subscribers,_NSL_fetches_the_response_from_MED._using_end_point",
+   "MWTGPROV-3971_Verify_nBOP_to_consume_the_API_and_show_show_subscriber_usage_history",
+   "MWTGPROV-3971_Verify_success_Criteria:_NBOP_should_able_to_display_the_Usage_History"
   ]
  },
  "MWTGPROV-3972": {
@@ -64,8 +70,8 @@
   ]
  },
  "MWTGPROV-4086": {
-  "count": 26,
-  "steps": 96,
+  "count": 27,
+  "steps": 99,
   "titles": [
    "MWTGPROV-4086_Verify_that_when_an_agent_with_both_VZW_and_TMO_rights_in_Century_Shield_privileges_navigates",
    "MWTGPROV-4086_Verify_that_for_a_TMO_Commercial_prospect_phone_activation_(pSIM),_the_agent_selects_TMO_radio_button,_enters_IMEI,_NBOP_triggers_activation-precheck",
@@ -85,6 +91,7 @@
    "MWTGPROV-4086_For_TMO_prospect_line_activation,_the_Biller-info-response_API_should_have_the_following_changes",
    "MWTGPROV-4086_Verify_The_MNO_attribute_should_have_the_following_optional_values:_'TMO',_'VZW'_or_'null'",
    "MWTGPROV-4086_Verify_display_the_New_Line_Activation/Subscriber_line_page_witho _when_CS_access_to_the_‘MNO_TMO’_permission_is_OFF",
+   "MWTGPROV-4086_Verify_display_‘MNO’_radio_button_options_on_the_New_Line_when_‘MNO_TMO’_permission_in_CS",
    "MWTGPROV-4086_Verify_DO_NOT_Display_for_Second_Line",
    "MWTGPROV-4086_Verify_After_selecting_an_MNO_radio_button_and_then_entering_other_values,_if_Agent_tries_to_switch_between_values,_popup_sh",
    "MWTGPROV-4086_Verify_If_the_biller-line-info_API_returns_+_ONLY_one_line_+_in_the_suborder_object_with_lineStatus_=_PROSPECT_and_lineType!",
@@ -96,8 +103,8 @@
   ]
  },
  "MWTGPROV-4136": {
-  "count": 9,
-  "steps": 39,
+  "count": 22,
+  "steps": 91,
   "titles": [
    "MWTGPROV-4136_TC01_NBOP_Verify_Attributes_Displayed_TMO",
    "MWTGPROV-4136_TC02_NBOP_user_can_successfully_remove_optional_features_fro_TMO",
@@ -107,7 +114,20 @@
    "MWTGPROV-4136_TC06_NBOP_NBOP_calls_TMO_APIs_when_network_provider_attribut",
    "MWTGPROV-4136_TC07_NBOP_Verify_PI52_-_NBOP_TMO_functionalitie_Removed_TMO",
    "MWTGPROV-4136_TC08_NBOP_Verify_Attributes_Displayed_TMO",
-   "MWTGPROV-4136_TC09_NBOP_NPANXX_removal_from_activation_flow_does_not_affec_VZW"
+   "MWTGPROV-4136_TC09_NBOP_NPANXX_removal_from_activation_flow_does_not_affec_VZW",
+   "MWTGPROV-4136_TC10_NBOP_Display_the_Change_Features_option_under_Manage_Li",
+   "MWTGPROV-4136_TC11_NBOP_When_Change_Features_is_selected_show_the_list_of",
+   "MWTGPROV-4136_TC12_NBOP_Allow_addingremoving_features_the_same_way_as_for_VZW",
+   "MWTGPROV-4136_TC13_NBOP_Update_the_backend_to_support_the_following_requir",
+   "MWTGPROV-4136_TC14_NBOP_Call_CPC_API_for_TMO_to_fetch_the_wholesale_plan_a",
+   "MWTGPROV-4136_TC16_NBOP_Should_be_able_to_view_the_comparison_between_Netw",
+   "MWTGPROV-4136_TC17_NBOP_Remove_the_NPANXX_option_from_the_activation_flow",
+   "MWTGPROV-4136_TC18_NBOP_Update_the_MDN_screen_to_support_only_zipcodebased",
+   "MWTGPROV-4136_TC19_NBOP_Ensure_no_backend_dependency_or_request_payload_in",
+   "MWTGPROV-4136_TC20_NBOP_should_be_able_to_call_TMO_APIs_VZ_APIs_based_on_n",
+   "MWTGPROV-4136_TC21_NBOP_Optional_Features_list_must_not_be_empty_when_feat",
+   "MWTGPROV-4136_TC22_NBOP_Change_feature_transaction_must_complete_successfu",
+   "MWTGPROV-4136_TC23_NBOP_Verify_NPANXX_option_to_be_Removed_TMO"
   ]
  },
  "MWTGPROV-4166": {
@@ -127,15 +147,18 @@
   ]
  },
  "MWTGPROV-4190": {
-  "count": 6,
-  "steps": 55,
+  "count": 9,
+  "steps": 87,
   "titles": [
    "MWTGPROV-4190_Validate_that_user_is_able_to_get_into_the_\"Change_DPFO_Reset_Day\"_screen_by_navigating_through_Manage_Line_>>_Change_DPFO_Reset_Day",
    "MWTGPROV-4190_Validate_that_user_is_able_to_select_the_New_DPFO_Reset_Day_(1_to_28)",
    "MWTGPROV-4190_Validate_that_the_Current_DPFO_Reset_Day_is_displayed_and_un-editable",
    "MWTGPROV-4190_Validate_that_the_user_is_able_to_submit_the_Change_BCD_request",
    "MWTGPROV-4190_Validate_that_NBOP_sends_the_requestType_as_TMO_in_the_http_header,_that_helps_NSL_to_route_the_request_to_TMO",
-   "MWTGPROV-4190_Validate_that_Change_BCD_is_successfully_completed_and_the_new_BCD_is_updated_to_the_line"
+   "MWTGPROV-4190_Validate_that_Change_BCD_is_successfully_completed_and_the_new_BCD_is_updated_to_the_line",
+   "MWTGPROV-4190_Verify_NBOP_to_display_\"Change_DPFO_Reset_Day\"_option_on_the_Home/Line_Summary_screen",
+   "MWTGPROV-4190_Verify_On_selecting_the_Change_DPFO_Reset_Day\"_option,_show_the_same_fields_as_with_Verizon_Change_DPFO_Reset_Day_functional",
+   "MWTGPROV-4190_Verify_Create_a_new_ability_in_NSLNM,_that_allows_to_change_Bill_Cycle_Day_on_Wholesale_MDN_Ordering_Channel:_ITMBO_(Primary"
   ]
  },
  "MWTGPROV-4230": {
@@ -155,15 +178,16 @@
   ]
  },
  "MWTGPROV-4323": {
-  "count": 1,
-  "steps": 4,
+  "count": 2,
+  "steps": 8,
   "titles": [
-   "MWTGPROV-4323_TC01_NBOP_Verify_Confirm_New_Password_fields_an_Removed"
+   "MWTGPROV-4323_TC01_NBOP_Verify_Confirm_New_Password_fields_an_Removed",
+   "MWTGPROV-4323_TC02_NBOP_Verify_Attribute_Removed"
   ]
  },
  "MWTGPROV-4329": {
-  "count": 44,
-  "steps": 187,
+  "count": 48,
+  "steps": 225,
   "titles": [
    "MWTGPROV-4329_Verify_VZW-to-TMO_eSIM_migration_for_commercial_Smartwatch_(wearable)_via_port-in_activation",
    "MWTGPROV-4329_Verify_MNO_Migration_radio_button_display_and_access_control_in_NBOP_UI",
@@ -188,6 +212,7 @@
    "MWTGPROV-4329_Verify_migration_with_concurrent_standard_port-in_on_same_account",
    "MWTGPROV-4329_Verify_Precheck_Validation_shoud_not_occur_for_ICCID_and_MDN_When_MNO_Migration_Toggled",
    "MWTGPROV-4329_Verify_When_migration_permission_is_ON:_feature_behavior_is_enabled",
+   "MWTGPROV-4329_Verify_When_migration_permission_is_OFF:_feature_behavior_is_disabled/restricted",
    "MWTGPROV-4329_Verify_VZW_commercial_lines_to_be_migrated_to_TMO_commercial_Smartwatch_(wearable)_lines_with_appropriate_retail_and_wholesa",
    "MWTGPROV-4329_Verify_NBOP_to_support_this_migration_process_via_regular_portIn_activation_flow",
    "MWTGPROV-4329_Verify_In_NBOP_UI,_add_‘MNO_migration’_radio_button_options_(mandatory)_only_in_manual_activation_flow",
@@ -198,10 +223,13 @@
    "MWTGPROV-4329_Verify_Add_an_\"Enable_MNO_Migration\"_group_to_the_Century_Shield_menu_(see_attached_screenshot)_and_enable_it_for_the_follow",
    "MWTGPROV-4329_Verify_Step_9:_Automated_job_runs_→_Expected:_Deactivated_source_line_ID_updated",
    "MWTGPROV-4329_Verify_Step_1:_From_the_host_line,_agent_navigates_to_NBOP_manual_activation,_selects_'MNO_Migration:_YES'",
+   "MWTGPROV-4329_Verify_Step_2:_Agent_enters_Smartwatch_IMEI_→_Expected:_activation-precheck_skipped_for_IMEI_ONLY_(LineId_precheck_still_triggers_as_BAU)",
+   "MWTGPROV-4329_Verify_Smartwatch_migration_completes._isMigrated=MNO_sent_in_add-wearable_API",
    "MWTGPROV-4329_Verify_Step_1:_From_the_host_line,_agent_selects_'MNO_Migration:_YES',_enters_Smartwatch_IMEI",
    "MWTGPROV-4329_Verify_Post-migration_data_alignment:_NSL_line_IDs_reconciled,_MBO_network/ICCID_updated,_Biller_rate_plan_policy_updated,_MDN_synced",
    "MWTGPROV-4329_Verify_Step_2:_Automated_job_detects_data_pack_and_day_pass_on_migrated_line_→_Expected:_Data_pack_and_day_pass_removed_from_MBO/Biller",
    "MWTGPROV-4329_Verify_If_agent_accidentally_migrates_a_line_with_data_pack_and_day_pass,_those_are_removed_from_MBO/Biller_during_post-migration_cleanup",
+   "MWTGPROV-4329_Verify_Pre-req:_Agent_in_manual_activation_with_MNO_Migration=YES",
    "MWTGPROV-4329_Verify_Phone/Tablet:_precheck_skipped_for_IMEI_+_MDN",
    "MWTGPROV-4329_Verify_Step_1:_Agent_enters_device_info_→_Expected:_SIM_Profile_Type_populated_as_SPEC3_from_validate-device/device-info",
    "MWTGPROV-4329_Verify_System_behavior_defined_when_migrating_a_line_that_has_an_existing_pending_transaction",
@@ -282,8 +310,8 @@
   ]
  },
  "MWTGPROV-4416": {
-  "count": 85,
-  "steps": 725,
+  "count": 87,
+  "steps": 743,
   "titles": [
    "MWTGPROV-4416_Verify_that_switching_MNO_from_TMO_back_to_Verizon_restores_VZW-specific_fields_(NPANXX_visible,_EID_behavior)",
    "MWTGPROV-4416_Verify_Pre-req:_Agent_on_Create_Network_Account_with_TMO_selected",
@@ -362,7 +390,9 @@
    "MWTGPROV-4416_Verify_The_EID_field_should_be_non-editable_,_when_the_EID_is_auto-populated",
    "MWTGPROV-4416_Verify_The_EID_should_cleared_when_the_IMEI_is_cleared",
    "MWTGPROV-4416_Verify_display_‘MNO’_radio_button_options_on_the_Create_Network_Account_when_‘MNO_TMO’_permission_in_CS",
+   "MWTGPROV-4416_Verify_Enable_Network_Only_new_line_activation_by_connecting_to_the_NSL_CPC_API_(TMO)",
    "MWTGPROV-4416_Verify_On_the_Create_Network_Account_screen,_in_the_existing_ICCID_(SIM)_field_trigger_validate-sim_with_httpHeader_as_reque",
+   "MWTGPROV-4416_Verify_On_the_Create_Network_Account_screen,_in_the_existing_IMEI_(device)_field_invoke_validate-device_with_httpHeader_as_r",
    "MWTGPROV-4416_Verify_Add_EID_field_in_UI,_display_value_based_on_validate-device_or_device-info_APIs",
    "MWTGPROV-4416_Verify_send_the_TMO_related_offering_ID_to_get_TMO_plan_when_the_TMO_radio_button_is_selected",
    "MWTGPROV-4416_Verify_the_NPANXX_method_should_not_be_displayed_when_the_TMO_radio_button_is_selected",

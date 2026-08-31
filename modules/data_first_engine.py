@@ -1759,19 +1759,59 @@ def _prune_near_duplicate_tcs(test_cases: List, threshold: float = 0.70, log: Ca
     """
     import re as _re
 
+    if not test_cases:
+        return []
+
     _PRODUCT_TOKENS = frozenset({
         'phone', 'tablet', 'esim', 'psim', 'wearable', 'smartwatch', 'watch',
         'tmo', 'vzw', 'verizon', 'sprint', 'tmobile',
     })
 
+    # Tokens that appear in every title for a given feature and therefore say nothing about
+    # whether two test cases are the same test. Left in, they were the ENTIRE fingerprint.
+    # Only genuinely non-discriminating tokens: the assertion verb that opens every title,
+    # and the channel tag. Words like 'subscriber', 'screen' or 'option' are NOT excluded -
+    # they were only noise while step boilerplate was being blended in, and as title words
+    # they carry real signal ('Mobile Service Management' vs 'Transaction History').
+    _BOILERPLATE_TOKENS = frozenset({
+        'verify', 'validate', 'confirm', 'ensure', 'check', 'nbop', 'itmbo',
+    })
+
     def _fingerprint(tc) -> frozenset:
-        raw = _re.sub(r'^TC\d+_[A-Z]+-\d+[_ -]*', '', tc.summary or '').strip().lower()
-        raw = _re.sub(r'\s+', ' ', raw)
-        # Blend in first two step summaries for richer signal
-        for step in (tc.steps or [])[:2]:
-            raw += ' ' + (step.summary or '').lower()
-        words = set(_re.findall(r'\b[a-z0-9]{4,}\b', raw))
-        return frozenset(words - _PRODUCT_TOKENS)
+        """Meaningful words in a test case's title, for duplicate comparison.
+
+        THIS WAS BLIND TO THE TITLE ENTIRELY. Two independent faults combined:
+
+        1. `\\b[a-z0-9]{4,}\\b` cannot tokenise underscore-joined text, because underscore is
+           a word character so `\\b` never fires inside it. On a V8 title such as
+           'MWTGPROV-4136_TC01_NBOP_Verify_Attributes_Displayed_TMO' the only token extracted
+           was 'mwtgprov' - every other word failed the trailing boundary.
+        2. The strip regex expected 'TC01_MWTGPROV-4136_...', but V8 emits
+           'MWTGPROV-4136_TC01_...', so the feature id and TC number were never removed and
+           became shared tokens.
+
+        With the title contributing almost nothing and the first two step summaries blended
+        in - identical navigation boilerplate for every UI test case - every fingerprint came
+        out the same and Jaccard overlap was 1.00. MEASURED on MWTGPROV-4136: 23 test cases
+        pruned to 9, with all 14 removals reported as near-duplicates of the same TC01,
+        including 'Call CPC API for TMO', 'Remove the NPANXX option' and 'PortIn Verify Port
+        Status Removed'. None of those is a duplicate of anything.
+
+        Now: underscores are normalised to spaces before tokenising, the feature id and TC
+        number are stripped whichever order they appear in, and boilerplate shared by every
+        title is excluded. Step summaries are no longer blended in - for a UI feature the
+        leading steps are the same on every test case, so they were pure noise rather than
+        the "richer signal" intended.
+        """
+        raw = tc.summary or ''
+        # Underscore-joined titles must be split into words before anything else.
+        raw = raw.replace('_', ' ')
+        # Drop the feature id and TC number in either order.
+        raw = _re.sub(r'\b[A-Z][A-Z0-9]*-\d+\b', ' ', raw)
+        raw = _re.sub(r'\bTC\s*\d+\b', ' ', raw, flags=_re.IGNORECASE)
+        raw = _re.sub(r'\s+', ' ', raw).strip().lower()
+        words = set(_re.findall(r'[a-z0-9]{4,}', raw))
+        return frozenset(words - _PRODUCT_TOKENS - _BOILERPLATE_TOKENS)
 
     kept: List = []
     kept_fps: List[frozenset] = []
@@ -1793,6 +1833,13 @@ def _prune_near_duplicate_tcs(test_cases: List, threshold: float = 0.70, log: Ca
         st = str(getattr(tr, 'source_type', '') or '').strip().lower()
         return st in ('chalk scenario', 'business rule', 'chalk')
 
+    # Below this many meaningful words there is not enough signal to call two test cases the
+    # same test. A one- or two-word fingerprint makes Jaccard binary - a single shared word
+    # scores 1.00 - which is how a broken fingerprint was able to collapse an entire suite.
+    # Keeping an uncertain test case costs a review; dropping a real one loses coverage
+    # silently, so the tie goes to keeping it.
+    _MIN_FINGERPRINT_WORDS = 3
+
     for tc in test_cases:
         # User-requested scenarios always survive dedup (kept as-is, and never
         # used to displace another TC).
@@ -1807,9 +1854,9 @@ def _prune_near_duplicate_tcs(test_cases: List, threshold: float = 0.70, log: Ca
         _POS_CATS = {'Happy Path', 'Edge Case', ''}
         tc_cat = (tc.category or '').strip()
 
-        if fp:
+        if len(fp) >= _MIN_FINGERPRINT_WORDS:
             for i, kfp in enumerate(kept_fps):
-                if not kfp:
+                if len(kfp) < _MIN_FINGERPRINT_WORDS:
                     continue
                 # Category protection: Negative/Regression must never merge into Happy Path
                 ref_cat = (kept[i].category or '').strip()
