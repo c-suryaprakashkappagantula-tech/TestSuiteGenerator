@@ -1061,7 +1061,7 @@ def _sync_key_info_steps(title, validation, t):
             trigger = 'Step 1: Trigger the Sync Key Info API with the MDN per error scenario'
             trigger_exp = 'Sync Key Info API request sent'
             verify = 'Step 2: Validate NSL returns %s with descriptive error message' % err_code
-            verify_exp = '%s should be returned: %s' % (err_code, val[:150])
+            verify_exp = '%s should be returned: %s' % (err_code, truncate_at_word(val, 150))
 
         return [
             (trigger, trigger_exp),
@@ -1138,7 +1138,7 @@ def _sync_key_info_steps(title, validation, t):
         ('Step 3: Validate NSL updates accountNumber, acct_id, elineid and calls NE, EMM, CM as needed',
          'NSL should update account data and mark the transaction status as "COMPLETED" in transaction history'),
         ('Step 4: Verify Century Report shows Sync Key Info transaction with all backend calls logged',
-         val[:200] if val else 'Sync Key Info completed successfully with correct account data'),
+         truncate_at_word(val, 200) if val else 'Sync Key Info completed successfully with correct account data'),
     ]
 
 
@@ -1451,13 +1451,13 @@ def _ui_flow_steps(title, validation):
     import re as _re_ui
     _action = _re_ui.sub(r'^(?:Validate|Verify|Check|Ensure|UI Verify\s*[-:]?\s*)', '', title, flags=_re_ui.IGNORECASE).strip()
     _action = _re_ui.sub(r'New\s+MVNO\s*[-:—]\s*', '', _action, flags=_re_ui.IGNORECASE).strip()
-    _action = _action[:80] if _action else 'the feature'
+    _action = strip_dangling_tail(truncate_at_word(_action, 80)) if _action else 'the feature'
     return [
         ('Launch NBOP portal and search subscriber by MDN',
          'Subscriber profile loaded with header cards showing Account, MDN, IMEI, ICCID'),
-        ('Navigate to the menu for: %s' % _action[:70],
+        ('Navigate to the menu for: %s' % truncate_at_word(_action, 70),
          'Screen loads with all expected fields and controls'),
-        ('Perform %s via NBOP portal' % _action[:70],
+        ('Perform %s via NBOP portal' % truncate_at_word(_action, 70),
          'Operation submitted successfully — confirmation displayed'),
         ('Verify subscriber profile reflects the change',
          'All affected fields show correct post-operation values'),
@@ -1481,7 +1481,7 @@ def _ui_negative_steps(title, validation):
     import re as _re_uin
     _action = _re_uin.sub(r'^(?:Negative\s*[-:]?\s*|Validate|Verify|Check)\s*', '', title, flags=_re_uin.IGNORECASE).strip()
     _action = _re_uin.sub(r'New\s+MVNO\s*[-:—]\s*', '', _action, flags=_re_uin.IGNORECASE).strip()
-    _action = _action[:70] if _action else 'the operation'
+    _action = strip_dangling_tail(truncate_at_word(_action, 70)) if _action else 'the operation'
     return [
         ('Launch NBOP portal and search subscriber by MDN',
          'Subscriber profile loaded'),
@@ -1500,9 +1500,9 @@ def _api_flow_steps(title, validation):
     import re as _re_api
     _action = _re_api.sub(r'^(?:Validate|Verify|Check|Ensure|Step\s*\d+\s*[-:]?\s*)', '', title, flags=_re_api.IGNORECASE).strip()
     _action = _re_api.sub(r'New\s+MVNO\s*[-:—]\s*', '', _action, flags=_re_api.IGNORECASE).strip()
-    _action = _action[:80] if _action else 'the API operation'
+    _action = strip_dangling_tail(truncate_at_word(_action, 80)) if _action else 'the API operation'
     return [
-        ('Trigger API: %s with valid parameters' % _action[:70],
+        ('Trigger API: %s with valid parameters' % truncate_at_word(_action, 70),
          'NSL receives the request and begins processing'),
         ('Validate NSL sends outbound call to downstream system',
          'Downstream system receives request and responds'),
@@ -1521,9 +1521,9 @@ def _negative_steps(title, validation, t):
     # Extract a short action name from the title for step specificity
     import re as _re
     _action = _re.sub(r'^(?:Negative|Verify|Validate|Check|Ensure)\s*[-:]\s*', '', title, flags=_re.IGNORECASE).strip()
-    _action = _action[:80] if _action else 'the operation'
+    _action = strip_dangling_tail(truncate_at_word(_action, 80)) if _action else 'the operation'
     steps = [
-        ('Prepare request with invalid/error data to trigger: %s' % _action[:70],
+        ('Prepare request with invalid/error data to trigger: %s' % truncate_at_word(_action, 70),
          'Invalid request prepared with error condition'),
         ('Send API request to NSL',
          'NSL receives and processes the request'),
@@ -1552,7 +1552,7 @@ def _rollback_steps(title, validation, t):
     import re as _re_rb
     _action = _re_rb.sub(r'^(?:Validate|Verify|Negative\s*[-:]?\s*)', '', title, flags=_re_rb.IGNORECASE).strip()
     _action = _re_rb.sub(r'New\s+MVNO\s*[-:—]\s*', '', _action, flags=_re_rb.IGNORECASE).strip()
-    _action = _action[:70] if _action else 'the operation'
+    _action = strip_dangling_tail(truncate_at_word(_action, 70)) if _action else 'the operation'
 
     # Determine what gets rolled back based on feature context
     if 'swap' in t:
@@ -1575,7 +1575,7 @@ def _rollback_steps(title, validation, t):
         restore_item = 'original subscriber state and data'
 
     return [
-        ('Trigger %s and simulate mid-operation failure' % _action[:60],
+        ('Trigger %s and simulate mid-operation failure' % truncate_at_word(_action, 60),
          'Operation fails at the expected point during processing'),
         ('Verify NSL initiates rollback automatically',
          'Rollback triggered for all completed steps'),
@@ -1601,7 +1601,7 @@ def _default_workflow_steps(title, validation):
         if _contract:
             import re as _re3
             _action = _re3.sub(r'^(?:Validate|Verify|Check|Ensure|Step\s*\d+\s*[-:]?\s*)', '', title, flags=_re3.IGNORECASE).strip()
-            _action = _action[:70] if _action else 'the operation'
+            _action = strip_dangling_tail(truncate_at_word(_action, 70)) if _action else 'the operation'
             steps = [
                 ('Step 1: Obtain OAuth Token',
                  'OAuth token generated successfully'),
@@ -1646,17 +1646,17 @@ def _default_workflow_steps(title, validation):
     # Extract feature action from title for step specificity
     import re as _re2
     _action = _re2.sub(r'^(?:Validate|Verify|Check|Ensure|Step\s*\d+\s*[-:]?\s*)', '', title, flags=_re2.IGNORECASE).strip()
-    _action = _action[:80] if _action else 'the operation'
+    _action = strip_dangling_tail(truncate_at_word(_action, 80)) if _action else 'the operation'
     return [
         ('Step 1: Obtain OAuth Token',
          'OAuth token generated successfully'),
-        ('Step 2: Trigger API: %s' % _action[:70],
+        ('Step 2: Trigger API: %s' % truncate_at_word(_action, 70),
          'NSL processes request with 200 OK. Transaction ID generated'),
         ('Step 3: Download Century Report (Service Grouping)',
          'SERVICE_GROUPING HTML downloaded'),
         ('Step 3b: Verify NE Portal transactions',
          'NE Portal shows transaction completed'),
-        ('Step 4: Validate Service Grouping for: %s' % _action[:60],
+        ('Step 4: Validate Service Grouping for: %s' % truncate_at_word(_action, 60),
          val),
         ('Check audit logs (TRANSACTION_HISTORY & LINE_HISTORY)',
          'Transaction recorded correctly'),
@@ -1724,13 +1724,56 @@ _TITLE_MARKUP_RE = _re_plumb.compile(r'\{[^}]*\}')          # {panel}, {panel:ti
 _TITLE_TRAILING_RE = _re_plumb.compile(r'[\s_\-,:;.]+$')     # trailing punctuation/underscores
 
 
+_DANGLING_TAIL_RE = re.compile(
+    r'[\s,;:_]+(?:and|or|but|the|a|an|in|on|at|to|for|by|with|that|which|from|as|of|'
+    r'is|are|was|were|be|been|if|when|then|any|all|each|per|via|into|onto|not|no|'
+    r'should|shall|must|will|does|do|has|have|its|their)$',
+    re.IGNORECASE)
+
+
+def strip_dangling_tail(text):
+    """Drop a trailing connective so text does not read as cut off mid-thought.
+
+    Separate from `truncate_at_word` because text can arrive already ending on a
+    connective without ever having been truncated here - an acceptance-criteria line
+    spliced into a step template, for instance, giving
+    'Navigate to the menu for: that the Period dropdown shows values 1-20 months and'.
+    That fits inside the limit, so truncation never fired and the tail survived.
+
+    Only a trailing connective is removed. A word appearing mid-text is part of the
+    sentence: 'Verify CR fix applies to Reconnect workflow' ends on 'workflow' and is
+    left alone. An earlier attempt that matched anywhere ate real words, which is why
+    this is anchored to the end.
+    """
+    if not text:
+        return text
+    out = str(text)
+    # Repeat until stable: connectives arrive in runs. 'the NPANXX method should not' needs
+    # both 'not' and 'should' removed, and one pass would leave it ending on 'should' -
+    # still reading as cut off. Each iteration removes only a connective, so this is bounded
+    # by the number of trailing connectives and cannot consume a content word.
+    for _ in range(6):
+        stripped = _DANGLING_TAIL_RE.sub('', out).rstrip(' ,;:-_')
+        if stripped == out:
+            break
+        out = stripped
+    return out
+
+
 def truncate_at_word(text, limit):
     """Cut `text` to at most `limit` characters without splitting a word.
 
     Raw slices produced titles like 'Verify: ... indicating that any flo' and
-    '... is blocked when the line is on a non-eli'. This cuts at the last space before
-    the limit and drops a trailing dangling connective, so a shortened title still ends
-    on a whole word. Returns text unchanged when it already fits.
+    '... is blocked when the line is on a non-eli'. This cuts at the last word boundary
+    before the limit and drops a trailing dangling connective, so a shortened title still
+    ends on a whole word. Returns text unchanged when it already fits.
+
+    UNDERSCORES COUNT AS WORD BOUNDARIES. The V8 engine joins titles with underscores
+    ('Verify_Bucket_Value_unit_dynamically_changes...'), so searching only for a space
+    found nothing, treated the whole title as one long token and fell back to the hard
+    slice this function exists to prevent. Measured: MWTGPROV-4416 shipped
+    '..._SMS/MMS=Messa'. The V7 engine uses spaces and was unaffected, which is why the
+    original fix looked complete.
     """
     if not text:
         return text
@@ -1738,14 +1781,10 @@ def truncate_at_word(text, limit):
     if len(text) <= limit:
         return text
     window = text[:limit]
-    cut = window.rfind(' ')
-    # No space to cut on (one very long token): fall back to the hard slice.
+    cut = max(window.rfind(' '), window.rfind('_'))
+    # No boundary to cut on (one genuinely long token): fall back to the hard slice.
     out = window[:cut].rstrip() if cut >= int(limit * 0.5) else window
-    out = re.sub(
-        r'[\s,;:]+(?:and|or|but|the|a|an|in|on|at|to|for|by|with|that|which|from|as|of|'
-        r'is|are|was|were|be|been|if|when|then|any|all|each|per|via|into|onto)$',
-        '', out, flags=re.IGNORECASE)
-    return out.rstrip(' ,;:-')
+    return strip_dangling_tail(out)
 
 
 def sanitize_tc_titles(test_cases, log=print):

@@ -117,7 +117,7 @@
    "TC001_MWTGPROV-4166_Verify CR fix applies to Reconnect workflow",
    "TC002_MWTGPROV-4166_Regression: Verify unrelated workflows unaffected by CR fix",
    "TC003_MWTGPROV-4166_Negative: Verify old error Deactivation got failed with invalid MSI no longer occurs",
-   "TC004_MWTGPROV-4166_Verify: The front-end system should receive a response indicating that",
+   "TC004_MWTGPROV-4166_Verify: The front-end system should receive a response indicating",
    "TC005_MWTGPROV-4166_Negative: Already deactivated line — reject",
    "TC006_MWTGPROV-4166_Verify: NSL has ensure that if it receives and error response from TMO",
    "TC007_MWTGPROV-4166_Negative: Line with pending port-out — reject",

@@ -16,6 +16,7 @@ import json
 import logging
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
+from .step_templates import strip_dangling_tail, truncate_at_word  # word-boundary truncation, not raw slicing
 
 logger = logging.getLogger(__name__)
 
@@ -576,11 +577,11 @@ def generate_ui_steps(feature_name: str, description: str = '',
         import re as _re_vis
         _target = _re_vis.sub(r'^(?:Verify|Validate|Check|UI Verify\s*[-:]?\s*)', '', scenario_title, flags=_re_vis.IGNORECASE).strip()
         _target = _re_vis.sub(r'New\s+MVNO\s*[-:—]\s*', '', _target, flags=_re_vis.IGNORECASE).strip()
-        _target = _target[:80] if _target else 'the feature'
+        _target = strip_dangling_tail(truncate_at_word(_target, 80)) if _target else 'the feature'
         return [
             ('Launch NBOP and search subscriber by MDN', 'Subscriber profile loaded'),
-            ('Navigate to the menu for: %s' % _target[:70], 'Screen loads with expected fields'),
-            ('Verify %s is visible, correctly labeled, and accessible' % _target[:70],
+            ('Navigate to the menu for: %s' % truncate_at_word(_target, 70), 'Screen loads with expected fields'),
+            ('Verify %s is visible, correctly labeled, and accessible' % truncate_at_word(_target, 70),
              'Element is present, enabled, and interactive'),
         ]
 
@@ -620,14 +621,14 @@ def generate_ui_steps(feature_name: str, description: str = '',
         else:
             return [
                 ('Launch NBOP and navigate to %s' % nav_path, 'Screen loads'),
-                ('Enter invalid data to trigger: %s' % scenario_title[:60], 'NBOP shows appropriate validation error message'),
+                ('Enter invalid data to trigger: %s' % truncate_at_word(scenario_title, 60), 'NBOP shows appropriate validation error message'),
                 ('Verify no data was changed or submitted', 'Subscriber profile unchanged, no operation executed'),
             ]
 
     if intent == 'negative_state':
         return [
             ('Launch NBOP and search subscriber in the required state', 'Subscriber profile loaded showing the expected state'),
-            ('Attempt the operation: %s' % scenario_title[:80], 'NBOP displays error/rejection message'),
+            ('Attempt the operation: %s' % truncate_at_word(scenario_title, 80), 'NBOP displays error/rejection message'),
             ('Verify subscriber profile remains unchanged', 'All fields show pre-operation values, no data corruption'),
         ]
 
@@ -732,7 +733,7 @@ def generate_ui_steps(feature_name: str, description: str = '',
         import re as _re_op
         _op_name = _re_op.sub(r'^(?:Validate|Verify|Check)\s*', '', scenario_title, flags=_re_op.IGNORECASE).strip()
         _op_name = _re_op.sub(r'New\s+MVNO\s*[-:—]\s*', '', _op_name, flags=_re_op.IGNORECASE).strip()
-        _op_name = _op_name[:70] if _op_name else 'the operation'
+        _op_name = strip_dangling_tail(truncate_at_word(_op_name, 70)) if _op_name else 'the operation'
         steps.append(('Perform %s via NBOP portal' % _op_name, 'Operation completed successfully'))
     steps.append(('Verify subscriber profile reflects the operation result', 'Affected fields show correct post-operation values'))
     steps.append(('Navigate to ≡ Menu → Transaction History, verify entry recorded', 'Transaction logged with correct timestamp and status'))
@@ -780,7 +781,7 @@ def generate_ui_negative_steps(feature_name: str, description: str = '',
     # Default negative
     return [
         ('Launch NBOP portal and navigate to: %s' % nav_path, 'Screen loads'),
-        ('Perform the negative action: %s' % scenario_title[:100],
+        ('Perform the negative action: %s' % truncate_at_word(scenario_title, 100),
          'NBOP displays appropriate error message — no crash or blank screen'),
         ('Verify subscriber profile fields unchanged',
          'All sections (Account, Line, Device, SIM) show pre-operation values'),
