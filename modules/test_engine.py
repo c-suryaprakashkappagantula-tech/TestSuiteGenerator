@@ -5228,32 +5228,16 @@ def _quality_gate(test_cases, feature_name, feature_id, log=print):
             log('[QUALITY]   Rejected junk TC: %s' % name_core[:60])
             continue
 
-        # ── Check 1a: GLOBAL SUPPRESS LIST — patterns Charter never tests ──
-        # These are generic API testing patterns that don't match Charter's
-        # actual testing practices. Suppress globally for all features.
-        _GLOBAL_SUPPRESS_PATTERNS = [
-            'expired auth',             # Never test auth/token expiry at API level
-            'invalid.*auth',            # Never test auth/token at API level
-            'expired.*token',           # Never test token expiry
-            'invalid.*token',           # Never test token validity
-            'authentication',           # Auth testing not in scope
-            'db state.*consistent',     # DB consistency checks not done
-            'nsl db state',             # DB state checks not done
-            'db consistent',            # DB consistency not tested
-            'api response payload',     # Raw payload structure not validated
-            'response payload structure', # Payload structure not validated
-            'duplicate request',        # Idempotency checks not a Charter pattern
-            'rejects duplicate',        # Idempotency checks not a Charter pattern
-            'idempoten',                # Idempotency not tested
-            'nanp countries',           # NANP/area code not a test scenario
-            'area code distinction',    # NANP/area code not a test scenario
-            'country.*prefix',          # Country prefix not a test scenario
-            'only the first.*digits',   # Sub-detail of address mapping, not standalone TC
-        ]
-        _is_suppressed = any(re.search(sp, name_low) for sp in _GLOBAL_SUPPRESS_PATTERNS)
-        if _is_suppressed:
+        # ── Check 1a: patterns this team does not test ──
+        # The list moved to modules/tc_quality_rules.py so the V8 engine applies it too.
+        # It was a local variable here, which meant a documented decision about what this
+        # team tests was enforced only for CR and bug tickets - 8% of the cache.
+        from .tc_quality_rules import suppression_reason as _suppression_reason
+        _suppress_why = _suppression_reason(name_core)
+        if _suppress_why:
             rejected += 1
-            log('[QUALITY]   Rejected (global suppress): %s' % name_core[:60])
+            log('[QUALITY]   Rejected (not tested here: %s): %s'
+                % (_suppress_why, name_core[:60]))
             continue
 
         # ── Check 1a2: GENERIC STEP DETECTOR — kill TCs with placeholder steps ──

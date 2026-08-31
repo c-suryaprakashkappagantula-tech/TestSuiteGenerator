@@ -353,6 +353,21 @@ def build_test_suite_v8(
         attachment_names=[a.filename for a in (getattr(jira, 'attachments', []) or [])] if hasattr(jira, 'attachments') else [],
     )
 
+    # ── Drop test cases this team does not write (shared with V7's quality gate) ──
+    #
+    # The rule list lived inside `test_engine._quality_gate` as a local variable, so it only
+    # ever applied to CR and bug tickets. Measured across 45 non-CR features / 441 test cases,
+    # V8 shipped 2 that V7 would have suppressed - both "Verify with invalid token of api
+    # activation payload returns failure", and auth/token behaviour is not exercised at API
+    # level here. Small, but it is a decision about what this team tests and it should not
+    # depend on which engine a ticket happens to route to.
+    from .tc_quality_rules import filter_suppressed as _filter_suppressed
+    _before_suppress = len(suite.test_cases)
+    suite.test_cases = _filter_suppressed(suite.test_cases, log=log, engine='[V8-ENGINE]')
+    if len(suite.test_cases) != _before_suppress:
+        log('[V8-ENGINE] Suppressed %d test case(s) this team does not test'
+            % (_before_suppress - len(suite.test_cases)))
+
     validation_result = validate_suite(suite, log=log)
 
     if not validation_result.passed:
