@@ -8,6 +8,7 @@ fragment from a genuine final word and removed 'workflow' from 'Verify CR fix ap
 Reconnect workflow'. Prevention at the slice is the only approach that cannot damage a good
 title, and the last two tests here encode that.
 """
+import re
 import pytest
 
 from modules.step_templates import truncate_at_word
@@ -112,3 +113,75 @@ class TestStripDanglingTail:
     @pytest.mark.parametrize('value', ['', None])
     def test_empty_input_is_safe(self, value):
         assert truncate_at_word(value, 80) == value
+
+
+class TestTransformToScenarioTitle:
+    """Titles built from raw Chalk/AC prose must read as whole sentences.
+
+    Two defects found during the pre-live-run audit, both in
+    `tc_builder._transform_to_scenario_title`:
+
+    1. A multi-sentence Chalk scenario was truncated into a run-on. MWTGPROV-4416's
+       185-character scenario shipped '...SMS/MMS=Messages. Validation ranges apply per',
+       ending on a dangling 'per'. tc_builder HAS a first-sentence trim, but it is gated on
+       len > 140 and runs AFTER this function, which had already shortened the text to 136 -
+       so the gate never fired.
+    2. The 'When X, Y' -> 'Verify Y when X' transform used a non-greedy `(.{10,80}?)` for the
+       condition, so it stopped at the first 10 characters that let the rest of the pattern
+       match, splitting the clause in the wrong place, then hard-sliced both halves with
+       `[:40]`. MWTGPROV-4086 shipped
+       "Verify the 'MNO_TMO' permission is OFF, NBOP to when CS access to" - garbled rather
+       than merely truncated.
+    """
+
+    def test_a_multi_sentence_scenario_keeps_its_first_sentence(self):
+        from modules.tc_builder import _transform_to_scenario_title
+        source = ('Bucket Value unit dynamically changes based on Type selection: Data=MB, '
+                  'Voice=Mins, SMS/MMS=Messages. Validation ranges apply per unit type. '
+                  'Correct unit included in activation request.')
+        out = _transform_to_scenario_title(source, 'Optional Feature Provisioning')
+        assert out.endswith('SMS/MMS=Messages'), out
+        assert 'Validation ranges apply per' not in out, 'run-on was not trimmed'
+
+    def test_a_short_single_sentence_is_left_alone(self):
+        from modules.tc_builder import _transform_to_scenario_title
+        source = 'Verify the BCD change is rejected for a suspended line'
+        assert _transform_to_scenario_title(source, 'Change BCD') == source
+
+    def test_the_when_clause_keeps_the_whole_condition(self):
+        from modules.tc_builder import _transform_to_scenario_title
+        source = ("When CS access to the 'MNO_TMO' permission is OFF, NBOP to display the "
+                  "New Line Activation page without any MNO options")
+        out = _transform_to_scenario_title(source, 'MNO Migration')
+        assert "when CS access to the 'MNO_TMO' permission is OFF" in out, out
+        # The garbled form put the action's tail before 'when'.
+        assert not out.endswith(('to', 'when', 'access to')), out
+
+    def test_a_when_clause_without_a_comma_is_not_rearranged(self):
+        """Without a comma there is no reliable clause boundary, so guessing is worse."""
+        from modules.tc_builder import _transform_to_scenario_title
+        source = 'When the subscriber line is suspended the change must be rejected'
+        out = _transform_to_scenario_title(source, 'Change Feature')
+        assert ' when ' not in out.replace('When ', ''), out
+
+    def test_a_violation_title_is_still_shortened(self):
+        """The pre-existing violation-code path must keep working."""
+        from modules.tc_builder import _transform_to_scenario_title
+        source = ('Verify data-alignment corrects ANDROID_AS_IOS violation by NSL triggers '
+                  'CM event and OS differs between systems')
+        out = _transform_to_scenario_title(source, 'Data Alignment')
+        assert out == 'Verify data-alignment corrects ANDROID_AS_IOS violation', out
+
+    @pytest.mark.parametrize('source', [
+        'Bucket Value unit dynamically changes based on Type selection: Data=MB, '
+        'Voice=Mins, SMS/MMS=Messages. Validation ranges apply per unit type.',
+        "When CS access to the 'MNO_TMO' permission is OFF, NBOP to display the page "
+        'without any MNO options',
+        'Verify that the Type field affects the Bucket Value unit label dynamically.',
+    ])
+    def test_no_title_ends_on_a_dangling_connective(self, source):
+        from modules.tc_builder import _transform_to_scenario_title
+        out = _transform_to_scenario_title(source, 'Feature')
+        last = re.findall(r"[A-Za-z0-9'\-]+", out)[-1].lower()
+        assert last not in {'and', 'or', 'the', 'a', 'to', 'for', 'with', 'per', 'that',
+                            'is', 'of', 'in', 'on', 'when', 'not', 'should'}, out

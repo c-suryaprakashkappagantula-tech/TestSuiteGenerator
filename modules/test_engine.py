@@ -2338,6 +2338,16 @@ _DESC_LEADING_VERB_RE = re.compile(
     re.IGNORECASE | re.DOTALL)
 
 
+def _trim_step_text(text, limit):
+    """Word-boundary truncation for step text, dropping a dangling connective.
+
+    Thin wrapper so this module does not have to care where the shared helpers live.
+    Raw slices here produced step text cut mid-word.
+    """
+    from .step_templates import strip_dangling_tail, truncate_at_word
+    return strip_dangling_tail(truncate_at_word(text, limit))
+
+
 def _strip_leading_verb_for_description(title):
     """Drop a leading Verify/Validate/Confirm/Ensure/Check from a title used in a description.
 
@@ -5710,7 +5720,9 @@ def _synthesize_e2e_lifecycle(test_cases, feature_id: str, feature_name: str, lo
     for hp_tc in _core_hps:
         # Extract the core intent from the TC summary
         _intent = (hp_tc.summary or '').replace(feature_id + '_', '').replace('_', ' ')
-        _intent = _intent[:100].strip()
+        # Word-boundary truncation: `[:100]` cut mid-word, giving MWTGPROV-4429
+        # 'E2E Stage 1: TC001 Verify that ... with an international destin'.
+        _intent = _trim_step_text(_intent, 100).strip()
         if hp_tc.steps:
             _expected = hp_tc.steps[0].expected or 'Operation completes successfully'
         else:
@@ -5718,7 +5730,7 @@ def _synthesize_e2e_lifecycle(test_cases, feature_id: str, feature_name: str, lo
         steps.append(TestStep(
             step_num=step_num,
             summary='E2E Stage %d: %s' % (step_num - 1, _intent),
-            expected=_expected[:120],
+            expected=_trim_step_text(_expected, 120),
         ))
         step_num += 1
 

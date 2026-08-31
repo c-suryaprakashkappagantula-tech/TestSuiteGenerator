@@ -775,7 +775,7 @@ def _build_scenario_tc(
                     steps.append(TestStep(
                         step_num=len(steps) + 1,
                         summary=_fb_summary,
-                        expected=_val_clean[:200],
+                        expected=_trim_title(_val_clean, 200),
                         data_reference=scenario.source.source_id,
                     ))
     elif scenario.api_spec:
@@ -902,7 +902,7 @@ def _build_scenario_tc(
             steps = [
                 TestStep(step_num=1,
                          summary='Preconditions: Set up test data — %s' % _trim_title(scenario_title, 60),
-                         expected='Test environment configured for: %s' % scenario_title[:50],
+                         expected='Test environment configured for: %s' % _trim_title(scenario_title, 50),
                          data_reference='Scenario: %s' % scenario_title[:40]),
                 TestStep(step_num=2,
                          summary='Send %s request to %s' % (method, endpoint),
@@ -910,7 +910,7 @@ def _build_scenario_tc(
                          data_reference='API: %s %s' % (method, endpoint)),
                 TestStep(step_num=3,
                          summary='Validate response status 200 OK and response body',
-                         expected='Success response confirms: %s' % scenario_title[:50],
+                         expected='Success response confirms: %s' % _trim_title(scenario_title, 50),
                          data_reference='Response validation'),
                 TestStep(step_num=4,
                          summary='Verify: %s' % _trim_title(scenario_title, 70),
@@ -1246,7 +1246,7 @@ def _build_negative_tc(
                 step_num=3,
                 summary='Validate error response: code=%s, message="%s"' % (
                     error_code, error_msg[:60]),
-                expected='Error response: code=%s, message="%s"' % (error_code, error_msg[:80]),
+                expected='Error response: code=%s, message="%s"' % (error_code, _trim_title(error_msg, 80)),
                 data_reference='Business Rule: %s' % (neg_spec.source.source_id if neg_spec.source else error_code),
             ),
         ]
@@ -1779,7 +1779,25 @@ def _transform_to_scenario_title(raw_text: str, feature_name: str) -> str:
       'When CS access to the MNO_TMO permission is OFF, NBOP to display...'
       → 'Verify MNO_TMO permission OFF hides MNO options'
     """
+    from .step_templates import strip_dangling_tail, truncate_at_word
+
     text = raw_text.strip()
+
+    # ── Multi-sentence source: keep the first sentence ──
+    #
+    # A Chalk scenario is sometimes a paragraph. Truncating it yields a run-on cut at an
+    # arbitrary point, whereas its first sentence is usually the scenario itself and the rest
+    # is elaboration. MWTGPROV-4416's 185-character scenario produced
+    # "...SMS/MMS=Messages. Validation ranges apply per" - ending on a dangling "per" -
+    # where the first sentence alone is complete and readable.
+    #
+    # tc_builder has a first-sentence trim of its own, but it is gated on len > 140 and runs
+    # AFTER this function, which had already shortened the text to 136. The gate therefore
+    # never fired. Doing it here, before any truncation, is what makes it effective.
+    if len(text) > 100:
+        _sentence_end = re.search(r'\.\s+[A-Z0-9]', text)
+        if _sentence_end and _sentence_end.start() > 40:
+            text = text[:_sentence_end.start() + 1].strip()
 
     # ── Strip implementation detail after violation code ──
     # Pattern: "corrects VIOLATION_CODE violation [by/—/when/OS/device...]"
@@ -1808,14 +1826,26 @@ def _transform_to_scenario_title(raw_text: str, feature_name: str) -> str:
                 break
 
     # ── "When X, Y" pattern → "Verify Y when X" ──
+    #
+    # The condition is anchored to the COMMA. This was `(.{10,80}?)` - non-greedy, so it
+    # stopped at the first 10 characters that let the rest of the pattern match, splitting
+    # the sentence in the wrong place. On MWTGPROV-4086, "When CS access to the 'MNO_TMO'
+    # permission is OFF, NBOP to display the default values..." gave condition="CS access to"
+    # and action="the 'MNO_TMO' permission is OFF, NBOP to" - the clause boundary landed
+    # mid-phrase and the two halves were then swapped, producing
+    # "Verify the 'MNO_TMO' permission is OFF, NBOP to when CS access to". Garbled, not merely
+    # truncated. Requiring the comma keeps the condition whole, and if there is no comma the
+    # transform does not apply rather than guessing where the clause ends.
     when_match = re.match(
-        r"^[Ww]hen\s+(.{10,80}?),?\s+(?:NBOP\s+to\s+|the\s+system\s+(?:shall\s+)?|NSL\s+(?:shall\s+)?)?(.+)",
+        r"^[Ww]hen\s+([^,]{10,90}),\s*"
+        r"(?:NBOP\s+to\s+|the\s+system\s+(?:shall\s+)?|NSL\s+(?:shall\s+)?)?(.+)",
         text
     )
     if when_match:
-        condition = when_match.group(1).strip().rstrip(',')[:40]
-        action = when_match.group(2).strip()[:40]
-        return 'Verify %s when %s' % (action, condition)
+        # truncate_at_word, not a raw slice: `[:40]` cut both halves mid-phrase.
+        condition = truncate_at_word(when_match.group(1).strip().rstrip(','), 70)
+        action = truncate_at_word(when_match.group(2).strip(), 70)
+        return strip_dangling_tail('Verify %s when %s' % (action, condition))
 
     # ── Verb prefix → add "Verify" ──
     if re.match(r'^(Display|Show|Return|Send|Update|Create|Delete|Trigger|Process|Handle)\s', text, re.IGNORECASE):
@@ -1831,10 +1861,11 @@ def _transform_to_scenario_title(raw_text: str, feature_name: str) -> str:
         # Use space-based version of smart truncate for pre-underscore text
         text = _smart_truncate_title(text.replace(' ', '_'), 140).replace('_', ' ')
 
-    # Clean trailing punctuation/artifacts
+    # Clean trailing punctuation/artifacts, then drop a dangling connective so the title does
+    # not read as cut off mid-thought.
     text = text.rstrip(' —-,.:')
 
-    return text
+    return strip_dangling_tail(text)
 
 
 def _extract_feature_name(jira) -> str:
@@ -2971,7 +3002,7 @@ def _build_ui_scenario_tc_enriched(
             elif 'is displayed' in hint_text.lower() or 'should be displayed' in hint_text.lower():
                 expected = 'Element IS visible and accessible'
             elif 'verify' in hint_text.lower() or 'ensure' in hint_text.lower():
-                expected = 'Condition verified: %s' % hint_text[:80]
+                expected = 'Condition verified: %s' % _trim_title(hint_text, 80)
             elif 'navigate' in hint_text.lower() or 'click' in hint_text.lower():
                 expected = 'Navigation successful — target page/section loaded'
             elif 'login' in hint_text.lower() or 'log in' in hint_text.lower() or 'search' in hint_text.lower():
