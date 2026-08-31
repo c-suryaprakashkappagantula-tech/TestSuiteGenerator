@@ -2900,10 +2900,14 @@ def _build_ui_tc_summary_name(title: str, feature_name: str, tc_num: int) -> str
             if clean.startswith(prefix):
                 clean = clean[len(prefix):]
 
-        # Convert to underscore-separated, truncate
+        # Convert to underscore-separated and remove modal filler before shortening. This
+        # keeps the business condition in titles such as "should be able to call ... based
+        # on network provider" instead of truncating that condition to "...based_on_n".
+        from .step_templates import truncate_at_word as _tw
         clean = re.sub(r'[^a-zA-Z0-9\s]', '', clean)
         clean = re.sub(r'\s+', '_', clean.strip())
-        clean = clean[:50]
+        clean = re.sub(r'^(?:should|must)_be_able_to_', '', clean, flags=re.IGNORECASE)
+        clean = _tw(clean, 50)
 
         parts = ['NBOP']
         if product_prefix:
