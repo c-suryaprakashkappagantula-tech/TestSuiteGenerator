@@ -58,8 +58,11 @@ def generate_excel(suite: TestSuite, log=print) -> Path:
     write in ``pipeline.block_generate_output``.
     """
     from .protected_gate import assert_suite_safe
+    from .coverage_obligations import assert_suite_complete
     assert_suite_safe(suite, context='Excel output for %s'
                       % (getattr(suite, 'feature_id', '') or 'suite'), log=log)
+    assert_suite_complete(suite, context='Excel output for %s'
+                          % (getattr(suite, 'feature_id', '') or 'suite'), log=log)
 
     wb = openpyxl.Workbook()
 
@@ -95,6 +98,11 @@ def generate_excel(suite: TestSuite, log=print) -> Path:
             build_scorecard_excel_sheet(wb, _scorecard)
         except Exception as _sc_err:
             log('[EXCEL] Coverage Scorecard sheet skipped: %s' % str(_sc_err)[:60])
+
+    # ── Deterministic source-obligation audit ──
+    if getattr(suite, 'coverage_obligations', None):
+        log('[EXCEL] Building Coverage Obligations sheet...')
+        _build_coverage_obligations_sheet(wb, suite)
 
     # Remove default empty sheet if exists
     if 'Sheet' in wb.sheetnames:
@@ -168,6 +176,8 @@ def _build_summary_sheet(wb, suite: TestSuite):
         _guide_items.append(('Data Sources', 'Inventory of every source mined (Chalk, Jira AC, subtasks) and how many testable items each yielded.'))
     if getattr(suite, '_coverage_scorecard', None) is not None:
         _guide_items.append(('Coverage Scorecard', 'Risk lenses — line-state matrix, Chalk alignment, category balance, grounding — with an overall risk rating.'))
+    if getattr(suite, 'coverage_obligations', None):
+        _guide_items.append(('Coverage Obligations', 'Deterministic source requirements mapped to covering test cases. Every required row must be COVERED before export.'))
     _cat_guide = [
         ('Happy Path', 'Core positive scenarios — the feature works as designed with valid inputs and expected conditions.'),
         ('Negative', 'Failure and error scenarios — invalid inputs, system failures, timeouts, rollbacks. Verifies graceful handling.'),
@@ -702,3 +712,63 @@ def _build_data_sources_sheet(wb, suite):
         for warning in suite.data_inventory.warnings:
             r += 1
             ws.cell(row=r, column=1, value='⚠️ ' + warning)
+
+
+def _build_coverage_obligations_sheet(wb, suite):
+    """Write the deterministic requirement-to-test-case completeness audit."""
+    ws = wb.create_sheet('Coverage Obligations')
+    ws.freeze_panes = 'A4'
+    audit = getattr(suite, 'coverage_audit', None) or {}
+    passed = bool(audit.get('passed'))
+    ws.merge_cells('A1:F1')
+    ws['A1'] = 'SOURCE COVERAGE OBLIGATIONS — %s' % (suite.feature_id or '')
+    ws['A1'].font = Font(name='Calibri', bold=True, size=14, color='FFFFFF')
+    ws['A1'].fill = PatternFill(start_color=NAVY, end_color=NAVY, fill_type='solid')
+    ws['A1'].alignment = Alignment(horizontal='center')
+
+    ws.merge_cells('A2:F2')
+    ws['A2'] = ('PASS — %d/%d required obligations covered' %
+                (audit.get('covered', 0), audit.get('required', 0))
+                if passed else
+                'BLOCKED — missing: %s' % ', '.join(audit.get('missing', [])))
+    ws['A2'].font = Font(name='Calibri', bold=True, color='006100' if passed else '9C0006')
+    ws['A2'].fill = PatternFill(start_color='C6EFCE' if passed else 'FFC7CE',
+                                end_color='C6EFCE' if passed else 'FFC7CE',
+                                fill_type='solid')
+
+    headers = ('Obligation ID', 'Kind', 'Source ID', 'Required', 'Status', 'Covered By')
+    for column, value in enumerate(headers, 1):
+        cell = ws.cell(row=3, column=column, value=value)
+        cell.font = _hf
+        cell.fill = _hfill
+        cell.alignment = _center
+        cell.border = _bdr
+
+    by_obligation = {}
+    for tc in getattr(suite, 'test_cases', []) or []:
+        for obligation_id in getattr(tc, 'obligation_ids', []) or []:
+            by_obligation.setdefault(obligation_id, []).append(tc.summary or tc.sno)
+
+    missing = set(audit.get('missing', []))
+    for row, obligation in enumerate(getattr(suite, 'coverage_obligations', []) or [], 4):
+        item = obligation if isinstance(obligation, dict) else vars(obligation)
+        oid = str(item.get('obligation_id', '') or '')
+        required = bool(item.get('required', True))
+        status = 'MISSING' if oid in missing else 'COVERED'
+        values = (oid, item.get('kind', ''), item.get('source_id', ''),
+                  'Yes' if required else 'No', status,
+                  '\n'.join(by_obligation.get(oid, [])))
+        for column, value in enumerate(values, 1):
+            cell = ws.cell(row=row, column=column, value=value)
+            cell.font = _nf
+            cell.alignment = _wrap
+            cell.border = _bdr
+        ws.cell(row=row, column=5).fill = PatternFill(
+            start_color='FFC7CE' if status == 'MISSING' else 'C6EFCE',
+            end_color='FFC7CE' if status == 'MISSING' else 'C6EFCE',
+            fill_type='solid')
+
+    widths = {'A': 42, 'B': 20, 'C': 38, 'D': 12, 'E': 14, 'F': 75}
+    for column, width in widths.items():
+        ws.column_dimensions[column].width = width
+    ws.auto_filter.ref = 'A3:F%d' % max(3, ws.max_row)

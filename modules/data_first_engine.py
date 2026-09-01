@@ -124,22 +124,44 @@ def build_test_suite_v8(
         classification.classification, classification.confidence,
         classification.api_keywords_found[:3], classification.ui_keywords_found[:3]))
 
-    # ── Step 0a: CR/Bug Fix Detection ──
-    # CR/bug fix tickets ALWAYS use the CR-specific engine path.
-    # This is a hard rule — no override based on Chalk scenario count.
-    # Chalk can have 15 scenarios for a CR fix (4389 is proof) — that does NOT
-    # mean it should get channel/device expansion. The "- CR -" in the title
-    # is the definitive signal.
+    # ── Step 0a: Explicit coverage obligations and broad-scope routing ──
+    from .coverage_obligations import (
+        derive_coverage_obligations, is_broad_scope_cr,
+        is_data_alignment_feature, build_data_alignment_suite,
+    )
+    _coverage_obligations = derive_coverage_obligations(
+        jira=jira, chalk=chalk, parsed_docs=parsed_docs,
+        deep_mine_result=deep_mine_result)
+    if _coverage_obligations:
+        log('[V8-ENGINE]   Derived %d explicit source-coverage obligations' %
+            len(_coverage_obligations))
+
+    # Data Alignment is an enumerated contract: one executable case per violation plus
+    # mandatory special negatives. Build from the obligation registry rather than prose
+    # templates so CR routing, parser flattening, and semantic dedup cannot lose rows.
+    if is_data_alignment_feature(jira, chalk):
+        log('[V8-ENGINE] *** Data Alignment contract detected — obligation-first builder ***')
+        return build_data_alignment_suite(
+            jira, chalk, _coverage_obligations, options=options, log=log)
+
+    # ── Step 0b: CR/Bug Fix Detection ──
+    # Ticket type and coverage scope are different. Broad CRs continue through V8;
+    # only genuinely narrow fixes delegate to the capped legacy path.
     _is_cr = is_cr_or_bug(
         summary=jira.summary if jira else '',
         issue_type=jira.issue_type if jira and hasattr(jira, 'issue_type') else '',
         description=jira.description if jira and hasattr(jira, 'description') else '',
     )
-    if _is_cr:
-        log('[V8-ENGINE] *** CR/Bug fix detected — delegating to CR-specific engine (no override) ***')
-        return _build_cr_suite_v8(jira, chalk, parsed_docs, options, deep_mine_result, log)
+    _broad_cr = _is_cr and is_broad_scope_cr(jira, _coverage_obligations)
+    if _is_cr and not _broad_cr:
+        log('[V8-ENGINE] *** Narrow CR/Bug fix detected — delegating to CR-specific engine ***')
+        return _build_cr_suite_v8(
+            jira, chalk, parsed_docs, options, deep_mine_result, log,
+            coverage_obligations=_coverage_obligations)
+    if _broad_cr:
+        log('[V8-ENGINE] *** Broad CR scope detected — retaining full V8 planning path ***')
 
-    # ── Step 0b: NMNO API Lookup (if API or hybrid) ──
+    # ── Step 0c: NMNO API Lookup (if API or hybrid) ──
     nmno_result = None
     if classification.classification in ('api', 'hybrid'):
         log('[V8-ENGINE] Step 0b: NMNO API Lookup (local DB)...')
@@ -528,6 +550,14 @@ def build_test_suite_v8(
         log('[V8-ENGINE]   WARNING: priority finalization failed: %s — continuing' % str(_pri_err)[:100])
         _record_degraded('priority finalization', _pri_err)
 
+    try:
+        from .coverage_obligations import attach_coverage_audit
+        attach_coverage_audit(suite, _coverage_obligations, log=log)
+    except Exception as _cov_err:
+        # Obligation failures are not degraded into success; export re-audits and blocks.
+        log('[COVERAGE-GATE] Audit setup failed: %s' % str(_cov_err)[:160])
+        raise
+
     _attach_degraded(suite, log)
 
     return suite
@@ -538,7 +568,8 @@ def build_test_suite_v8(
 # ================================================================
 
 
-def _build_cr_suite_v8(jira, chalk, parsed_docs, options, deep_mine_result, log):
+def _build_cr_suite_v8(jira, chalk, parsed_docs, options, deep_mine_result, log,
+                       coverage_obligations=None):
     """Build a test suite for CR/bug fix tickets using the old engine's
     CR-specific path. This avoids channel/device expansion, raw Jira text
     mining, and NBOP UI knowledge injection that produce bad TCs for CRs.
@@ -660,6 +691,10 @@ def _build_cr_suite_v8(jira, chalk, parsed_docs, options, deep_mine_result, log)
     # log-and-continue handlers are NOT instrumented. A CR run reports degradation only for
     # the passes this module and the output block record, so "no degraded passes" is a
     # weaker statement for a CR suite than for a non-CR one.
+    # Narrow CRs are still held to any explicit source obligations. If legacy
+    # generation cannot prove them, the export boundary blocks the workbook.
+    from .coverage_obligations import attach_coverage_audit
+    attach_coverage_audit(suite, coverage_obligations or [], log=log)
     _attach_degraded(suite, log)
 
     return suite

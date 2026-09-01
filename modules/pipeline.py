@@ -623,6 +623,10 @@ def block_generate_output(suite, feature_id, pi, strategy, jira=None, chalk=None
     from .doc_generator import generate_feature_doc
     from .database import save_test_suite, log_generation_db, load_latest_suite, get_suite_history
     from .transaction_log import log_generation
+    from .coverage_obligations import assert_suite_complete
+
+    # Fail closed before diffing, workbook creation, DB persistence, or success logs.
+    assert_suite_complete(suite, context='Pipeline output for %s' % feature_id, log=log)
 
     # ── Auto-diff: load previous suite file before overwriting DB ──
     diff_report = None

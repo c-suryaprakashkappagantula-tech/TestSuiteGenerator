@@ -47,6 +47,8 @@ class ExtractedScenario:
     source: TraceabilityRecord                   # traceability back to data source
     api_spec: Optional[Any] = None               # APISpec if from Chalk API page
     steps_hint: List[str] = field(default_factory=list)  # hint steps from source
+    user_requested: bool = False                 # True when authored from a user custom instruction
+    priority_hint: str = ''                       # optional "P1"|"P2"|"P3" hint from the instruction
 
 
 @dataclass
@@ -152,6 +154,8 @@ class TestCase:
     traceability: Optional[TraceabilityRecord] = None  # V8.0: links TC to data source
     dimension_values: Dict[str, str] = field(default_factory=dict)  # e.g., {"input_type": "IMEI"}
     grounding_score: int = -1                    # 0–100 Grounding Score; -1 = not yet scored
+    user_requested: bool = False                 # True when authored from a user custom instruction (protected from pruning/gating)
+    obligation_ids: List[str] = field(default_factory=list)  # explicit source requirements covered by this TC
 
 
 # ─── Test Suite (V8.0) ─────────────────────────────────────────────
@@ -198,6 +202,10 @@ class TestSuite:
     open_item_coverage: Dict[str, str] = field(default_factory=dict)
     # V8.0 Routing Audit (populated by engine after TC generation)
     routing_audit: Optional['RoutingAudit'] = None
+    # Deterministic source-completeness contract (re-audited at every export boundary)
+    coverage_obligations: List[Dict[str, Any]] = field(default_factory=list)
+    coverage_audit: Dict[str, Any] = field(default_factory=dict)
+    coverage_policy_version: str = ''
 
 
 # ─── Warning Report (zero-items case) ──────────────────────────────
