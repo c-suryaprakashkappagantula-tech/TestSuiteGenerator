@@ -456,11 +456,28 @@ def get_varied_test_data(
     _assert_safe_mapping({'MDN': mdn, 'lineId': line_id, 'accountNumber': account},
                          'test_data_injector.get_varied_test_data(tc_index=%d)' % tc_index)
 
+    # RequestType is the only payload field influenced by scenario metadata.
+    # A dual-provider case needs two valid provider-specific contexts; never invent
+    # a synthetic RequestType or a scenario-specific MDN.
+    network_provider = str(dimension_values.get('network_provider', '') or '').strip().upper()
+    if network_provider == 'MIXED':
+        second_mdn = mdns[(tc_index + 1) % len(mdns)]
+        second_line_id = line_ids[(tc_index + 1) % len(line_ids)]
+        _assert_safe_mapping(
+            {'MDN': second_mdn, 'lineId': second_line_id},
+            'test_data_injector.get_varied_test_data(mixed tc_index=%d)' % tc_index)
+        return (
+            'TMO: MDN=%s, lineId=%s, RequestType=TMO; '
+            'VZW: MDN=%s, lineId=%s, RequestType=VZW'
+        ) % (mdn, line_id, second_mdn, second_line_id)
+
+    request_type = 'VZW' if network_provider == 'VZW' else 'TMO'
+
     # Base fields
     fields = {
         'MDN': mdn,
         'lineId': line_id,
-        'RequestType': 'TMO',
+        'RequestType': request_type,
     }
 
     # NOTE: Context fields (product, plan_type, line_state, device_type, channel)

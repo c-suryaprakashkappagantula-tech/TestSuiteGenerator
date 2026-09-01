@@ -393,6 +393,11 @@ def _classify_scenario_intent(scenario_title: str) -> str:
     """Classify what the scenario is trying to test."""
     sc = scenario_title.lower()
 
+    # Context-menu histories use the dedicated history route, not the tile-level
+    # activation-history branch or generic element visibility routing.
+    if any(kw in sc for kw in ['transaction history', 'line history', 'service history']):
+        return 'history'
+
     # ── Priority intents: element removal / element verification ──
     # These take priority over generic intents because they indicate specific
     # element-level assertions rather than general visibility checks.
@@ -453,31 +458,504 @@ def _extract_element_names(scenario_title: str) -> List[str]:
 
 
 def _detect_history_tab(scenario_title: str) -> Optional[str]:
-    """Map scenario title keywords to a specific History tab name."""
+    """Map only explicit activation/history subjects to a specific History tab."""
     sc = scenario_title.lower()
-    if 'port in' in sc or 'port-in' in sc or 'portin' in sc:
+    if 'port in activation' in sc or 'port-in activation' in sc or 'update portin' in sc:
         return 'Port In Activation'
-    if 'new mdn' in sc:
+    if 'new mdn activation' in sc:
         return 'New MDN Activation'
-    if 'wearable' in sc:
+    if 'wearable activation' in sc:
         return 'Wearable Activation'
-    if 'port out' in sc or 'port-out' in sc:
+    if 'mno activation history' in sc or 'hmno activation' in sc:
+        return 'HMNO Activation'
+    if 'port out history' in sc or 'port-out history' in sc:
         return 'Port Out History'
-    if 'mdn' in sc or 'sim' in sc or 'device' in sc:
+    if any(term in sc for term in ('mdn/sim/device history', 'mdn sim device history')):
         return 'MDN/SIM/Device History'
-    # Default for generic history references
-    return 'Port In Activation'
+    return None
 
 
 def _is_history_scenario(scenario_title: str) -> bool:
-    """Check if scenario references a History page."""
+    """True only for scenarios that explicitly target a tile-level History tab."""
     sc = scenario_title.lower()
-    return any(kw in sc for kw in ['history', 'port in', 'port-in',
-                                    'activation history'])
+    if any(term in sc for term in ('transaction history', 'line history', 'service history')):
+        return False
+    return _detect_history_tab(scenario_title) is not None
+
+
+def _normalize_provider(provider: str, text: str = '') -> str:
+    """Normalize caller-supplied provider metadata with a conservative fallback."""
+    import re
+    normalized = (provider or '').strip().upper()
+    if normalized in ('TMO', 'VZW', 'MIXED'):
+        return normalized
+    has_tmo = bool(re.search(r'\b(?:tmo|t-mobile|tmobile)\b', text or '', re.IGNORECASE))
+    has_vzw = bool(re.search(r'\b(?:vzw|vz|verizon)\b', text or '', re.IGNORECASE))
+    if has_vzw and not has_tmo:
+        return 'VZW'
+    return 'TMO'
+
+
+def _is_zip_location_flow(text: str) -> bool:
+    """Recognize ZIP-driven activation/Change MDN requirements without NPANXX wording."""
+    import re
+    return (
+        bool(re.search(r'\b(?:zip\s*code|zip-code|zipcode)\b', text or '', re.IGNORECASE)) and
+        any(term in (text or '').lower() for term in (
+            'change mdn', 'mdn screen', 'mdn-screen',
+            'activation screen', 'activation flow'))
+    )
+
+
+def _mentions_port_in(text: str) -> bool:
+    """Recognize Port-In as a word/phrase, never as part of words such as support."""
+    import re
+    return bool(re.search(r'\bport(?:-|\s+)?in\b', text or '', re.IGNORECASE))
+
+
+def _history_lookup_step(tab_name: str) -> Tuple[str, str]:
+    """Use the Port Status filter only on Port In Activation history."""
+    if tab_name == 'Port In Activation':
+        return ('Select Port Status = IN PROGRESS from dropdown, click Search',
+                'IN PROGRESS Port-In records are filtered and displayed')
+    return ('Search for the activation record by MDN or Transaction ID',
+            'The matching record is displayed with the expected provider and status')
+
+
+def _change_features_steps(ctx: str, sc: str,
+                           provider: str = '') -> Optional[List[Tuple[str, str]]]:
+    """Return concrete Change Features navigation/actions for matching scenarios."""
+    import re as _re
+    named_change_features = any(term in ctx for term in (
+        'change feature', 'change features', 'optional feature', 'included feature',
+        'required feature', 'pdl data', 'feature list'))
+    conflict_requirement = (
+        'feature' in ctx and any(term in ctx for term in ('conflict', 'incompatible')))
+    feature_operation = bool(_re.search(
+        r'\b(?:add(?:ing)?|remov(?:e|ing))\b.{0,40}\bfeatures?\b', ctx))
+    if not (named_change_features or conflict_requirement or feature_operation):
+        return None
+
+    provider = _normalize_provider(provider, sc)
+    provider_label = 'TMO and VZW' if provider == 'MIXED' else provider
+
+    positive_menu_visibility = (
+        'manage line' in sc and
+        any(term in sc for term in (
+            'visible', 'visibility', 'display', 'displayed', 'accessible', 'available')) and
+        not any(term in sc for term in (
+            'not displayed', 'not visible', 'hidden', 'disabled', 'unavailable')))
+    if positive_menu_visibility:
+        has_mno_tmo_on = (
+            'mno_tmo' in sc and 'permission' in sc and
+            bool(_re.search(r'\b(?:is\s+)?on\b', sc)))
+        has_active_line = bool(_re.search(
+            r'\b(?:line\s+status\s+is|status\s*=?)\s*active\b', sc))
+        if has_mno_tmo_on and has_active_line:
+            return [
+                ('Launch NBOP and load the target TMO subscriber profile',
+                 'Subscriber profile loads for a TMO network line'),
+                ('Verify the subscriber MNO is TMO and Line Status is Active',
+                 'The profile identifies a TMO line with Line Status=Active'),
+                ('Verify the logged-in agent has MNO_TMO permission set to ON',
+                 'The active session includes enabled MNO_TMO access'),
+                ('Click ≡ Menu on the subscriber profile',
+                 'Subscriber action menu opens for the eligible line'),
+                ('Select Manage Line without starting a line operation',
+                 'Manage Line submenu displays its available operations'),
+                ('Verify Change Features is displayed and enabled under Manage Line',
+                 'Change Features is visible for MNO_TMO permission ON and the Active TMO line'),
+            ]
+        return [
+            ('Launch NBOP and load a subscriber profile eligible for Manage Line actions',
+             'Subscriber profile loads with the action menu available'),
+            ('Click ≡ Menu on the subscriber profile',
+             'Subscriber action menu opens'),
+            ('Select Manage Line without opening an operation screen',
+             'Manage Line submenu displays its available entries'),
+            ('Verify the Change Features entry is displayed in the Manage Line menu',
+             'Change Features is visible and selectable; no feature-change transaction is submitted'),
+        ]
+
+    steps = [
+        ('Launch NBOP and search an active %s subscriber by MDN' % provider_label,
+         'Subscriber profile loads for the required provider'),
+        ('Click ≡ Menu on the subscriber profile',
+         'Subscriber action menu opens'),
+        ('Select Manage Line',
+         'Manage Line submenu displays available line operations'),
+        ('Select Change Features',
+         'Change Features screen loads for the subscriber'),
+    ]
+
+    if 'menu' in sc and any(term in sc for term in (
+            'not displayed', 'not visible', 'hidden', 'disabled', 'unavailable')):
+        steps.append(('Verify Change Features is not available under Manage Line',
+                      'Change Features is hidden or disabled for the scenario state'))
+        return steps
+
+    if 'conflict' in sc or 'incompatible' in sc:
+        steps.extend([
+            ('Record the currently selected Required, Included, and Optional features',
+             'A baseline feature state is available for comparison'),
+            ('Select an Optional feature that conflicts with an existing feature and click Submit',
+             'NBOP displays the configured conflicting-feature error'),
+            ('Verify the error identifies the conflicting feature combination',
+             'The user receives a specific conflict message and the request is rejected'),
+            ('Refresh Change Features and verify no feature state changed',
+             'Required, Included, and Optional selections match the recorded baseline'),
+            ('Open ≡ Menu → Transaction History and verify no completed Change Features transaction was created',
+             'No successful transaction exists for the rejected feature change'),
+        ])
+        return steps
+
+    if any(term in sc for term in ('optional list', 'list of optional', 'from response', 'api response', 'response optional')):
+        steps.extend([
+            ('Capture the backend response used to populate Change Features',
+             'Response evidence contains the eligible Optional feature list'),
+            ('Verify every Optional feature returned in the response is listed on the screen',
+             'NBOP Optional features exactly match the response with no missing or extra entries'),
+            ('Verify Required and Included features remain clearly separated from Optional features',
+             'Feature categories are rendered under the correct headings'),
+        ])
+        return steps
+
+    if any(term in sc for term in ('required', 'included', 'pdl data')) and not any(term in sc for term in ('add', 'remove', 'toggle')):
+        steps.extend([
+            ('Verify the screen contains separate Required, Included, and Optional feature sections',
+             'All three feature categories are visible and correctly labeled'),
+            ('Verify PDL Data is displayed with the subscriber feature information',
+             'PDL Data label and displayed content exactly match the captured backend feature response'),
+            ('Compare displayed selections with the current backend feature response',
+             'Required, Included, Optional, and PDL Data values match the response'),
+        ])
+        return steps
+
+    is_remove = bool(_re.search(r'\b(?:remove|removing|deselect|turn\s+off|disable)\b', sc))
+    is_add = (bool(_re.search(r'\b(?:add|adding|turn\s+on|enable)\b', sc)) or
+              bool(_re.search(r'\bselect\b', sc)))
+    is_operation = is_add or is_remove or any(term in sc for term in ('completed transaction', 'complete transaction', 'submit'))
+
+    if provider == 'VZW':
+        steps.append(('Verify the VZW subscriber sees Required, Included, Optional, and PDL Data using VZW response values',
+                      'VZW Change Features layout and values have parity with the supported TMO behavior'))
+        if not is_operation:
+            return steps
+
+    if is_operation:
+        steps.append(('Record the current state of the target Optional feature',
+                      'The pre-change feature state is captured'))
+        if is_add:
+            steps.extend([
+                ('Select an eligible target Optional feature and click Submit',
+                 'The add request is accepted and an add Transaction ID is returned'),
+                ('Reload Change Features and verify the target Optional feature is selected',
+                 'The added Optional feature state is persisted'),
+            ])
+        if is_remove:
+            steps.extend([
+                ('Clear the selected target Optional feature and click Submit',
+                 'The remove request is accepted and a remove Transaction ID is returned'),
+                ('Reload Change Features and verify the target Optional feature is not selected',
+                 'The removed Optional feature state is persisted'),
+            ])
+        steps.append(('Open ≡ Menu → Transaction History and locate each returned Transaction ID',
+                      'Completed Change Features transactions record the correct add/remove actions'))
+        return steps
+
+    steps.extend([
+        ('Verify Required, Included, and Optional sections plus PDL Data are displayed',
+         'All feature categories and PDL Data load from the subscriber response'),
+        ('Select an eligible Optional feature toggle and click Submit',
+         'Change Features request succeeds and returns a Transaction ID'),
+        ('Verify the Optional feature state is updated on the Change Features screen',
+         'The selected Optional feature reflects the submitted state'),
+        ('Open ≡ Menu → Transaction History and locate the Transaction ID',
+         'The Change Features transaction is recorded as Completed'),
+    ])
+    return steps
+
+
+def _port_in_operation_steps(ctx: str, sc: str,
+                             provider: str = '') -> Optional[List[Tuple[str, str]]]:
+    """Return concrete Update or Cancel/Update flows for in-progress Port-In records."""
+    is_port_in = _mentions_port_in(sc)
+    has_update = 'update' in sc
+    has_cancel = 'cancel' in sc
+    if not (is_port_in and has_update):
+        return None
+
+    provider = _normalize_provider(provider, sc)
+    provider_label = 'TMO and VZW' if provider == 'MIXED' else provider
+    zip_only = 'npanxx' in ctx or _is_zip_location_flow(ctx)
+
+    if has_cancel:
+        update_action = 'Click Update PortIn, enter valid changed data, and submit'
+        update_result = 'Update returns a Transaction ID and the changed Port-In data persists'
+        if zip_only:
+            update_action = 'Click Update PortIn, enter valid changed ZIP-code data without NPANXX, and submit'
+            update_result = 'Update returns a Transaction ID and persists ZIP-code-only Port-In data'
+        return [
+            ('Launch NBOP with two suitable %s Port-In records in IN PROGRESS status' % provider_label,
+             'Separate eligible records are available for Update and Cancel validation'),
+            ('Navigate to History → Port In Activation',
+             'Port In Activation history screen loads'),
+            ('Set Port Status to IN PROGRESS and click Search',
+             'IN PROGRESS Port-In records are displayed'),
+            ('Open the first suitable record and verify both Update PortIn and Cancel PortIn actions',
+             'Both actions are available for an eligible in-progress record'),
+            (update_action,
+             update_result),
+            ('Return to the IN PROGRESS results and open a second suitable Port-In record',
+             'A separate eligible record opens for cancellation without reusing the updated record'),
+            ('Click Cancel PortIn, confirm cancellation, and capture the Transaction ID',
+             'Cancel is accepted and the selected Port-In record leaves the in-progress state'),
+            ('Validate both Transaction IDs and reopen both records',
+             'The update retains its changed values and the cancelled record shows the correct cancelled status'),
+        ]
+
+    update_action = 'Click Verify/Update PortIn and enter the required update data'
+    update_result = 'Verify/Update PortIn accepts the scenario data'
+    if zip_only:
+        update_action += ' using ZIP code without an NPANXX value'
+        update_result += ' without an NPANXX UI dependency'
+
+    return [
+        ('Launch NBOP with an eligible %s Port-In record' % provider_label,
+         'NBOP loads with provider-appropriate Port-In test data'),
+        ('Navigate to History → Port In Activation',
+         'Port In Activation history screen loads'),
+        ('Set Port Status to IN PROGRESS and click Search',
+         'IN PROGRESS Port-In records are displayed'),
+        ('Open the required Port-In record',
+         'Port-In details display the Verify/Update PortIn action'),
+        (update_action + ' and submit',
+         update_result + ' and returns a transaction result'),
+        ('Verify the record and Transaction History show the updated Port-In result',
+         'The Port-In update is persisted for the correct provider'),
+    ]
+
+
+def _transaction_history_detail_steps(ctx: str, sc: str,
+                                      provider: str = '') -> Optional[List[Tuple[str, str]]]:
+    """Open a Transaction ID and validate provider details independently of NPANXX."""
+    if 'transaction history' not in sc:
+        return None
+    if not any(term in sc for term in (
+            'transaction id', 'detail', 'mno', 'provider', 'networkprovider',
+            'network provider')):
+        return None
+
+    provider = _normalize_provider(provider, sc)
+    provider_label = 'TMO and VZW' if provider == 'MIXED' else provider
+    steps = [
+        ('Launch NBOP and search an active %s subscriber by MDN' % provider_label,
+         'Subscriber profile loads with the expected provider identity'),
+        ('Open ≡ Menu → Transaction History',
+         'Transaction History loads for the subscriber'),
+        ('Locate the target operation and click its Transaction ID',
+         'Transaction detail view opens for the selected operation'),
+        ('Verify the transaction detail shows the expected MNO/provider',
+         'MNO/provider matches the subscriber and operation route'),
+    ]
+    if any(term in sc for term in ('api', 'route', 'routing', 'endpoint')):
+        steps.append(('Compare the detail provider with the captured provider API route',
+                      'Transaction detail and provider-route evidence match'))
+    else:
+        steps.append(('Verify the transaction type, status, and provider details match the operation',
+                      'Transaction detail records the correct completed operation'))
+    return steps
+
+
+def _npanxx_steps(ctx: str, sc: str,
+                  provider: str = '') -> Optional[List[Tuple[str, str]]]:
+    """Return exact NBOP flows for NPANXX and ZIP-only provider requirements."""
+    if 'npanxx' not in ctx and not _is_zip_location_flow(ctx):
+        return None
+
+    provider = _normalize_provider(provider, sc)
+    provider_label = 'TMO and VZW' if provider == 'MIXED' else provider
+    launch = ('Launch NBOP and search an active %s subscriber by MDN' % provider_label,
+              '%s subscriber profile loads with the correct provider' % provider_label)
+
+    is_vzw_regression = (
+        provider == 'VZW' and any(term in sc for term in (
+            'regression', 'no change', 'unchanged', 'parity', 'not affected',
+            'does not affect', 'must not affect', 'should not affect'))
+    )
+    if is_vzw_regression:
+        return [
+            launch,
+            ('Open each NPANXX-affected NBOP screen named by the requirement',
+             'VZW screens load using RequestType=VZW with their existing supported fields'),
+            ('Verify VZW retains its current ZIP/provider behavior',
+             'No TMO-only NPANXX change alters the VZW flow'),
+            ('Perform the supported VZW lookup or operation and submit',
+             'VZW operation completes through the VZW route'),
+            ('Open ≡ Menu → Transaction History and click the operation Transaction ID',
+             'Transaction detail records VZW as the MNO/provider'),
+            ('Verify the VZW UI result and backend evidence are unchanged',
+             'Regression evidence confirms the existing VZW behavior'),
+        ]
+
+    if _mentions_port_in(sc) and 'update' in sc:
+        return [
+            launch,
+            ('Navigate to History → Port In Activation',
+             'Port In Activation history screen loads'),
+            ('Set Port Status to IN PROGRESS and click Search',
+             'IN PROGRESS Port-In records are displayed'),
+            ('Open the required Port-In record',
+             'Port-In details display the Update PortIn action'),
+            ('Click Update PortIn, enter the required ZIP code without NPANXX, and submit',
+             'Update PortIn request is accepted using ZIP-code-only input'),
+            ('Verify the record and Transaction History show the updated Port-In result',
+             'Port-In update completes without an NPANXX UI field or request dependency'),
+        ]
+
+    if 'transaction history' in sc and any(term in sc for term in ('mno', 'provider', 'network')):
+        return [
+            launch,
+            ('Open ≡ Menu → Transaction History',
+             'Transaction History loads for the subscriber'),
+            ('Locate the target operation and click its Transaction ID',
+             'Transaction detail view opens'),
+            ('Verify the transaction detail shows the expected MNO/provider',
+             'MNO/provider matches the subscriber and operation route'),
+            ('Verify ZIP/provider details are present and NPANXX is not required from the UI',
+             'Transaction evidence reflects ZIP-code-only processing'),
+        ]
+
+    if 'activation history' in sc and 'mno' in sc:
+        return [
+            launch,
+            ('Navigate to History → HMNO Activation',
+             'HMNO Activation History records load with MDN and Transaction ID search fields'),
+            ('Search for the activation record by MDN or activation Transaction ID',
+             'The matching activation record is displayed'),
+            ('Open the activation record and verify MNO/provider and operation status',
+             'Activation History records the expected provider and status for the selected record'),
+            ('Verify activation used ZIP-code-only input and no UI NPANXX value',
+             'Activation evidence contains supported ZIP/provider data without NPANXX input'),
+        ]
+
+    activation_required = 'activation' in sc or 'activate' in sc
+    change_mdn_required = ('change mdn' in sc or
+                           (any(term in sc for term in ('mdn screen', 'mdn-screen')) and
+                            _is_zip_location_flow(sc)))
+    both_required = ('both' in sc and ('screen' in sc or 'flow' in sc)) or (activation_required and change_mdn_required)
+
+    if both_required:
+        return [
+            launch,
+            ('Open the activation screen and enter the required ZIP code without NPANXX',
+             'Activation screen accepts ZIP-code-only input'),
+            ('Submit activation and verify the subscriber activates successfully',
+             'Activation completes without an NPANXX UI field'),
+            ('Return to the subscriber profile and open ≡ Menu → Manage Line → Change MDN',
+             'Change MDN screen loads'),
+            ('Enter the new MDN and required ZIP code without NPANXX, then submit',
+             'Change MDN request is accepted using ZIP-code-only input'),
+            ('Verify Transaction History and Line Summary(MNO) for both operations',
+             'Both transactions complete with the correct provider and no NPANXX dependency'),
+        ]
+
+    activation_screen_absence = (
+        activation_required and
+        any(term in sc for term in ('activation screen', 'activation form')) and
+        any(term in sc for term in ('not displayed', 'hidden', 'absent')) and
+        any(term in sc for term in ('option', 'control', 'label', 'field', 'npanxx')))
+    if activation_screen_absence:
+        return [
+            ('Launch NBOP and begin a new %s network activation' % provider,
+             'The activation workflow opens for the expected provider without submitting a transaction'),
+            ('Open the subscriber activation screen and inspect its location inputs',
+             'Activation form controls and labels are rendered for UI validation'),
+            ('Verify no NPANXX input control or NPANXX label is displayed',
+             'NPANXX is absent from the activation-screen UI'),
+            ('Verify the ZIP Code input is displayed and marked required',
+             'ZIP Code is the visible required location field'),
+            ('Validate the form requires ZIP Code and accepts a valid ZIP value without revealing NPANXX',
+             'Screen validation enforces ZIP Code while NPANXX remains absent; activation is not submitted'),
+        ]
+
+    zip_only_activation_e2e = (
+        activation_required and
+        'activation flow' in sc and
+        any(term in sc for term in ('removed', 'removal', 'remove', 'no longer')))
+    if zip_only_activation_e2e:
+        return [
+            ('Launch NBOP and start a new %s network activation' % provider,
+             'Activation workflow opens for the expected provider'),
+            ('Enter subscriber, device, SIM, and required ZIP Code data with no NPANXX input',
+             'The activation form accepts the complete ZIP-code-only request'),
+            ('Submit activation and capture the returned Transaction ID',
+             'Activation request is accepted and completes successfully'),
+            ('Verify the subscriber profile and Line Summary(MNO) show the activated line and provider',
+             'The resulting profile is Active and records the expected %s provider' % provider),
+            ('Open Transaction History and validate the captured activation Transaction ID',
+             'Completed transaction evidence confirms ZIP-code-only activation with no NPANXX dependency'),
+        ]
+
+    if change_mdn_required:
+        return [
+            launch,
+            ('Click ≡ Menu → Manage Line → Change MDN',
+             'Change MDN screen loads'),
+            ('Enter the new MDN and required ZIP code; leave NPANXX absent',
+             'The form accepts ZIP-code-only routing input'),
+            ('Click Submit and capture the returned Transaction ID',
+             'Change MDN request is accepted'),
+            ('Verify the subscriber profile shows the new MDN',
+             'Line Information reflects the completed MDN change'),
+            ('Open Transaction History and Line Summary(MNO) for the Transaction ID',
+             'Provider details are correct and no NPANXX request dependency is present'),
+        ]
+
+    if activation_required:
+        return [
+            launch,
+            ('Open the applicable subscriber activation screen',
+             'Activation form loads for the %s route' % provider),
+            ('Enter all required activation data and ZIP code without NPANXX',
+             'The activation form accepts ZIP-code-only location input'),
+            ('Submit the activation and capture the Transaction ID',
+             'Activation request is accepted for the %s subscriber' % provider),
+            ('Verify the subscriber profile and Line Summary(MNO) show the activated line',
+             'Activation result and provider match the submitted subscriber'),
+            ('Open Transaction History and verify the completed activation record',
+             'Transaction evidence confirms no NPANXX UI/request dependency'),
+        ]
+
+    if provider == 'VZW':
+        return [
+            launch,
+            ('Open each NPANXX-affected NBOP screen named by the requirement',
+             'VZW screens load with their existing supported fields'),
+            ('Verify VZW retains its current ZIP/provider behavior',
+             'No TMO-only NPANXX change alters the VZW flow'),
+            ('Perform the supported VZW lookup or operation and submit',
+             'VZW operation completes through the VZW route'),
+            ('Verify Transaction History records VZW as the MNO/provider',
+             'Regression evidence confirms VZW behavior is unchanged'),
+        ]
+
+    return [
+        launch,
+        ('Open the NPANXX-affected NBOP screen named by the requirement',
+         'The required screen loads'),
+        ('Enter the required ZIP code without entering NPANXX and submit',
+         'NBOP accepts ZIP-code-only input'),
+        ('Verify the operation completes for the TMO subscriber',
+         'TMO result is returned without an NPANXX UI dependency'),
+        ('Verify Transaction History or Line Summary(MNO) records the correct provider',
+         'Backend evidence confirms successful TMO routing'),
+    ]
 
 
 def generate_ui_steps(feature_name: str, description: str = '',
-                      scenario_title: str = '') -> List[Tuple[str, str]]:
+                      scenario_title: str = '',
+                      network_provider: str = '') -> List[Tuple[str, str]]:
     """Generate NBOP UI test steps based on scenario INTENT.
 
     ENHANCED: When scenario_title contains specific element names
@@ -490,8 +968,28 @@ def generate_ui_steps(feature_name: str, description: str = '',
     """
     ctx = (feature_name + ' ' + description + ' ' + scenario_title).lower()
     sc = scenario_title.lower()
+    scenario_detail = ('%s %s' % (scenario_title, description)).lower()
     nav_path = get_navigation_path(feature_name, description)
     intent = _classify_scenario_intent(scenario_title)
+
+    # Concrete feature families take precedence over generic visibility/action routing.
+    provider = _normalize_provider(network_provider, scenario_detail)
+    change_feature_steps = _change_features_steps(ctx, scenario_detail, provider)
+    if change_feature_steps:
+        return change_feature_steps
+
+    port_in_steps = _port_in_operation_steps(ctx, scenario_detail, provider)
+    if port_in_steps:
+        return port_in_steps
+
+    transaction_detail_steps = _transaction_history_detail_steps(
+        ctx, scenario_detail, provider)
+    if transaction_detail_steps:
+        return transaction_detail_steps
+
+    npanxx_steps = _npanxx_steps(ctx, scenario_detail, provider)
+    if npanxx_steps:
+        return npanxx_steps
 
     # ── Element-name-aware step generation (Task 2.2) ──
     # When scenario_title contains specific element names, generate targeted steps
@@ -510,9 +1008,9 @@ def generate_ui_steps(feature_name: str, description: str = '',
                               'History page loads with tab options'))
                 steps.append(('Click %s tab' % tab_name,
                               '%s tab content loads with search filters' % tab_name))
-                # Add search/filter step
-                steps.append(('Select Port Status = IN PROGRESS from dropdown, click Search',
-                              'Search results filtered and displayed'))
+                # Port status is specific to Port In Activation; other activation
+                # histories are searched by subscriber/transaction identity.
+                steps.append(_history_lookup_step(tab_name))
             else:
                 # Non-history element scenario — navigate to relevant page
                 page = find_nbop_page(feature_name, description) or nav_path
@@ -547,10 +1045,9 @@ def generate_ui_steps(feature_name: str, description: str = '',
             ('Navigate to Tile: History', 'History page loads with tab options'),
             ('Click %s tab' % tab_name,
              '%s tab content loads with search filters' % tab_name),
-            ('Select Port Status = IN PROGRESS from dropdown, click Search',
-             'Search results filtered and displayed'),
+            _history_lookup_step(tab_name),
             ('Verify search results display expected records',
-             'Records matching filter criteria are shown in the table'),
+             'Records show the expected provider, operation status, and subscriber identity'),
         ]
         return steps
 

@@ -1042,9 +1042,9 @@ def _derive_title_from_ac(ac_text: str) -> str:
     cleaned = re.sub(r'^[\s]*(?:[-*•]\s*|\d+[.)]\s*)', '', ac_text)
     # Collapse whitespace
     cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-    # Truncate to 120 chars
     if len(cleaned) > 120:
-        cleaned = cleaned[:117] + '...'
+        from .step_templates import truncate_at_word
+        cleaned = truncate_at_word(cleaned, 120).rstrip(' .,;:-–—')
     return cleaned if cleaned else ac_text[:120]
 
 
@@ -1397,6 +1397,7 @@ def _extract_scenarios_from_chalk_data(chalk, log: Callable = print) -> tuple:
         r'^all\s+scenarios\s+will\s+require', r'^all\s+calls\s+can\s+',
         r'^pre-?conditions?\s*:', r'^note\s*:', r'^assumption\s*:',
         r'^scope\s*:', r'^environment\s*:', r'^test\s+data\s*:',
+        r'^update\s+the\s+backend\s+to\s+support\s+the\s+following\s+requirements\s*[:.]?$',
     ]
     # ── Patterns that indicate actual test scenarios ──
     _SCENARIO_VERBS = [
@@ -1406,6 +1407,8 @@ def _extract_scenarios_from_chalk_data(chalk, log: Callable = print) -> tuple:
     ]
 
     _skipped_info = 0
+    _source_tc_num = 0
+    _backend_heading_pattern = _INFO_PATTERNS[-1]
     for sc in chalk.scenarios:
         title = (sc.title or '').strip()
         if not title or len(title) < 5:
@@ -1427,8 +1430,14 @@ def _extract_scenarios_from_chalk_data(chalk, log: Callable = print) -> tuple:
                 is_info = True
 
         if is_info:
+            # This heading occupied a TC position in the source-backed suite before
+            # suppression. Reserve its ordinal so following source cases do not shift.
+            if re.search(_backend_heading_pattern, title_lower):
+                _source_tc_num += 1
             _skipped_info += 1
             continue
+
+        _source_tc_num += 1
 
         # Determine category
         category = (sc.category or 'Happy Path').strip()
@@ -1443,13 +1452,17 @@ def _extract_scenarios_from_chalk_data(chalk, log: Callable = print) -> tuple:
             source_id=feature_id,
             extracted_text=title[:200],
         )
-        scenarios.append(ExtractedScenario(
+        extracted = ExtractedScenario(
             title=title,
             validation=validation,
             category=category,
             source=tr,
             steps_hint=steps_hint,
-        ))
+        )
+        # Dataclass instances are intentionally extensible; carrying this private
+        # source ordinal avoids changing the shared model or unrelated call sites.
+        setattr(extracted, '_source_tc_num', _source_tc_num)
+        scenarios.append(extracted)
 
     if scenarios:
         items_detail.append('%d scenarios from Chalk DB cache' % len(scenarios))

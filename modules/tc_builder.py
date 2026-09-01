@@ -296,6 +296,296 @@ def _is_degenerate_title(title: str) -> bool:
     return len(meaningful) == 0
 
 
+def _is_backend_requirement_heading(title: str) -> bool:
+    """Return True for a non-testable source heading that introduces later requirements."""
+    normalized = re.sub(r'\s+', ' ', (title or '').strip()).rstrip(':.').lower()
+    return normalized == 'update the backend to support the following requirements'
+
+
+def _provider_tokens(text: str) -> set:
+    """Return normalized provider names explicitly mentioned in text."""
+    providers = set()
+    if re.search(r'\b(?:tmo|t-mobile|tmobile)\b', text or '', re.IGNORECASE):
+        providers.add('TMO')
+    if re.search(r'\b(?:vzw|vz|verizon)\b', text or '', re.IGNORECASE):
+        providers.add('VZW')
+    return providers
+
+
+def _has_explicit_dual_provider_scope(text: str) -> bool:
+    """True only when the requirement executes or directly compares both providers."""
+    normalized = re.sub(r'\s+', ' ', text or '').lower()
+    tmo = r'(?:tmo|t-mobile|tmobile)'
+    vzw = r'(?:vzw|vz|verizon)'
+    dual_patterns = (
+        r'\bboth\s+(?:%s\s+(?:and|/)\s+%s|%s\s+(?:and|/)\s+%s)\b' % (tmo, vzw, vzw, tmo),
+        r'\b(?:%s\s+apis?\s*(?:and|/)\s*%s\s+apis?|%s\s+apis?\s*(?:and|/)\s*%s\s+apis?)\b' % (tmo, vzw, vzw, tmo),
+        r'\b(?:%s\s+(?:and|/)\s+%s|%s\s+(?:and|/)\s+%s)\s+(?:subscribers?|lines?|mdns?|routes?|apis?|requests?|transactions?)\b' % (tmo, vzw, vzw, tmo),
+        r'\bcompare\b.{0,80}\b%s\b.{0,40}\b(?:with|to|and|versus|vs\.?)\b.{0,40}\b%s\b' % (tmo, vzw),
+        r'\bcompare\b.{0,80}\b%s\b.{0,40}\b(?:with|to|and|versus|vs\.?)\b.{0,40}\b%s\b' % (vzw, tmo),
+        r'\bone\s+(?:active\s+)?%s\b.{0,60}\bone\s+(?:active\s+)?%s\b' % (tmo, vzw),
+        r'\bone\s+(?:active\s+)?%s\b.{0,60}\bone\s+(?:active\s+)?%s\b' % (vzw, tmo),
+    )
+    return any(re.search(pattern, normalized) for pattern in dual_patterns)
+
+
+def _infer_network_provider(title: str, validation: str = '', context: str = '') -> str:
+    """Infer the provider that the scenario executes, not providers used as references.
+
+    MIXED is reserved for requirements that explicitly execute or compare both routes.
+    Feature/subtask context is only a fallback, so a provider-specific scenario is not
+    widened by a parent requirement that describes both providers.
+    """
+    primary = re.sub(r'\s+', ' ', '%s %s' % (title or '', validation or '')).strip()
+    fallback = re.sub(r'\s+', ' ', context or '').strip()
+
+    # Regression/impact wording names the provider whose behavior is protected.
+    # Resolve that operational subject before considering incidental mentions of
+    # both providers elsewhere in the validation text.
+    provider_token = r'(tmo|t-mobile|tmobile|vzw|vz|verizon)'
+    impact_match = re.search(
+        r'\b(?:does\s+not|must\s+not|should\s+not|without)\s+'
+        r'(?:impact(?:ing)?|affect(?:ing)?|alter(?:ing)?|chang(?:e|ing))\b.{0,80}?'
+        r'\b%s\b' % provider_token,
+        primary, re.IGNORECASE)
+    if not impact_match:
+        impact_match = re.search(
+            r'\b%s\b.{0,60}\b(?:is|remains?)\s+(?:not\s+)?'
+            r'(?:impacted|affected|altered|changed|unchanged)\b' % provider_token,
+            primary, re.IGNORECASE)
+    if impact_match:
+        provider_name = impact_match.group(1).lower()
+        return 'TMO' if provider_name in ('tmo', 't-mobile', 'tmobile') else 'VZW'
+
+    if _has_explicit_dual_provider_scope(primary):
+        return 'MIXED'
+
+    preceding_regression_match = re.search(
+        r'\b(tmo|t-mobile|tmobile|vzw|vz|verizon)\b.{0,50}'
+        r'\b(?:regression|unchanged|not\s+affected|existing\s+behavior)\b',
+        primary, re.IGNORECASE)
+    if preceding_regression_match:
+        return ('TMO' if preceding_regression_match.group(1).lower() in
+                ('tmo', 't-mobile', 'tmobile') else 'VZW')
+
+    unchanged_match = re.search(
+        r'\b(?:regression|unchanged|no\s+changes?|retain(?:s|ed)?|existing\s+behavior)\b.{0,60}'
+        r'\b(?:for\s+)?(tmo|t-mobile|tmobile|vzw|vz|verizon)\b',
+        primary, re.IGNORECASE)
+    if unchanged_match:
+        return 'TMO' if unchanged_match.group(1).lower() in ('tmo', 't-mobile', 'tmobile') else 'VZW'
+
+    # Remove parity/reference clauses before looking for the operational subject.
+    reference_pattern = (
+        r'\b(?:same\s+(?:process|flow|way|behavior|experience)?\s*as|parity\s+with|'
+        r'equivalent\s+to|similar\s+to|like)\s+(?:for\s+)?'
+        r'(?:tmo|t-mobile|tmobile|vzw|vz|verizon)(?:\s+subscribers?)?\b'
+    )
+    reference_provider_match = re.search(
+        r'\b(?:same\s+(?:process|flow|way|behavior|experience)?\s*as|parity\s+with|'
+        r'equivalent\s+to|similar\s+to|like)\s+(?:for\s+)?'
+        r'(tmo|t-mobile|tmobile|vzw|vz|verizon)(?:\s+subscribers?)?\b',
+        primary, re.IGNORECASE)
+    operational_text = re.sub(reference_pattern, ' ', primary, flags=re.IGNORECASE)
+
+    explicit_value = re.search(
+        r'\b(?:network\s*provider|networkprovider|request\s*type|requesttype)\s*[:=]\s*'
+        r'(tmo|t-mobile|tmobile|vzw|vz|verizon)\b', operational_text, re.IGNORECASE)
+    if explicit_value:
+        return 'TMO' if explicit_value.group(1).lower() in ('tmo', 't-mobile', 'tmobile') else 'VZW'
+
+    scores = {'TMO': 0, 'VZW': 0}
+    provider_patterns = {
+        'TMO': r'(?:tmo|t-mobile|tmobile)',
+        'VZW': r'(?:vzw|vz|verizon)',
+    }
+    subject_nouns = r'(?:subscriber|line|mdn|activation|request|route|api|endpoint|transaction)'
+    for provider, token in provider_patterns.items():
+        scores[provider] += 4 * len(re.findall(
+            r'\b%s\b(?:[-\s]+(?:only|specific))?\s+%ss?\b' % (token, subject_nouns),
+            operational_text, re.IGNORECASE))
+        scores[provider] += 3 * len(re.findall(
+            r'\b(?:for|using|with|on)\s+(?:an?\s+)?%s\b' % token,
+            operational_text, re.IGNORECASE))
+        scores[provider] += 2 * len(re.findall(
+            r'\b%s[-\s]+only\b' % token, operational_text, re.IGNORECASE))
+
+    remaining = _provider_tokens(operational_text)
+    if len(remaining) == 1:
+        return next(iter(remaining))
+    if scores['TMO'] != scores['VZW']:
+        return max(scores, key=scores.get)
+    if not remaining and reference_provider_match:
+        reference_provider = reference_provider_match.group(1).lower()
+        return 'VZW' if reference_provider in ('tmo', 't-mobile', 'tmobile') else 'TMO'
+
+    # Context supplies an implicit subject for parity wording such as "same way as
+    # VZW"; it never overrides an explicit scenario subject above.
+    if _has_explicit_dual_provider_scope(fallback):
+        return 'MIXED'
+    fallback_operational = re.sub(reference_pattern, ' ', fallback, flags=re.IGNORECASE)
+    fallback_providers = _provider_tokens(fallback_operational)
+    if len(fallback_providers) == 1:
+        return next(iter(fallback_providers))
+    return 'TMO'
+
+
+def _classify_ui_scenario_intent(title: str, validation: str = '') -> str:
+    """Identify strong backend evidence needs for one scenario inside a UI feature.
+
+    A bare ``networkProvider`` mention is deliberately insufficient. Routing requires
+    an explicit provider plus API/route/endpoint behavior, but it may target one
+    provider or both.
+    """
+    text = re.sub(r'\s+', ' ', '%s %s' % (title or '', validation or '')).lower()
+    has_provider = bool(_provider_tokens(text))
+
+    if 'cpc' in text and any(term in text for term in (
+            'api', 'wholesale plan', 'wholesaleplan', 'response')):
+        return 'cpc_wholesale_response'
+    if 'network' in text and 'syniverse' in text and any(term in text for term in (
+            'compare', 'comparison', 'match', 'versus', ' vs ', 'difference')):
+        return 'network_syniverse_comparison'
+    if 'npanxx' in text and any(term in text for term in (
+            'payload', 'backend', 'dependency', 'request field', 'outbound request',
+            'request body', 'in the request', 'from the request', 'not send', 'not sent')):
+        return 'npanxx_backend_dependency'
+    if (has_provider and
+            ('networkprovider' in text or 'network provider' in text) and
+            any(term in text for term in ('route', 'routing', 'api', 'endpoint', 'based on'))):
+        return 'provider_api_routing'
+    return 'ui'
+
+
+def _build_ui_description(title: str, validation: str, scenario_intent: str) -> str:
+    """Build an untruncated, clean UI or hybrid description from full validation."""
+    detail = re.sub(r'\s+', ' ', (validation or title or '').strip())
+    detail = re.sub(r'^(?:UI verification|Hybrid UI/API verification)\s*:\s*', '', detail,
+                    flags=re.IGNORECASE)
+    detail = detail.rstrip()
+    prefix = 'Hybrid UI/API verification' if scenario_intent != 'ui' else 'UI verification'
+    return '%s: %s' % (prefix, detail) if detail else prefix
+
+
+def _build_ui_preconditions(title: str, validation: str, provider: str,
+                            scenario_intent: str) -> str:
+    """Build provider- and scenario-aware UI prerequisites."""
+    text = ('%s %s' % (title or '', validation or '')).lower()
+    items = []
+    is_new_activation = (
+        any(term in text for term in ('activation', 'activate')) and
+        not any(term in text for term in ('activation history', 'port-in activation', 'port in activation'))
+    )
+    if is_new_activation:
+        if provider == 'MIXED':
+            items.append('Eligible TMO and VZW activation test data are available in SIT with provider-specific RequestType semantics')
+        else:
+            items.append('Eligible %s activation test data are available in SIT with RequestType=%s semantics' % (provider, provider))
+    elif provider == 'MIXED':
+        items.append('Active TMO and VZW MDNs are available in SIT with RequestType=TMO and RequestType=VZW semantics')
+    elif provider == 'VZW':
+        items.append('Active VZW MDN is available in SIT with RequestType=VZW semantics')
+    else:
+        items.append('Active TMO MDN is available in SIT with RequestType=TMO semantics')
+    items.extend([
+        'NBOP portal is accessible with valid credentials',
+        'User has permission to perform the scenario operation and view audit details',
+    ])
+    if 'port' in text and ('in progress' in text or 'in-progress' in text):
+        items.append('A Port-In Activation record exists in IN PROGRESS status')
+    if 'conflict' in text and 'feature' in text:
+        items.append('Subscriber has a known conflicting feature combination and its current feature state is captured')
+    if scenario_intent == 'cpc_wholesale_response':
+        items.append('CPC request/response logging is available and the subscriber has a known wholesale-plan response')
+    if scenario_intent == 'network_syniverse_comparison':
+        items.append('Network and Syniverse response evidence plus Line Summary/Century Report access are available')
+    if scenario_intent == 'npanxx_backend_dependency':
+        items.append('ZIP-code test data and backend request tracing are available; NPANXX resolution is configured server-side')
+    return '\n'.join('%d. %s' % (idx, item) for idx, item in enumerate(items, 1))
+
+
+def _build_hybrid_ui_backend_steps(scenario_intent: str, provider: str,
+                                   validation: str) -> List[TestStep]:
+    """Build execution-ready UI-trigger plus backend-evidence chains."""
+    provider_label = 'TMO and VZW' if provider == 'MIXED' else provider
+    chains = {
+        'cpc_wholesale_response': [
+            ('Launch NBOP and search the %s subscriber by MDN' % provider_label,
+             'Subscriber profile loads with the expected provider context'),
+            ('Open ≡ Menu → Manage Line → Change Features',
+             'Change Features screen loads and requests current plan/feature data'),
+            ('Capture the CPC API request and response generated by the NBOP screen',
+             'CPC evidence contains the subscriber identifier, successful status, and wholesale-plan response'),
+            ('Verify the CPC response returns the expected Wholesale Plan and optional-feature data',
+             'Wholesale Plan and eligible optional features match the configured CPC response'),
+            ('Verify NBOP displays the CPC-backed Wholesale Plan and feature options',
+             validation or 'NBOP values match the captured CPC response'),
+            ('Open Line Summary(MNO) or the Century Report and verify the same plan context',
+             'Backend evidence and NBOP display are consistent for the subscriber'),
+        ],
+        'provider_api_routing': (
+            [
+                ('Launch NBOP and search one active TMO MDN and one active VZW MDN',
+                 'Both subscriber profiles load with the correct provider identity'),
+                ('Perform the same NBOP operation for the TMO subscriber and capture the outbound API request/response',
+                 'The request uses TMO semantics and reaches the configured TMO provider route'),
+                ('Perform the same NBOP operation for the VZW subscriber and capture the outbound API request/response',
+                 'The request uses VZW semantics and reaches the configured VZW provider route'),
+                ('Verify networkProvider selects the correct provider API for each request',
+                 'TMO traffic is not sent to VZW and VZW traffic is not sent to TMO'),
+                ('Verify each provider response is rendered on the corresponding NBOP subscriber screen',
+                 validation or 'NBOP displays the correct result for both provider routes'),
+                ('Open Transaction History and compare both Transaction IDs with the captured routes',
+                 'Each transaction records the correct MNO/provider and completed response'),
+            ] if provider == 'MIXED' else [
+                ('Launch NBOP and search an active %s subscriber by MDN' % provider,
+                 '%s subscriber profile loads with the correct provider identity' % provider),
+                ('Perform the required NBOP operation and capture its outbound API request and response',
+                 'The request uses %s semantics and reaches the configured %s provider route' % (provider, provider)),
+                ('Verify networkProvider selects the %s API route and endpoint' % provider,
+                 'The request is not sent to a different provider route'),
+                ('Verify the %s provider response is rendered on the NBOP subscriber screen' % provider,
+                 validation or 'NBOP displays the result returned by the %s provider route' % provider),
+                ('Open ≡ Menu → Transaction History and locate the operation Transaction ID',
+                 'The matching transaction is displayed for the %s subscriber' % provider),
+                ('Click the Transaction ID and verify its MNO/provider and captured route',
+                 'Transaction details record %s and match the provider API evidence' % provider),
+            ]
+        ),
+        'npanxx_backend_dependency': [
+            ('Launch NBOP and search the %s subscriber by MDN' % provider_label,
+             'Subscriber profile loads with the expected provider context'),
+            ('Trigger the activation or Change MDN operation using the required ZIP code only',
+             'NBOP accepts ZIP code input without requesting NPANXX'),
+            ('Capture the NBOP backend request payload before it is sent downstream',
+             'Request evidence is available for field-level inspection'),
+            ('Verify NPANXX is absent from the request payload and no UI-supplied NPANXX dependency remains',
+             'Payload contains the supported ZIP/provider fields and does not contain NPANXX'),
+            ('Verify the backend resolves routing data and the operation response succeeds',
+             validation or 'Backend processing completes without an NPANXX request field'),
+            ('Open Transaction History and the Century Report or Line Summary(MNO)',
+             'The completed transaction and resolved provider details match the backend response'),
+        ],
+        'network_syniverse_comparison': [
+            ('Launch NBOP and search the %s subscriber by MDN' % provider_label,
+             'Subscriber profile loads with current network information'),
+            ('Open Line Summary(MNO) and capture the Network response for the subscriber',
+             'Network provider/status evidence is available'),
+            ('Capture the corresponding Syniverse response for the same MDN and transaction context',
+             'Syniverse provider/status evidence is available'),
+            ('Compare Network and Syniverse provider, status, and routing values field by field',
+             'Differences are identified without substituting one source for the other'),
+            ('Verify NBOP displays the source/value required by the scenario',
+             validation or 'NBOP display agrees with the required Network-versus-Syniverse rule'),
+            ('Open the Century Report or Transaction History and verify the comparison evidence is traceable',
+             'Transaction evidence identifies the provider values used by the UI'),
+        ],
+    }
+    return [TestStep(step_num=idx, summary=summary, expected=expected,
+                     data_reference='Hybrid UI/API evidence')
+            for idx, (summary, expected) in enumerate(chains.get(scenario_intent, []), 1)]
+
+
 def build_test_cases(
     plan: CombinationPlan,
     jira,
@@ -441,20 +731,53 @@ def build_test_cases(
         tc_idx = 0
 
         for scenario in plan.scenario_tcs:
+            if _is_backend_requirement_heading(scenario.title):
+                log('[TC-BUILD]   Skipping non-testable backend requirement heading: %s' % scenario.title)
+                # Preserve the source ordinal gap without borrowing partial
+                # _source_tc_num metadata from only some scenario sources.
+                tc_idx += 1
+                continue
+
+            subtask_ac = _get_subtask_ac_for_scenario(scenario, subtask_context)
+            provider_context = ' '.join(filter(None, (
+                feature_name, jira_summary, ac_text, subtask_ac)))
+            scenario_intent = _classify_ui_scenario_intent(scenario.title, scenario.validation)
+            network_provider = _infer_network_provider(
+                scenario.title, scenario.validation, provider_context)
+
+            # Source systems often label provider-impact checks as Happy Path even when
+            # the requirement explicitly protects existing behavior. Preserve the
+            # execution provider while classifying those checks as Regression so they
+            # remain distinct from the new-provider implementation flow.
+            scenario_text = '%s %s' % (scenario.title or '', scenario.validation or '')
+            scenario_text_lower = scenario_text.lower()
+            effective_category = scenario.category
+            is_provider_regression = (
+                network_provider in ('TMO', 'VZW') and
+                any(term in scenario_text_lower for term in (
+                    'does not affect', 'must not affect', 'should not affect',
+                    'no cross-network impact', 'no change', 'unchanged', 'regression')))
+            if (is_provider_regression and
+                    (not effective_category or effective_category == 'Happy Path')):
+                effective_category = 'Regression'
+
             scenario_dict = {
                 'title': scenario.title,
                 'validation': scenario.validation,
-                'category': scenario.category,
+                'category': effective_category,
                 'steps_hint': scenario.steps_hint,
+                '_scenario_intent': scenario_intent,
+                '_network_provider': network_provider,
             }
 
-            # Determine if this scenario should be crossed by product
-            # Cross by product ONLY for TMO removal/verification scenarios (not regression, not evidence)
+            # Determine if this scenario should be crossed by product.
+            # Backend/hybrid evidence scenarios stay one-to-one with their source requirement.
             title_lower = (scenario.title or '').lower()
-            is_regression = scenario.category == 'Regression' or 'no change' in title_lower or 'verizon' in title_lower or 'vzw' in title_lower
+            is_regression = effective_category == 'Regression' or 'no change' in title_lower or 'verizon' in title_lower or 'vzw' in title_lower
             is_evidence = title_lower.startswith('evidence:') or 'log in to nbop' in title_lower
             is_positive_verify = 'attributes displayed' in title_lower or 'is displayed' in title_lower or 'should be displayed' in title_lower
-            should_cross = product_values and not is_regression and not is_evidence and not is_positive_verify
+            should_cross = (product_values and scenario_intent == 'ui' and
+                            not is_regression and not is_evidence and not is_positive_verify)
 
             if should_cross:
                 for product in product_values:
@@ -463,7 +786,7 @@ def build_test_cases(
                     crossed_dict['_product'] = product
                     tc = _build_ui_scenario_tc_enriched(
                         crossed_dict, tc_idx, feature_name, feature_id, nav_path,
-                        subtask_ac_text=_get_subtask_ac_for_scenario(scenario, subtask_context),
+                        subtask_ac_text=subtask_ac,
                         subtask_key=_get_subtask_key_for_scenario(scenario),
                         log=log,
                     )
@@ -473,7 +796,7 @@ def build_test_cases(
             else:
                 tc = _build_ui_scenario_tc_enriched(
                     scenario_dict, tc_idx, feature_name, feature_id, nav_path,
-                    subtask_ac_text=_get_subtask_ac_for_scenario(scenario, subtask_context),
+                    subtask_ac_text=subtask_ac,
                     subtask_key=_get_subtask_key_for_scenario(scenario),
                     log=log,
                 )
@@ -484,13 +807,18 @@ def build_test_cases(
         log('[TC-BUILD]   Built %d UI scenario TCs (product crossing applied where appropriate)' % tc_idx)
     else:
         # API/hybrid path: standard scenario TC building
+        built_scenario_count = 0
         for scenario in plan.scenario_tcs:
+            if _is_backend_requirement_heading(scenario.title):
+                log('[TC-BUILD]   Skipping non-testable backend requirement heading: %s' % scenario.title)
+                continue
             tc = _build_scenario_tc(scenario, jira, feature_name, nbop_knowledge, api_context, feature_intent,
                                     feature_type=classification.classification)
             if not getattr(tc, 'user_requested', False):
                 tc.user_requested = getattr(scenario, 'user_requested', False)
             test_cases.append(tc)
-        log('[TC-BUILD]   Built %d scenario TCs' % len(plan.scenario_tcs))
+            built_scenario_count += 1
+        log('[TC-BUILD]   Built %d scenario TCs' % built_scenario_count)
 
     # ── 4. Build TCs from negative specs ──
     for neg_spec in plan.negative_tcs:
@@ -2413,16 +2741,17 @@ def _build_ui_scenario_tc(
     validation = scenario.get('validation', '')
     category = scenario.get('category', 'Happy Path')
     steps_hint = scenario.get('steps_hint', [])
+    scenario_intent = scenario.get('_scenario_intent') or _classify_ui_scenario_intent(title, validation)
+    network_provider = scenario.get('_network_provider') or _infer_network_provider(title, validation)
+    tc_num = idx + 1
 
-    summary = '%s_TC%02d_NBOP_%s' % (feature_id, idx + 1, _trim_title(title, 60))
+    clean_title = _build_ui_tc_summary_name(
+        title, feature_name, tc_num, network_provider=network_provider)
+    summary = '%s_TC%02d_%s' % (feature_id, tc_num, clean_title)
 
-    description = 'UI verification: %s via NBOP portal' % title
-
-    preconditions = '\n'.join([
-        '1. Active TMO MDN available in SIT environment',
-        '2. NBOP portal accessible with valid credentials',
-        '3. User has appropriate role/permissions',
-    ])
+    description = _build_ui_description(title, validation, scenario_intent)
+    preconditions = _build_ui_preconditions(
+        title, validation, network_provider, scenario_intent)
 
     steps = []
     step_num = 0
@@ -2460,7 +2789,7 @@ def _build_ui_scenario_tc(
             steps.append(TestStep(
                 step_num=step_num,
                 summary=hint,
-                expected='Action completed successfully',
+                expected=validation or 'The step produces the scenario result described by: %s' % hint,
                 data_reference='Scenario: %s' % title[:40],
             ))
 
@@ -2482,7 +2811,7 @@ def _build_ui_scenario_tc(
             steps.append(TestStep(
                 step_num=step_num,
                 summary='Verify: %s' % _trim_title(validation, 80),
-                expected=validation if validation else 'Expected behavior confirmed',
+                expected=validation or '%s UI state matches the scenario requirement' % feature_name,
                 data_reference='Scenario validation: %s' % title[:40],
             ))
         else:
@@ -2496,7 +2825,7 @@ def _build_ui_scenario_tc(
     # Build traceability
     tr = create_traceability(
         source_type='Chalk Scenario',
-        source_id='%s_scenario_%d' % (feature_id, idx + 1),
+        source_id='%s_scenario_%d' % (feature_id, tc_num),
         extracted_text=title[:200],
     )
 
@@ -2509,7 +2838,11 @@ def _build_ui_scenario_tc(
         label=feature_id,
         category=category,
         traceability=tr,
-        dimension_values={'channel': 'NBOP', 'scenario': title[:50]},
+        dimension_values={
+            'channel': 'NBOP',
+            'scenario': title[:50],
+            'network_provider': network_provider,
+        },
     )
 
 
@@ -2625,6 +2958,7 @@ def _validate_step_quality(
     steps: List[TestStep],
     scenario_title: str,
     subtask_ac_text: str = '',
+    specialized_chain: bool = False,
 ) -> List[TestStep]:
     """Validate and fix step quality — reject generic patterns.
 
@@ -2682,14 +3016,14 @@ def _validate_step_quality(
                 enriched_steps.append(TestStep(
                     step_num=step.step_num,
                     summary='Verify: %s' % _trim_title(subtask_ac_text, 80),
-                    expected='Verification condition met per AC',
+                    expected=subtask_ac_text,
                     data_reference=step.data_reference,
                 ))
             else:
                 enriched_steps.append(TestStep(
                     step_num=step.step_num,
                     summary='Verify: %s' % _trim_title(scenario_title, 80),
-                    expected='Expected behavior confirmed per scenario',
+                    expected=scenario_title,
                     data_reference=step.data_reference,
                 ))
             continue
@@ -2698,34 +3032,41 @@ def _validate_step_quality(
         enriched_steps.append(step)
 
     # ── Validate structural completeness ──
+    action_keywords = (
+        'click', 'select', 'search', 'enter', 'open', 'perform', 'trigger',
+        'capture', 'compare', 'submit', 'toggle')
     has_nav = any(
         any(kw in s.summary.lower() for kw in ('navigate', 'launch', 'login'))
         for s in enriched_steps
     )
     has_action = any(
-        any(kw in s.summary.lower() for kw in ('click', 'select', 'search', 'enter'))
+        any(kw in s.summary.lower() for kw in action_keywords)
         for s in enriched_steps
     )
-    has_verify = any('verify' in s.summary.lower() for s in enriched_steps)
+    has_verify = any(
+        any(kw in s.summary.lower() for kw in ('verify', 'compare', 'confirm', 'validate'))
+        for s in enriched_steps
+    )
 
-    # Pad missing step types
+    # Pad missing step types. Specialized backend/hybrid chains intentionally use
+    # capture/compare/trigger actions and must not receive an unrelated transaction search.
     pad_steps = []
-    if not has_nav:
+    if not has_nav and not specialized_chain:
         pad_steps.append(TestStep(
             step_num=0,
             summary='Launch NBOP portal and search subscriber by MDN',
             expected='Subscriber profile loaded successfully',
             data_reference='Navigation step',
         ))
-    if not has_action:
+    if not has_action and not specialized_chain:
         pad_steps.append(TestStep(
             step_num=0,
-            summary='Select relevant option and search for transaction',
-            expected='Search results displayed',
-            data_reference='Action step from: %s' % scenario_title[:40],
+            summary='Perform the scenario-specific NBOP action: %s' % scenario_title,
+            expected=subtask_ac_text or 'The requested scenario action is accepted by NBOP',
+            data_reference='Action step from scenario requirement',
         ))
     if not has_verify:
-        verify_text = subtask_ac_text[:80] if subtask_ac_text else scenario_title[:80]
+        verify_text = subtask_ac_text or scenario_title
         # Clean up verify text to avoid "Verify: Phone — Verify ..." double patterns
         # Strip product prefix (e.g., "Phone — ", "Tablet — ")
         if ' — ' in verify_text:
@@ -2734,19 +3075,19 @@ def _validate_step_quality(
         import re as _re_pad
         verify_text = _re_pad.sub(r'^(?:Verify\s+(?:that\s+)?)', '', verify_text).strip()
         if not verify_text:
-            verify_text = scenario_title[:80]
+            verify_text = scenario_title
         pad_steps.append(TestStep(
             step_num=0,
-            summary='Verify: %s' % verify_text,
-            expected='Verification condition met',
-            data_reference='Verification step',
+            summary='Verify requirement: %s' % verify_text,
+            expected=subtask_ac_text or scenario_title,
+            data_reference='Scenario verification',
         ))
 
     # Insert pad steps at appropriate positions
     if pad_steps:
         # Nav steps go first, action in middle, verify at end
         nav_pads = [s for s in pad_steps if any(kw in s.summary.lower() for kw in ('launch', 'navigate', 'login'))]
-        action_pads = [s for s in pad_steps if any(kw in s.summary.lower() for kw in ('click', 'select', 'search', 'enter'))]
+        action_pads = [s for s in pad_steps if any(kw in s.summary.lower() for kw in action_keywords)]
         verify_pads = [s for s in pad_steps if 'verify' in s.summary.lower()]
 
         enriched_steps = nav_pads + enriched_steps + action_pads + verify_pads
@@ -2760,12 +3101,13 @@ def _validate_step_quality(
         enriched_steps = enriched_steps[:max_steps]
 
     while len(enriched_steps) < 4:
-        # Pad with context steps
+        # Keep the minimum chain meaningful and grounded in the complete requirement.
+        requirement = subtask_ac_text or scenario_title
         enriched_steps.append(TestStep(
             step_num=0,
-            summary='Verify page displays all expected information for: %s' % _trim_title(scenario_title, 50),
-            expected='All relevant data visible on screen',
-            data_reference='Context padding step',
+            summary='Verify additional scenario requirement: %s' % requirement,
+            expected=requirement,
+            data_reference='Scenario completeness',
         ))
 
     # ── Renumber steps ──
@@ -2775,7 +3117,8 @@ def _validate_step_quality(
     return enriched_steps
 
 
-def _build_ui_tc_summary_name(title: str, feature_name: str, tc_num: int) -> str:
+def _build_ui_tc_summary_name(title: str, feature_name: str, tc_num: int,
+                              network_provider: str = '') -> str:
     """Build a clean, intent-focused TC summary name for UI test cases.
 
     Transforms raw Chalk/AC text into a proper naming convention:
@@ -2803,12 +3146,94 @@ def _build_ui_tc_summary_name(title: str, feature_name: str, tc_num: int) -> str
         text = parts_split[1].strip()
         text_lower = text.lower()
 
-    # Extract MNO from title
-    mno = ''
-    if 'tmo' in text_lower:
+    # Use the inferred execution provider when one was supplied. A provider-neutral
+    # title keeps its existing no-suffix form, while explicit parity/comparison text
+    # is labelled by the route under test rather than the provider used as reference.
+    mentioned_providers = _provider_tokens(text)
+    normalized_provider = (network_provider or '').strip().upper()
+    if normalized_provider in ('TMO', 'VZW', 'MIXED') and (
+            mentioned_providers or normalized_provider == 'MIXED'):
+        mno = normalized_provider
+    elif 'tmo' in text_lower:
         mno = 'TMO'
     elif 'vzw' in text_lower:
         mno = 'VZW'
+    else:
+        mno = ''
+
+    def _intent_summary(*segments: str) -> str:
+        parts = ['NBOP']
+        if product_prefix:
+            parts.append(product_prefix)
+        parts.extend(segments)
+        if mno:
+            parts.append(mno)
+        return '_'.join(parts)
+
+    # Scenario-specific business intents must win over generic display/removal
+    # wording, otherwise distinct operations collapse into Verify_Attributes_Displayed.
+    is_change_features = 'change feature' in text_lower
+    is_feature_conflict = (
+        'feature' in text_lower and
+        any(term in text_lower for term in ('conflict', 'incompatible')) and
+        any(term in text_lower for term in (
+            'error', 'reject', 'fail', 'cannot', 'unable', 'prevent', 'block')))
+    if is_feature_conflict:
+        return _intent_summary('Change_Features', 'Conflict_Rejection')
+
+    if (is_change_features and 'manage line' in text_lower and
+            any(term in text_lower for term in (
+                'display', 'visible', 'visibility', 'available', 'accessible'))):
+        has_mno_tmo_on = (
+            'mno_tmo' in text_lower and
+            'permission' in text_lower and
+            bool(re.search(r'\b(?:is\s+)?on\b', text_lower)))
+        has_active_line = bool(re.search(
+            r'\b(?:line\s+status\s+is|status\s*=?)\s*active\b', text_lower))
+        if has_mno_tmo_on and has_active_line:
+            return _intent_summary(
+                'Conditional_Access', 'MNO_TMO_Permission_ON',
+                'Active_Line', 'Change_Features_Entry')
+        return _intent_summary(
+            'Baseline_Check', 'Manage_Line_Menu', 'Change_Features_Visibility')
+
+    if (any(term in text_lower for term in (
+            'mno activation history', 'hmno activation history', 'hmno activation')) and
+            any(term in text_lower for term in ('display', 'visible', 'available', 'present'))):
+        return _intent_summary('Verify', 'HMNO_Activation_History_Displayed')
+
+    if ('npanxx' in text_lower and
+            any(term in text_lower for term in ('change mdn', 'mdn screen')) and
+            any(term in text_lower for term in ('activation', 'activate')) and
+            any(term in text_lower for term in (
+                'not displayed', 'removed', 'removal', 'remove', 'hidden', 'absent',
+                'no longer'))):
+        return _intent_summary(
+            'Validate', 'Both_Screens', 'ZIP_Code_Only',
+            'Activation_And_Change_MDN')
+
+    if ('npanxx' in text_lower and
+            any(term in text_lower for term in ('activation', 'activate')) and
+            any(term in text_lower for term in (
+                'not displayed', 'hidden', 'absent')) and
+            any(term in text_lower for term in ('screen', 'control', 'label', 'field', 'option'))):
+        return _intent_summary(
+            'Activation_Form_Audit', 'NPANXX_Control_Absent',
+            'ZIP_Code_Required')
+
+    if ('npanxx' in text_lower and
+            any(term in text_lower for term in ('activation flow', 'activation process')) and
+            any(term in text_lower for term in ('removed', 'removal', 'remove', 'no longer'))):
+        return _intent_summary(
+            'ZIP_Code_Only', 'End_To_End_Activation',
+            'Profile_Provider_Transaction_Evidence')
+
+    if ('npanxx' in text_lower and
+            any(term in text_lower for term in ('activation', 'activate')) and
+            any(term in text_lower for term in (
+                'not displayed', 'removed', 'removal', 'remove', 'hidden', 'absent',
+                'no longer'))):
+        return _intent_summary('Verify', 'NPANXX_Absent_From_Activation')
 
     # Determine the action/intent
     if any(kw in text_lower for kw in ['removed', 'hidden', 'hide', 'not displayed']):
@@ -2862,22 +3287,40 @@ def _build_ui_tc_summary_name(title: str, feature_name: str, tc_num: int) -> str
         return '_'.join(parts)
 
     elif 'portin' in text_lower or 'port-in' in text_lower or 'port in' in text_lower:
-        # Port-in related scenario
+        # Keep operation intent in the title so semantic deduplication cannot
+        # collapse Update availability into an in-progress Cancel/Update rule.
+        has_update = 'update' in text_lower
+        has_cancel = 'cancel' in text_lower
         status = ''
         if 'success' in text_lower:
             status = 'Success'
         elif "doesn't succeed" in text_lower or 'fail' in text_lower or 'bad' in text_lower:
             status = 'Failed'
-        elif 'in progress' in text_lower:
+        elif 'in progress' in text_lower or 'in-progress' in text_lower:
             status = 'InProgress'
 
         parts = ['NBOP']
         if product_prefix:
             parts.append(product_prefix)
         parts.append('PortIn')
-        if status:
-            parts.append(status)
-        parts.append('Verify_Port_Status_Removed')
+        if has_cancel and has_update:
+            parts.append('Cancel_Or_Update')
+            if status:
+                parts.append(status)
+            parts.append('Verify_Both_Actions')
+        elif has_update:
+            parts.append('Update')
+            if status:
+                parts.append(status)
+            if any(term in text_lower for term in (
+                    'option', 'available', 'availability', 'displayed', 'visible')):
+                parts.append('Option_Availability')
+            else:
+                parts.append('Verify_Update')
+        else:
+            if status:
+                parts.append(status)
+            parts.append('Verify_Port_Status_Removed')
         if mno:
             parts.append(mno)
         return '_'.join(parts)
@@ -2914,7 +3357,7 @@ def _build_ui_tc_summary_name(title: str, feature_name: str, tc_num: int) -> str
             parts.append(product_prefix)
         if clean:
             parts.append(clean)
-        if mno and mno not in clean.upper():
+        if mno and clean.upper() != mno and not clean.upper().endswith('_' + mno):
             parts.append(mno)
         return '_'.join(parts)
 
@@ -2948,22 +3391,65 @@ def _build_ui_scenario_tc_enriched(
     title = scenario.get('title', 'Scenario %d' % (idx + 1))
     validation = scenario.get('validation', '')
     category = scenario.get('category', 'Happy Path')
+    scenario_intent = scenario.get('_scenario_intent') or _classify_ui_scenario_intent(title, validation)
+    network_provider = scenario.get('_network_provider') or _infer_network_provider(
+        title, validation, '%s %s' % (feature_name, subtask_ac_text))
+    tc_num = idx + 1
 
     # ── Build clean TC summary name ──
-    clean_title = _build_ui_tc_summary_name(title, feature_name, idx + 1)
-    summary = '%s_TC%02d_%s' % (feature_id, idx + 1, clean_title)
-    description = 'UI verification: %s via NBOP portal' % title
-    preconditions = '\n'.join([
-        '1. Active TMO MDN available in SIT environment',
-        '2. NBOP portal accessible with valid credentials',
-        '3. User has appropriate role/permissions',
-    ])
+    clean_title = _build_ui_tc_summary_name(
+        title, feature_name, tc_num, network_provider=network_provider)
+    summary = '%s_TC%02d_%s' % (feature_id, tc_num, clean_title)
+    description = _build_ui_description(title, validation, scenario_intent)
+    preconditions = _build_ui_preconditions(
+        title, validation, network_provider, scenario_intent)
 
-    steps: List[TestStep] = []
+    # Strong backend intents are routed per scenario even though the parent feature
+    # remains UI. These chains include the NBOP trigger/display and backend evidence.
+    steps: List[TestStep] = _build_hybrid_ui_backend_steps(
+        scenario_intent, network_provider, validation)
 
-    # ── Priority 0: Use steps_hint from evidence documents (highest quality) ──
+    # Change Features and NPANXX requirements need exact, operation-specific NBOP
+    # chains even when a source also supplies short/generic step hints.
+    concrete_context = ('%s %s %s' % (feature_name, title, validation)).lower()
+    zip_location_flow = (
+        bool(re.search(r'\b(?:zip\s*code|zip-code|zipcode)\b', concrete_context)) and
+        any(term in concrete_context for term in (
+            'change mdn', 'mdn screen', 'mdn-screen',
+            'activation screen', 'activation flow'))
+    )
+    feature_operation_flow = (
+        'feature' in concrete_context and
+        (any(term in concrete_context for term in ('conflict', 'incompatible')) or
+         bool(re.search(r'\b(?:add(?:ing)?|remov(?:e|ing))\b.{0,40}\bfeatures?\b',
+                        concrete_context)))
+    )
+    prefer_concrete_knowledge = (
+        scenario_intent == 'ui' and
+        ('npanxx' in concrete_context or zip_location_flow or feature_operation_flow or
+         any(term in concrete_context for term in (
+             'change feature', 'change features', 'optional feature',
+             'required feature', 'included feature', 'pdl data')))
+    )
+    if not steps and prefer_concrete_knowledge:
+        try:
+            from .nbop_ui_knowledge import generate_ui_steps
+            ui_steps = generate_ui_steps(
+                feature_name, description=validation, scenario_title=title,
+                network_provider=network_provider)
+            for i, (desc, expected) in enumerate(ui_steps or []):
+                steps.append(TestStep(
+                    step_num=i + 1,
+                    summary=desc,
+                    expected=expected,
+                    data_reference='NBOP UI Knowledge: %s' % title[:40],
+                ))
+        except (ImportError, Exception):
+            pass
+
+    # ── Priority 0: Use steps_hint from evidence documents (highest quality for other UI-only scenarios) ──
     steps_hint = scenario.get('steps_hint', [])
-    if steps_hint and len(steps_hint) >= 2:
+    if not steps and steps_hint and len(steps_hint) >= 2:
         # Check if steps_hint is verification-only (no login/navigate steps)
         has_nav = any(
             any(kw in (h or '').lower() for kw in ['login', 'log in', 'navigate', 'launch', 'click on the'])
@@ -3006,21 +3492,20 @@ def _build_ui_scenario_tc_enriched(
             elif 'is displayed' in hint_text.lower() or 'should be displayed' in hint_text.lower():
                 expected = 'Element IS visible and accessible'
             elif 'verify' in hint_text.lower() or 'ensure' in hint_text.lower():
-                expected = 'Condition verified: %s' % _trim_title(hint_text, 80)
+                expected = validation or 'The stated verification condition is satisfied: %s' % hint_text
             elif 'navigate' in hint_text.lower() or 'click' in hint_text.lower():
-                expected = 'Navigation successful — target page/section loaded'
+                expected = 'Navigation succeeds and the named target page or section loads'
             elif 'login' in hint_text.lower() or 'log in' in hint_text.lower() or 'search' in hint_text.lower():
-                expected = 'Subscriber profile loaded successfully'
+                expected = 'The requested subscriber profile loads successfully'
             elif 'call' in hint_text.lower() and 'api' in hint_text.lower():
-                expected = 'API call returns expected response'
-            elif 'verify' in hint_text.lower() or 'check' in hint_text.lower() or 'validate' in hint_text.lower():
-                expected = 'Verification passes — result matches expected value'
+                expected = validation or 'The named API returns the response required by the scenario'
+            elif 'check' in hint_text.lower() or 'validate' in hint_text.lower():
+                expected = validation or 'The checked value matches the scenario requirement'
             else:
-                # Use the hint text itself to derive a contextual expected result
-                expected = 'Expected outcome confirmed per scenario specification'
+                expected = validation or 'The named scenario action produces its specified result'
             steps.append(TestStep(
                 step_num=step_num,
-                summary=_trim_title(hint_text, 120),
+                summary=hint_text,
                 expected=expected,
                 data_reference='Evidence document',
             ))
@@ -3065,24 +3550,28 @@ def _build_ui_scenario_tc_enriched(
     # Skip if Priority 0 already produced steps (steps_hint had content)
     if not steps:
         try:
-            from .nbop_ui_knowledge import generate_ui_steps, is_available
-            if is_available():
-                ui_steps = generate_ui_steps(feature_name, scenario_title=title)
-                if ui_steps and len(ui_steps) > 4:
-                    # Check if steps have specific content (not just generic placeholders)
-                    has_specific = any(
-                        any(kw in desc.lower() for kw in ('mdn', 'tab', 'dropdown', 'field', 'menu', 'tile', 'click', 'select'))
-                        for desc, _ in ui_steps
-                    )
-                    if has_specific:
-                        # Use directly — these are high-quality steps
-                        for i, (desc, expected) in enumerate(ui_steps):
-                            steps.append(TestStep(
-                                step_num=i + 1,
-                                summary=desc,
-                                expected=expected,
-                                data_reference='NBOP UI Knowledge: %s' % title[:40],
-                            ))
+            from .nbop_ui_knowledge import generate_ui_steps
+            ui_steps = generate_ui_steps(
+                feature_name, description=validation, scenario_title=title,
+                network_provider=network_provider)
+            if ui_steps and len(ui_steps) >= 3:
+                # Check if steps have specific content (not just generic placeholders)
+                has_specific = any(
+                    any(kw in desc.lower() for kw in (
+                        'mdn', 'tab', 'dropdown', 'field', 'menu', 'tile', 'click',
+                        'select', 'response', 'payload', 'transaction', 'history',
+                        'feature', 'npanxx', 'zip'))
+                    for desc, _ in ui_steps
+                )
+                if has_specific:
+                    # Use directly — these are high-quality steps
+                    for i, (desc, expected) in enumerate(ui_steps):
+                        steps.append(TestStep(
+                            step_num=i + 1,
+                            summary=desc,
+                            expected=expected,
+                            data_reference='NBOP UI Knowledge: %s' % title[:40],
+                        ))
         except (ImportError, Exception):
             pass
 
@@ -3117,14 +3606,24 @@ def _build_ui_scenario_tc_enriched(
                 data_reference='NBOP navigation',
             ))
 
-        # Action step — search/filter
+        # Only transaction/history requirements get a transaction search action.
+        # Other ACs use their own requirement as the executable UI action.
         step_num += 1
-        steps.append(TestStep(
-            step_num=step_num,
-            summary='Search for subscriber transaction using Transaction Id or MDN',
-            expected='Search results displayed with matching records',
-            data_reference='Action: search/filter',
-        ))
+        scenario_context = ('%s %s' % (title, subtask_ac_text)).lower()
+        if any(term in scenario_context for term in ('transaction history', 'transaction id', 'line history', 'activation history')):
+            steps.append(TestStep(
+                step_num=step_num,
+                summary='Locate the required history record using its Transaction ID or MDN',
+                expected='The matching history record is displayed with its operation status',
+                data_reference='History lookup required by scenario',
+            ))
+        else:
+            steps.append(TestStep(
+                step_num=step_num,
+                summary='Perform the NBOP action required by the scenario: %s' % title,
+                expected=subtask_ac_text,
+                data_reference='Scenario-specific UI action',
+            ))
 
         # Verification steps from AC points
         for point in ac_points:
@@ -3164,34 +3663,40 @@ def _build_ui_scenario_tc_enriched(
                 raw = point.get('raw_text', subtask_ac_text)
                 steps.append(TestStep(
                     step_num=step_num,
-                    summary='Verify: %s' % _trim_title(raw, 80),
-                    expected='Condition met: %s' % raw,
+                    summary='Verify requirement: %s' % raw,
+                    expected=raw,
                     data_reference='AC text verification',
                 ))
 
     # ── Priority 3: Fallback — use scenario title as step description ──
     if not steps:
+        requirement = validation or title
         steps = [
             TestStep(step_num=1,
                      summary='Launch NBOP portal and search subscriber by MDN',
-                     expected='Subscriber profile loaded',
+                     expected='Subscriber profile loads for the scenario provider',
                      data_reference='Navigation'),
             TestStep(step_num=2,
                      summary='Navigate to %s' % (nav_path or feature_name),
-                     expected='Page loaded successfully',
+                     expected='The required NBOP page loads with its available controls',
                      data_reference='Navigation'),
             TestStep(step_num=3,
-                     summary='Perform action: %s' % _trim_title(title, 70),
-                     expected='Action completed',
-                     data_reference='Scenario: %s' % title[:40]),
+                     summary='Perform the NBOP action required by the scenario: %s' % title,
+                     expected='NBOP accepts the scenario input and returns a result for verification',
+                     data_reference='Scenario action'),
             TestStep(step_num=4,
-                     summary='Verify: %s' % _trim_title((validation or title), 80),
-                     expected='Expected behavior confirmed',
+                     summary='Verify requirement: %s' % requirement,
+                     expected=requirement,
                      data_reference='Scenario validation'),
         ]
 
     # ── Validate step quality ──
-    steps = _validate_step_quality(steps, scenario_title=title, subtask_ac_text=subtask_ac_text)
+    steps = _validate_step_quality(
+        steps,
+        scenario_title=title,
+        subtask_ac_text=subtask_ac_text or validation,
+        specialized_chain=scenario_intent != 'ui',
+    )
 
     # ── Build traceability ──
     # Determine source_type based on scenario source
@@ -3200,7 +3705,7 @@ def _build_ui_scenario_tc_enriched(
         source_type = 'Subtask AC'
         source_id = subtask_key
     else:
-        source_id = '%s_scenario_%d' % (feature_id, idx + 1)
+        source_id = '%s_scenario_%d' % (feature_id, tc_num)
 
     tr = create_traceability(
         source_type=source_type,
@@ -3217,7 +3722,11 @@ def _build_ui_scenario_tc_enriched(
         label=feature_id,
         category=category,
         traceability=tr,
-        dimension_values={'channel': 'NBOP', 'scenario': title[:50]},
+        dimension_values={
+            'channel': 'NBOP',
+            'scenario': title[:50],
+            'network_provider': network_provider,
+        },
     )
 
 
