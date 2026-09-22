@@ -104,6 +104,16 @@ def generate_excel(suite: TestSuite, log=print) -> Path:
         log('[EXCEL] Building Coverage Obligations sheet...')
         _build_coverage_obligations_sheet(wb, suite)
 
+    # ── Contract-v1 shadow export (additive; existing Test Cases sheet is unchanged) ──
+    try:
+        from .contract_bridge import contract_enabled
+        if contract_enabled():
+            log('[EXCEL] Building Execution Contract + Source Provenance sheets...')
+            _build_execution_contract_sheets(wb, suite, log=log)
+    except Exception as _contract_err:
+        # Non-blocking by design during shadow rollout: legacy output remains available.
+        log('[EXCEL] Contract-v1 shadow export skipped: %s' % str(_contract_err)[:120])
+
     # Remove default empty sheet if exists
     if 'Sheet' in wb.sheetnames:
         del wb['Sheet']
@@ -772,3 +782,125 @@ def _build_coverage_obligations_sheet(wb, suite):
     for column, width in widths.items():
         ws.column_dimensions[column].width = width
     ws.auto_filter.ref = 'A3:F%d' % max(3, ws.max_row)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Contract-v1 additive export
+# ═══════════════════════════════════════════════════════════════════════════════
+def _contract_source(tc, suite):
+    """Return structured owner/provenance without changing the legacy TC model."""
+    import re as _re
+    target = str(getattr(suite, 'feature_id', '') or '').upper()
+    target_pi = str(getattr(suite, 'pi', '') or '')
+    tr = getattr(tc, 'traceability', None)
+    source_type = str(getattr(tr, 'source_type', '') or 'Unknown')
+    source_id = str(getattr(tr, 'source_id', '') or '')
+    source_pi = str(getattr(tr, 'pi_label', '') or '')
+    extracted = str(getattr(tr, 'extracted_text', '') or '')
+
+    feature_match = _re.search(r'\b[A-Z][A-Z0-9]+-\d+\b', source_id.upper())
+    source_feature = feature_match.group(0) if feature_match else target
+    if source_type == 'Related Feature' and source_feature != target:
+        relationship = 'supporting_only'
+    elif source_type == 'Subtask AC':
+        relationship = 'explicit_linked'
+        source_feature = target
+    elif source_feature == target and source_pi and target_pi and source_pi != target_pi:
+        relationship = 'same_feature_other_pi'
+    elif source_feature == target:
+        relationship = 'owned'
+    else:
+        relationship = 'supporting_only'
+    locator = source_id
+    if extracted:
+        locator += (': ' if locator else '') + extracted[:300]
+    return source_feature, source_pi, source_type, locator, relationship
+
+
+def _build_execution_contract_sheets(wb, suite, log=print):
+    """Add machine-readable contract and provenance sheets.
+
+    This is shadow-mode and non-blocking. Unknown prose is marked legacy so TSE preserves
+    its existing execution path; only high-confidence contract rows route deterministically.
+    """
+    from .contract_bridge import (
+        CONTRACT_HEADERS, CONTRACT_SHEET, PROVENANCE_HEADERS, PROVENANCE_SHEET,
+        StepContract, infer_step_contract, stable_step_uid, stable_tc_uid,
+    )
+
+    for name in (CONTRACT_SHEET, PROVENANCE_SHEET):
+        if name in wb.sheetnames:
+            del wb[name]
+    contract_ws = wb.create_sheet(CONTRACT_SHEET)
+    provenance_ws = wb.create_sheet(PROVENANCE_SHEET)
+    contract_ws.append(CONTRACT_HEADERS)
+    provenance_ws.append(PROVENANCE_HEADERS)
+
+    typed = legacy = supporting = 0
+    audit_rows = []
+    for tc_idx, tc in enumerate(getattr(suite, 'test_cases', []) or [], 1):
+        tc_number = str(getattr(tc, 'sno', '') or tc_idx)
+        tc_uid = stable_tc_uid(getattr(suite, 'feature_id', ''), tc_number)
+        owner, owner_pi, source_type, locator, relationship = _contract_source(tc, suite)
+        grounding = int(getattr(tc, 'grounding_score', 0) or 0)
+        obligations = list(getattr(tc, 'obligation_ids', []) or [])
+        if relationship == 'supporting_only':
+            supporting += 1
+            audit_rows.append(tc_uid)
+        provenance_ws.append([
+            tc_uid, tc_number, owner, owner_pi, source_type, locator,
+            relationship, grounding, getattr(tc, 'summary', ''),
+        ])
+        for step_idx, step in enumerate(getattr(tc, 'steps', []) or [], 1):
+            step_num = int(getattr(step, 'step_num', 0) or step_idx)
+            inferred = infer_step_contract(
+                getattr(step, 'summary', ''), getattr(step, 'expected', '') or
+                getattr(step, 'expected_result', ''), getattr(tc, 'summary', ''))
+            mode = inferred.get('mode', 'legacy')
+            typed += int(mode == 'typed')
+            legacy += int(mode != 'typed')
+            row = StepContract(
+                tc_uid=tc_uid, step_uid=stable_step_uid(tc_uid, step_num),
+                tc_number=tc_number, step_number=step_num, mode=mode,
+                action_type=inferred.get('action_type', 'legacy'),
+                action_id=inferred.get('action_id', ''),
+                assertion_type=inferred.get('assertion_type', ''),
+                target_system=inferred.get('target_system', ''),
+                parameters=inferred.get('parameters', {}),
+                requires=inferred.get('requires', {}),
+                owner_feature_id=owner, owner_pi=owner_pi,
+                source_type=source_type, source_locator=locator,
+                relationship=relationship, grounding_percent=grounding,
+                obligation_ids=obligations,
+            )
+            contract_ws.append(row.to_excel_row())
+
+    # Standard readable formatting; no formulas/macros/hidden behavior.
+    for ws in (contract_ws, provenance_ws):
+        ws.freeze_panes = 'A2'
+        ws.auto_filter.ref = ws.dimensions
+        for cell in ws[1]:
+            cell.font = _hf
+            cell.fill = _hfill
+            cell.alignment = _center
+        for col in ws.columns:
+            letter = col[0].column_letter
+            width = min(55, max(12, max(len(str(c.value or '')) for c in col[:200]) + 2))
+            ws.column_dimensions[letter].width = width
+
+    # Persist a non-blocking audit for dashboards/logs. It becomes fail-closed only after
+    # shadow canaries are approved.
+    suite.ownership_audit = {
+        'total_tcs': len(getattr(suite, 'test_cases', []) or []),
+        'supporting_only_tcs': supporting,
+        'supporting_only_uids': audit_rows,
+        'typed_steps': typed,
+        'legacy_steps': legacy,
+        'mode': 'shadow',
+    }
+    if supporting:
+        suite.warnings.append(
+            'Contract-v1 ownership audit: %d TC(s) rely on supporting-only provenance: %s'
+            % (supporting, ', '.join(audit_rows[:10])))
+    log('[EXCEL] Contract-v1 audit: %d typed step(s), %d legacy step(s), '
+        '%d supporting-only TC(s)' % (typed, legacy, supporting))

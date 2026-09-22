@@ -129,10 +129,29 @@ def deep_mine(jira, chalk, page=None, log=print) -> DeepMineResult:
                         from .database import _conn as _db_conn
                         _c = _db_conn()
                         _like = '%%%s%%' % _api_name.replace('-', '%')
-                        _db_rows = _c.execute(
-                            "SELECT feature_id, pi_label, scenarios_json, scope FROM chalk_cache WHERE scope LIKE ? AND scenarios_json != '[]' LIMIT 3",
-                            (_like,)
-                        ).fetchall()
+                        try:
+                            from .contract_bridge import contract_enabled
+                            _contract_v1 = contract_enabled()
+                        except Exception:
+                            _contract_v1 = False
+                        if _contract_v1:
+                            # Contract-v1 forbids an API-name cache hit from another feature
+                            # becoming a primary test scenario. Same-feature multi-PI data is
+                            # already merged by block_chalk_db; this fallback may only recover
+                            # scenarios owned by the requested Jira feature.
+                            _db_rows = _c.execute(
+                                "SELECT feature_id, pi_label, scenarios_json, scope "
+                                "FROM chalk_cache WHERE feature_id=? AND scope LIKE ? "
+                                "AND scenarios_json != '[]' LIMIT 3",
+                                (jira.key, _like),
+                            ).fetchall()
+                        else:
+                            _db_rows = _c.execute(
+                                "SELECT feature_id, pi_label, scenarios_json, scope "
+                                "FROM chalk_cache WHERE scope LIKE ? "
+                                "AND scenarios_json != '[]' LIMIT 3",
+                                (_like,),
+                            ).fetchall()
                         _c.close()
                         for _row in _db_rows:
                             _rd = dict(_row)

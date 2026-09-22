@@ -280,41 +280,54 @@ def extract_dimensions(
         else:
             log('[DIM-EXTRACT]   UI classification but no subtask/Jira AC data — using Chalk-only')
 
-    # ── 4. Extract related Chalk scenarios from deep mine ──
-    # ONLY use related scenarios if NMNO lookup didn't provide data.
-    # Related scenarios are from OTHER features and often irrelevant.
+    # ── 4. Related Chalk scenarios from OTHER features ──
+    # Contract-v1 keeps these as supporting evidence only. They may explain an owned case,
+    # but cannot create a new candidate TC or inflate a thin feature's count.
     if not _nmno_has_data and deep_mine_result and deep_mine_result.related_chalk_scenarios:
-        related_count = 0
-        existing_titles = {s.title.lower().strip() for s in scenarios}
-        for rs in deep_mine_result.related_chalk_scenarios:
-            title = (rs.get('title', '') or '').strip()
-            if not title or len(title) < 10:
-                continue
-            if title.lower().strip() in existing_titles:
-                continue
-            tr = create_traceability(
-                source_type='Related Feature',
-                source_id=rs.get('_source_feature', 'related'),
-                extracted_text=title[:200],
-                pi_label=rs.get('_source_pi', ''),
-            )
-            scenarios.append(ExtractedScenario(
-                title=title,
-                validation=rs.get('validation', ''),
-                category=rs.get('category', 'Happy Path'),
-                source=tr,
-            ))
-            existing_titles.add(title.lower().strip())
-            related_count += 1
-        if related_count:
-            log('[DIM-EXTRACT]   Related Chalk scenarios: %d added' % related_count)
+        try:
+            from .contract_bridge import contract_enabled
+            _contract_v1 = contract_enabled()
+        except Exception:
+            _contract_v1 = False
+        if _contract_v1:
+            related_count = len(deep_mine_result.related_chalk_scenarios)
+            log('[DIM-EXTRACT]   Related Chalk: %d supporting scenario(s), 0 promoted to TCs' %
+                related_count)
             sources_checked.append(DataSourceEntry(
-                source_name='Related Chalk Scenarios',
-                source_type='chalk',
-                items_extracted=related_count,
-                items_detail=['%d scenarios from related features' % related_count],
-                status='success',
+                source_name='Related Chalk Supporting Evidence',
+                source_type='chalk', items_extracted=0,
+                items_detail=['%d cross-feature scenarios retained as supporting-only' % related_count],
+                status='supporting',
             ))
+        else:
+            related_count = 0
+            existing_titles = {s.title.lower().strip() for s in scenarios}
+            for rs in deep_mine_result.related_chalk_scenarios:
+                title = (rs.get('title', '') or '').strip()
+                if not title or len(title) < 10:
+                    continue
+                if title.lower().strip() in existing_titles:
+                    continue
+                tr = create_traceability(
+                    source_type='Related Feature',
+                    source_id=rs.get('_source_feature', 'related'),
+                    extracted_text=title[:200],
+                    pi_label=rs.get('_source_pi', ''),
+                )
+                scenarios.append(ExtractedScenario(
+                    title=title, validation=rs.get('validation', ''),
+                    category=rs.get('category', 'Happy Path'), source=tr,
+                ))
+                existing_titles.add(title.lower().strip())
+                related_count += 1
+            if related_count:
+                log('[DIM-EXTRACT]   Related Chalk scenarios: %d added' % related_count)
+                sources_checked.append(DataSourceEntry(
+                    source_name='Related Chalk Scenarios', source_type='chalk',
+                    items_extracted=related_count,
+                    items_detail=['%d scenarios from related features' % related_count],
+                    status='success',
+                ))
 
     # ── 5. Extract line states from Jira + subtasks ──
     line_state_dim = _extract_line_states(jira, deep_mine_result, log)
@@ -1447,10 +1460,14 @@ def _extract_scenarios_from_chalk_data(chalk, log: Callable = print) -> tuple:
         validation = (sc.validation or '').strip()
         steps_hint = sc.steps if hasattr(sc, 'steps') and sc.steps else []
 
+        _owner_feature = getattr(sc, 'owner_feature_id', '') or feature_id
+        _owner_pi = getattr(sc, 'owner_pi', '')
+        _relationship = getattr(sc, 'relationship', 'owned') or 'owned'
         tr = create_traceability(
             source_type='Chalk Scenario',
-            source_id=feature_id,
+            source_id=_owner_feature,
             extracted_text=title[:200],
+            pi_label=_owner_pi,
         )
         extracted = ExtractedScenario(
             title=title,
@@ -1459,6 +1476,7 @@ def _extract_scenarios_from_chalk_data(chalk, log: Callable = print) -> tuple:
             source=tr,
             steps_hint=steps_hint,
         )
+        setattr(extracted, '_relationship', _relationship)
         # Dataclass instances are intentionally extensible; carrying this private
         # source ordinal avoids changing the shared model or unrelated call sites.
         setattr(extracted, '_source_tc_num', _source_tc_num)

@@ -446,28 +446,87 @@ def block_jira_fetch(page, feature_id, log=print):
 
 
 def block_chalk_db(feature_id, pi_label, log=print):
-    """Block 2: Try to load Chalk data from DB cache."""
+    """Block 2: load Chalk data from DB cache.
+
+    Legacy mode preserves the selected-PI-first behavior. Contract-v1 mode merges all
+    available PIs for the SAME feature (selected PI first), preserving scenario ownership
+    and preventing thin current-PI data from triggering unrelated cross-feature retrieval.
+    """
     from .database import load_chalk_as_object, _conn
+    try:
+        from .contract_bridge import contract_enabled
+        _contract_v1 = contract_enabled()
+    except Exception:
+        _contract_v1 = False
 
-    # Try selected PI first
-    chalk = load_chalk_as_object(feature_id, pi_label)
-    if chalk and chalk.scenarios:
-        log('[PIPELINE] Chalk DB hit (%s): %d scenarios' % (pi_label, len(chalk.scenarios)))
-        return {'chalk': chalk, 'source': 'DB cache (%s)' % pi_label}
-
-    # Try any PI
-    c = _conn()
-    row = c.execute('SELECT pi_label FROM chalk_cache WHERE feature_id=? AND scenarios_json != "[]" LIMIT 1',
-                    (feature_id,)).fetchone()
-    c.close()
-    if row:
-        chalk = load_chalk_as_object(feature_id, row['pi_label'])
+    # Legacy behavior remains untouched until contract-v1 canaries pass.
+    if not _contract_v1:
+        chalk = load_chalk_as_object(feature_id, pi_label)
         if chalk and chalk.scenarios:
-            log('[PIPELINE] Chalk DB hit (%s): %d scenarios' % (row['pi_label'], len(chalk.scenarios)))
-            return {'chalk': chalk, 'source': 'DB cache (%s)' % row['pi_label']}
+            log('[PIPELINE] Chalk DB hit (%s): %d scenarios' % (pi_label, len(chalk.scenarios)))
+            return {'chalk': chalk, 'source': 'DB cache (%s)' % pi_label}
+        c = _conn()
+        row = c.execute(
+            'SELECT pi_label FROM chalk_cache WHERE feature_id=? '
+            'AND scenarios_json != "[]" LIMIT 1', (feature_id,)).fetchone()
+        c.close()
+        if row:
+            chalk = load_chalk_as_object(feature_id, row['pi_label'])
+            if chalk and chalk.scenarios:
+                log('[PIPELINE] Chalk DB hit (%s): %d scenarios' %
+                    (row['pi_label'], len(chalk.scenarios)))
+                return {'chalk': chalk, 'source': 'DB cache (%s)' % row['pi_label']}
+        log('[PIPELINE] Chalk DB miss for %s' % feature_id)
+        return {'chalk': None, 'source': 'not in DB'}
 
-    log('[PIPELINE] Chalk DB miss for %s' % feature_id)
-    return {'chalk': None, 'source': 'not in DB'}
+    # Contract-v1: selected PI first, then all other PIs for this exact feature.
+    from .chalk_parser import ChalkData
+    c = _conn()
+    rows = c.execute(
+        'SELECT pi_label FROM chalk_cache WHERE feature_id=? '
+        'AND scenarios_json != "[]"', (feature_id,)).fetchall()
+    c.close()
+    labels = [str(r['pi_label']) for r in rows if r and r['pi_label']]
+    labels = ([pi_label] if pi_label in labels else []) + sorted(
+        [p for p in labels if p != pi_label], reverse=True)
+    if not labels:
+        log('[PIPELINE] Chalk DB miss for %s' % feature_id)
+        return {'chalk': None, 'source': 'not in DB'}
+
+    merged = ChalkData(feature_id=feature_id)
+    seen = set()
+    source_parts = []
+    for label in labels:
+        item = load_chalk_as_object(feature_id, label)
+        if not item or not item.scenarios:
+            continue
+        source_parts.append('%s:%d' % (label, len(item.scenarios)))
+        if not merged.feature_title:
+            merged.feature_title = item.feature_title
+        if item.scope:
+            merged.scope += ('\n' if merged.scope else '') + '[%s] %s' % (label, item.scope)
+        if item.rules:
+            merged.rules += ('\n' if merged.rules else '') + '[%s] %s' % (label, item.rules)
+        if item.raw_text:
+            merged.raw_text += ('\n' if merged.raw_text else '') + '[%s]\n%s' % (label, item.raw_text)
+        merged.tables.extend(item.tables or [])
+        merged.open_items.extend(item.open_items or [])
+        for scenario in item.scenarios:
+            key = ' '.join((scenario.title or '').lower().split())
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            scenario.owner_feature_id = feature_id
+            scenario.owner_pi = label
+            scenario.relationship = 'owned' if label == pi_label else 'same_feature_other_pi'
+            merged.scenarios.append(scenario)
+
+    if not merged.scenarios:
+        log('[PIPELINE] Chalk DB miss for %s' % feature_id)
+        return {'chalk': None, 'source': 'not in DB'}
+    log('[PIPELINE] Contract-v1 Chalk merge for %s: %d owned scenarios (%s)' %
+        (feature_id, len(merged.scenarios), ', '.join(source_parts)))
+    return {'chalk': merged, 'source': 'DB cache merged (%s)' % ', '.join(labels)}
 
 
 def block_chalk_live(page, feature_id, pi_url, pi_label, pi_list, log=print):

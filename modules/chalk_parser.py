@@ -40,6 +40,10 @@ class ChalkScenario:
     variations: List[str] = field(default_factory=list)
     validation: str = ''
     category: str = ''
+    # Structured provenance (contract v1). Defaults keep every existing caller compatible.
+    owner_feature_id: str = ''
+    owner_pi: str = ''
+    relationship: str = 'owned'
 
 
 @dataclass

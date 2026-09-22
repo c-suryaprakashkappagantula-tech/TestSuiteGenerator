@@ -554,6 +554,9 @@ def load_chalk_as_object(feature_id: str, pi_label: str):
                 variations=s.get('variations', []),
                 validation=_clean_chalk_text(s.get('validation', '')),
                 category=s.get('category', ''),
+                owner_feature_id=feature_id,
+                owner_pi=pi_label,
+                relationship='owned',
             ))
         if _dropped:
             print('[CHALK-CACHE] %s/%s: dropped %d non-scenario line(s): %s'
