@@ -1770,11 +1770,22 @@ def _apply_custom_instructions(
     # multi-step scenarios (correct category + priority). These are flagged
     # user_requested=True and are protected from grounding/dedup pruning.
     try:
-        from .custom_scenario_builder import build_custom_scenarios
+        from .custom_scenario_builder import build_custom_scenarios, parse_axis_overrides
         _jira = options.get('_jira')  # optional; builder tolerates None
         user_scenarios = build_custom_scenarios(custom_text, _jira, log)
         if user_scenarios:
             dimension_set.scenarios.extend(user_scenarios)
+        # If the instruction names device/sim/channel/state axes, feed them to the
+        # combinatorial expander so the request actually multiplies coverage (the
+        # expander is the working device-fan-out path). Also auto-enable expansion
+        # for this run so the user does not also have to tick the checkbox.
+        _ax = parse_axis_overrides(custom_text)
+        if _ax:
+            _existing = dict(options.get('axis_overrides') or {})
+            _existing.update(_ax)
+            options['axis_overrides'] = _existing
+            options['expand_matrix'] = True
+            log('[V8-CUSTOM]   Custom axes -> matrix expansion: %s' % _ax)
     except Exception as _cs_err:
         log('[V8-CUSTOM]   WARNING: custom scenario builder failed: %s — continuing' % str(_cs_err)[:120])
         _record_degraded('custom scenario builder', _cs_err)
