@@ -16,17 +16,37 @@ DB_PATH = ROOT / 'tsg_cache.db'
 STALE_HOURS = 24  # data older than this shows a warning
 
 
-def _mirror_pi_pages_to_registry(pi_list):
-    """Publish the PI pages into the shared canonical registry (shared/pi_registry.db)
-    so TSE / MDA / other dashboards see the same list. Fail-safe: any problem here is
-    swallowed - the local tsg_cache.db write is the source of truth for TSG itself."""
+def _get_pi_registry():
+    """Return a PI-registry module, deployment-safe.
+
+    Precedence: the monorepo's shared.pi_registry (co-located install) -> the vendored
+    modules.pi_registry_local (TSG deployed alone, no sibling shared/ folder). Returns
+    None only if both are somehow unavailable. Never raises."""
     try:
         import sys as _sys
         _shared_parent = str(ROOT.parent)
         if _shared_parent not in _sys.path:
             _sys.path.insert(0, _shared_parent)
-        from shared import pi_registry as _pr
-        _pr.upsert_pi_pages(list(pi_list or []))
+        from shared import pi_registry as _pr  # co-located monorepo install
+        return _pr
+    except Exception:
+        pass
+    try:
+        from . import pi_registry_local as _pr  # vendored standalone fallback
+        return _pr
+    except Exception:
+        return None
+
+
+def _mirror_pi_pages_to_registry(pi_list):
+    """Publish the PI pages into the canonical registry so TSE / MDA / other dashboards
+    see the same list. Uses shared registry when present, else the vendored copy.
+    Fail-safe: any problem here is swallowed - the local tsg_cache.db write is the
+    source of truth for TSG itself."""
+    try:
+        _pr = _get_pi_registry()
+        if _pr is not None:
+            _pr.upsert_pi_pages(list(pi_list or []))
     except Exception:
         pass
 
