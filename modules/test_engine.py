@@ -659,7 +659,7 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print, deep_mine_res
                 _bcd_negatives = []
                 if 'same date' not in _existing_neg and 'no change' not in _existing_neg:
                     _bcd_negatives.append(TestCase(
-                        sno='', summary='TC__%s_Negative: Validate Change BCD with same date (no change)' % jira.key,
+                        sno='', summary='TC000_%s_Negative: Validate Change BCD with same date (no change)' % jira.key,
                         description='Select the same DPFO Reset Day that is already set. Verify no spurious transaction.',
                         preconditions='1.\tSubscriber line should be Active with known DPFO date.',
                         story_linkage=jira.key, label=jira.key, category='Negative',
@@ -671,7 +671,7 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print, deep_mine_res
                         ]))
                 if 'suspended' not in _existing_neg and 'hotline' not in _existing_neg:
                     _bcd_negatives.append(TestCase(
-                        sno='', summary='TC__%s_Negative: Validate Change BCD rejects change for Suspended/Hotlined line' % jira.key,
+                        sno='', summary='TC000_%s_Negative: Validate Change BCD rejects change for Suspended/Hotlined line' % jira.key,
                         description='Attempt to change BCD date for a Suspended or Hotlined subscriber. Verify NBOP rejects or warns.',
                         preconditions='1.\tSubscriber line is in Suspended or Hotlined status.',
                         story_linkage=jira.key, label=jira.key, category='Negative',
