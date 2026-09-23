@@ -1428,7 +1428,7 @@ if ss.get('_sync_running'):
             # ── REST SYNC (no browser) ──
             # Discover PI pages via REST
             _sync_msg('Discovering PI pages via REST...')
-            _pi_pages = _rest_client.discover_pi_pages(pi_range=range(46, 60))
+            _pi_pages = _rest_client.discover_pi_pages(pi_range=range(46, 63))
             if _pi_pages:
                 _new_pi_list = [(p.label, p.url) for p in _pi_pages]
                 _old_labels = set(label for label, url in ss.get('pi_list', []))
