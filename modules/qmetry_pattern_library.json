@@ -1,0 +1,488 @@
+{
+  "meta": {
+    "generated": "2026-09-23",
+    "source": "5 QMetry manual suites (MDA/NSL provisioning)",
+    "total_tcs": 3138,
+    "total_steps": 12824
+  },
+  "preconditions": {
+    "global_top": [
+      {
+        "text": "Agent should have MNO_TMO permission",
+        "freq": 80
+      },
+      {
+        "text": "User must have an active line.",
+        "freq": 69
+      },
+      {
+        "text": "Line Status : Active",
+        "freq": 56
+      },
+      {
+        "text": "User must have an active TMO line.",
+        "freq": 52
+      },
+      {
+        "text": "User should have NBOP admin access.",
+        "freq": 51
+      },
+      {
+        "text": "From line summary page user must navigate to line management > Reclaim MDN",
+        "freq": 47
+      },
+      {
+        "text": "Activate a TMO line from SM360 on an inactive HSD account",
+        "freq": 45
+      },
+      {
+        "text": "Agent with NBOP Admin role and TMO_Upate UsageLimits menu access",
+        "freq": 45
+      },
+      {
+        "text": "Activate Line",
+        "freq": 45
+      },
+      {
+        "text": "Activate Line in TMO",
+        "freq": 45
+      },
+      {
+        "text": "User should have SFTP server access",
+        "freq": 41
+      },
+      {
+        "text": "User should have HLD",
+        "freq": 41
+      },
+      {
+        "text": "user must navigate to the line summary page.",
+        "freq": 40
+      },
+      {
+        "text": "Product: Phone/Tablet/Smartwatch",
+        "freq": 38
+      },
+      {
+        "text": "Software should be 26.4 for the both devices",
+        "freq": 37
+      },
+      {
+        "text": "User must have an Inactive HSD Account",
+        "freq": 37
+      },
+      {
+        "text": "requestType: TMO",
+        "freq": 36
+      },
+      {
+        "text": "User must have a Valid reference number of required transaction",
+        "freq": 36
+      },
+      {
+        "text": "Change feature should be done",
+        "freq": 34
+      },
+      {
+        "text": "Line should be Active",
+        "freq": 33
+      },
+      {
+        "text": "Supported Channels: ITMBO and NBOP",
+        "freq": 33
+      },
+      {
+        "text": "User must have active Host line.",
+        "freq": 32
+      },
+      {
+        "text": "User must have access to NBOP, i.e. PID must be available in century shield",
+        "freq": 32
+      },
+      {
+        "text": "User must have access to Line Management ---> Sync Line",
+        "freq": 32
+      },
+      {
+        "text": "Change Rate plan should be done",
+        "freq": 30
+      },
+      {
+        "text": "Activate TMO subscriber via activate-subscriber API",
+        "freq": 29
+      },
+      {
+        "text": "User must have access to MNO_TMO menu",
+        "freq": 29
+      },
+      {
+        "text": "Line Status: Active",
+        "freq": 28
+      },
+      {
+        "text": "Network Provider : T-Mobile",
+        "freq": 28
+      },
+      {
+        "text": "User logged into NBOP portal with Active TMO line",
+        "freq": 27
+      }
+    ],
+    "by_keyword": {
+      "permission": [
+        "Agent should have MNO_TMO permission",
+        "Agent has MNO_TMO permission.",
+        "User has appropriate role/permissions",
+        "Agent has MNO_VZW permission."
+      ],
+      "line status": [
+        "Line Status : Active",
+        "Line Status: Active",
+        "Line Status in NSL- ACTIVE",
+        "Activate TMO subscriber via activate-subscriber API (transactionType=AS). Confirm line status = ACTIVE.",
+        "Line Status is Not available/ Available but doesn’t match(Hotline) with NSL DB",
+        "Line Status in NSL- SUSPEND"
+      ],
+      "admin": [
+        "User should have NBOP admin access.",
+        "Agent with NBOP Admin role and TMO_Upate UsageLimits menu access",
+        "User must have access to NBOP (Admin logins)",
+        "User must have access to NBOP (Admin and Fraud logins)",
+        "User must have access to NBOP (Admin login)",
+        "User must have access to NBOP (Fraud and Admin logins)"
+      ],
+      "mdn": [
+        "From line summary page user must navigate to line management > Reclaim MDN",
+        "User must have a deactivated old MDN in NSL.",
+        "Active MDN available in UAT environment",
+        "User should have another active MDN in NSL with pending transaction on it (consider this as new MDN).",
+        "User has an Active MDN with 5G IOS ESIM and Plan as CMUNLP and Channel is SSPP",
+        "User must have a deactivated old MDN in NSL with different ESIM and Same Device"
+      ],
+      "activate": [
+        "Activate a TMO line from SM360 on an inactive HSD account",
+        "Activate Line",
+        "Activate Line in TMO",
+        "Activate TMO subscriber via activate-subscriber API",
+        "Line should be activated with TMO Network",
+        "Primary Line should be Activated from SM 360"
+      ],
+      "account": [
+        "Activate a TMO line from SM360 on an inactive HSD account",
+        "User must have an Inactive HSD Account",
+        "Trigger Portin API with Invalid PIN/Invalid Account Or Enter Portin data with invalid data in SM 360",
+        "Agent has MNO_TMO role enabled. Active TMO ESIM Phone line exists on account.",
+        "Both lines are Linked with same account.",
+        "Werable should be palced in SM 360 under same Account"
+      ],
+      "device": [
+        "Software should be 26.4 for the both devices",
+        "User must have a deactivated old MDN in NSL with different ESIM and Same Device",
+        "User must have a deactivated old MDN in NSL with different SIM and Same Device",
+        "IPHONE 14 physical device should be available",
+        "google 5G physical device should be available",
+        "IPHONE 15 physical device should be available"
+      ],
+      "feature": [
+        "Change feature should be done",
+        "Change Feature (CF) is already perfomed when Async Pods are down",
+        "Retrieve device feature is available in NBOP"
+      ],
+      "host": [
+        "User must have active Host line.",
+        "User must have an active Phone line as host.",
+        "User must have wearable added to Host line",
+        "User must have an active Android Host Commercial line.",
+        "User must direclty activate the same werable in TMO and link it to the same Host.",
+        "User directly activated the same watch with new mdn in network with same host."
+      ],
+      "sync": [
+        "User must have access to Line Management ---> Sync Line"
+      ],
+      "plan": [
+        "Change Rate plan should be done",
+        "User has an Active MDN with 5G IOS ESIM and Plan as CMUNLP and Channel is SSPP",
+        "User must have an active Tab line with CTUNLP plancode.",
+        "User must have an active Tab line with CTUNL plancode.",
+        "User must have an active Phone line with CMUNLP plancode.",
+        "User must have an active Phone line with CMUNL plancode."
+      ],
+      "port": [
+        "User logged into NBOP portal with Active TMO line",
+        "Download the latest Hourly Port-In/Out Differential Report.",
+        "NBOP portal accessible with valid credentials",
+        "User should have valid portin data",
+        "Trigger Portin API with Invalid PIN/Invalid Account Or Enter Portin data with invalid data in SM 360",
+        "Line must be in Portin inprogress transaction"
+      ],
+      "wearable": [
+        "Agent has MNO_TMO role enabled. Active TMO ESIM Wearable line exists.",
+        "User must have wearable added to Host line",
+        "Android Wearable should be active",
+        "Wearable should be reset",
+        "Activate one more host line and add companion wearable.",
+        "Add Wearable to active line"
+      ],
+      "hotline": [
+        "Line should be in Hotline state.",
+        "User must have Hotline Activated",
+        "Phone line should be Hotline",
+        "Remove Hotline is already perfomed when Async Pods are down",
+        "Remove Hotline transaction should be Pending, No AsyncService call should received",
+        "Hotline (SH) is already perfomed when Async Pods are down"
+      ],
+      "inquiry": [
+        "Usage inquiry API is available and active line in TMO. Utilize data on the activated line",
+        "Usage inquiry API is available and active line in TMO. Utilize SMS/MMS on the activated line",
+        "Usage inquiry API is available and active line in TMO. Utilize voice on the activated line",
+        "User must have order inquiry api",
+        "Order Inquiry is availble in NBOP",
+        "Portin-inquiry (TMO) API is available."
+      ],
+      "sim": [
+        "User must have a deactivated old MDN in NSL with different SIM and Same Device",
+        "Change SIM (OS) is already perfomed when Async Pods are down",
+        "Change sim and device (DS) is already perfomed when Async Pods are down",
+        "Customer account is SIM‑Lock enabled.",
+        "Use SIM already in use",
+        "Subscription is SIM‑Lock enabled."
+      ],
+      "reset": [
+        "Wearable should be reset",
+        "Agent has MNO_TMO role enabled. TMO Phone line exists. Agent navigates to Reset Network screen."
+      ],
+      "suspend": [
+        "User must have an Suspended line.",
+        "Phone line should be Suspend with TMO",
+        "Restore Suspend is already perfomed when Async Pods are down",
+        "Restore Suspend transaction should be Pending, No AsyncService call should received",
+        "Suspend (SS) is already perfomed when Async Pods are down",
+        "Suspended Line with watch"
+      ],
+      "restore": [
+        "Restore Suspend is already perfomed when Async Pods are down",
+        "Restore Suspend transaction should be Pending, No AsyncService call should received"
+      ],
+      "swap": [
+        "User should have done Swap MDN txn's"
+      ]
+    },
+    "safe_defaults": [
+      "Agent should have MNO_TMO permission",
+      "User must have an active line.",
+      "Line Status : Active",
+      "User must have an active TMO line.",
+      "User should have NBOP admin access.",
+      "From line summary page user must navigate to line management > Reclaim MDN",
+      "Activate a TMO line from SM360 on an inactive HSD account",
+      "Agent with NBOP Admin role and TMO_Upate UsageLimits menu access",
+      "Activate Line",
+      "Activate Line in TMO",
+      "user must navigate to the line summary page.",
+      "Product: Phone/Tablet/Smartwatch"
+    ]
+  },
+  "db_tables": {
+    "canonical": [
+      {
+        "table": "NBOP_MIG_TRANSACTION_HISTORY",
+        "freq": 659
+      },
+      {
+        "table": "NBOP_MIG_LINE_HISTORY",
+        "freq": 538
+      },
+      {
+        "table": "NBOP_MIG_LINE",
+        "freq": 520
+      },
+      {
+        "table": "NBOP_MIG_FEATURE",
+        "freq": 460
+      },
+      {
+        "table": "NBOP_MIG_SIM",
+        "freq": 363
+      },
+      {
+        "table": "NBOP_MIG_DEVICE",
+        "freq": 195
+      },
+      {
+        "table": "NBOP_MIG_LINE_PLAN",
+        "freq": 173
+      },
+      {
+        "table": "NBOP_MIG_ACCOUNT",
+        "freq": 33
+      }
+    ]
+  },
+  "closers": {
+    "century_txn_trace": [
+      {
+        "summary": "User searched the transaction logs in century DB using the root txn id.",
+        "expected": "User is able to search sucessfully the txn logs in century DB.",
+        "freq": 81
+      },
+      {
+        "summary": "User searched the transaction logs in century DB using the root txn id.",
+        "expected": "User is able to search sucessfully the transaction logs in century DB.",
+        "freq": 60
+      },
+      {
+        "summary": "Search transaction logs in century DB using the root txn id.",
+        "expected": "User is able to search sucessfully the txn logs in century DB.",
+        "freq": 18
+      },
+      {
+        "summary": "Verify transaction log entry in century DB using the root transaction ID.",
+        "expected": "Transaction record is sucessfully created in century DB.",
+        "freq": 14
+      }
+    ],
+    "db_table_validation": [
+      {
+        "summary": "Verify following NSL tables for Sync Subscriber transaction - NBOP_MIG_LINE NBOP_MIG_TRANSACTION_HISTORY NBOP_MIG_SIM NBOP_MIG_LINE_HISTORY NBOP_MIG_F",
+        "expected": "NSL should update below tables for Sync Subscriber transaction - NBOP_MIG_LINE NBOP_MIG_TRANSACTION_HISTORY NBOP_MIG_SIM NBOP_MIG_LINE_HISTORY NBOP_MI",
+        "freq": 61
+      },
+      {
+        "summary": "Verify 1) service grouping reports 2) NBOP_MIG_LINE_HISTORY 3) NBOP_MIG_TRANSACTION_HISTORY 4) NBOP_MIG_FEATURE 5) NBOP_MIG_LINE_PLAN",
+        "expected": "Verify 1) service grouping reports 2) NBOP_MIG_LINE_HISTORY 3) NBOP_MIG_TRANSACTION_HISTORY 4) NBOP_MIG_FEATURE 5) NBOP_MIG_LINE_PLAN",
+        "freq": 56
+      },
+      {
+        "summary": "Validate the NBOP table NBOP_MIG_FEATURE",
+        "expected": "Feature record should be updated correctly in NBOP_MIG_FEATURE table",
+        "freq": 22
+      },
+      {
+        "summary": "Validate the NBOP tables NBOP_MIG_LINE NBOP_MIG_LINE_HISTORY NBOP_MIG_LINE_PLAN NBOP_MIG_TRANSACTION_HISTORY",
+        "expected": "All details are saved properly in NBOP tables",
+        "freq": 20
+      }
+    ],
+    "genesis_portal_verify": [
+      {
+        "summary": "Verify line is Active on NBOP line summary and TMO Genesis Portal",
+        "expected": "Line should Active on NBOP line summary and TMO Genesis Portal",
+        "freq": 40
+      },
+      {
+        "summary": "Verify line details on NBOP line summary and TMO Genesis Portal",
+        "expected": "Line details shuuld show on NBOP line summary and TMO Genesis Portal",
+        "freq": 16
+      },
+      {
+        "summary": "Validate the pairing id in TMO Genesis portal",
+        "expected": "The pairing id between hostMDN and the wearable should be displayed",
+        "freq": 11
+      },
+      {
+        "summary": "Verify the new device details in the NBOP Verify the Genesis portal",
+        "expected": "New samsung device details should be displayed in NBOP New device details should be updated in Genesis",
+        "freq": 11
+      }
+    ],
+    "e2e_flow": [
+      {
+        "summary": "Validate the end to end transaction flow as per BAU",
+        "expected": "End to end transaction should be as per expected in century DB",
+        "freq": 59
+      },
+      {
+        "summary": "Validate the end to end transaction flow as per below order:- a.Line Inquiry- Inbound call from Rest NBOP to NSL b.Line Inquiry- Outbound call from NS",
+        "expected": "End to end transaction should be validated successfully as per expected order",
+        "freq": 23
+      },
+      {
+        "summary": "Validate the end to end transaction flow for Activate Subscriber",
+        "expected": "End to end transaction flow should be as per expected in century DB.",
+        "freq": 20
+      },
+      {
+        "summary": "Validate the end to end transaction flow as per below order:- 1.Query eSIM Status - Inbound Call [NBOP->NSL] 2. Query eSIM Status - Outbound Call [NSL",
+        "expected": "End to end transaction flow as per below order got listed in century DB: 1.Query eSIM Status - Inbound Call [NBOP->NSL] 2. Query eSIM Status - Outboun",
+        "freq": 20
+      }
+    ]
+  },
+  "century_pairing_exemplars": [
+    {
+      "summary": "Validate in each transaction request and respose body must contain all required attributes and correct values in century reports",
+      "expected": "Each transaction request and respose body must contain all required attributes and correct values.",
+      "freq": 26
+    },
+    {
+      "summary": "Validate the century report for \"QueryCompanionDevice\" api",
+      "expected": "Validate that NSL returns correct Companion Wearable count and associated wearable information to TMO. Rest Client >> NSL >> NE >> TMO",
+      "freq": 23
+    },
+    {
+      "summary": "Validate the century report",
+      "expected": "All the backend calls should get success",
+      "freq": 13
+    },
+    {
+      "summary": "Validate the century report for \"CheckSubscriberTransferEligibility\" api",
+      "expected": "The below api calls should be success ESIM Transfer Eligibility (TMO >> NSL) et-eligibility-fetch-line-details (NSL >>NSL DB) lockStatus (NSL >> ITMBO",
+      "freq": 12
+    },
+    {
+      "summary": "Validate the century report for searchEnvironment API",
+      "expected": "The below api calls should be success Search Environment Retrieve Device (NSL to NE) Subscribergroup Inquiry (NSL >> NE >> TMO)",
+      "freq": 11
+    }
+  ],
+  "negative_vocab": {
+    "error_fields": [
+      "description",
+      "responseCode",
+      "message",
+      "reason",
+      "errorCode",
+      "errorDetails",
+      "status",
+      "statusCode"
+    ],
+    "error_messages": [
+      "Bad Request",
+      "Invalid MSISDN",
+      "Invalid Sim",
+      "Invalid IMEI",
+      "Invalid SIM",
+      "Invalid MSISDN ",
+      "Invalid JSON request",
+      "SIM or new SIM not found",
+      "MDN is not found"
+    ],
+    "response_codes": [
+      "100",
+      "101"
+    ]
+  },
+  "api_names": [
+    "Syniverse Change IMSI",
+    "Mediation Details",
+    "QueryCompanionDevice",
+    "Subscriber History",
+    "Request Successfully Processed",
+    "Get Line Details",
+    "CheckSubscriberTransferEligibility",
+    "Syniverse Register Subscriber",
+    "Reset Line",
+    "Plan Reset",
+    "Query ESIM Status",
+    "TW Deactivate Subscriber",
+    "Update Call Treatment",
+    "Data Details",
+    "Companion Wearable",
+    "Change SIM",
+    "Sim Transfer Status",
+    "Input IMEI",
+    "Update Wifi Address",
+    "Portin Inquiry",
+    "MNO Service"
+  ]
+}

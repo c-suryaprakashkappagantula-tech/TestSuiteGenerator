@@ -153,11 +153,21 @@ def build_test_suite_v8(
         description=jira.description if jira and hasattr(jira, 'description') else '',
     )
     _broad_cr = _is_cr and is_broad_scope_cr(jira, _coverage_obligations)
-    if _is_cr and not _broad_cr:
+    # A CR that carries real Chalk scenarios is a FEATURE-CR (e.g. MWTGPROV-4482
+    # "CR - New MVNO - Data Limit Values" has 11 scenarios). Delegating it to the
+    # CR path yields generic defect-reproduction boilerplate ("Verify CR fix
+    # applies to Activate workflow") instead of grounded scenario TCs. Keep such
+    # tickets on the grounded V8 planning path.
+    _has_chalk_scenarios = bool(
+        chalk and getattr(chalk, 'scenarios', None) and len(chalk.scenarios) >= 3)
+    if _is_cr and not _broad_cr and not _has_chalk_scenarios:
         log('[V8-ENGINE] *** Narrow CR/Bug fix detected — delegating to CR-specific engine ***')
         return _build_cr_suite_v8(
             jira, chalk, parsed_docs, options, deep_mine_result, log,
             coverage_obligations=_coverage_obligations)
+    if _is_cr and _has_chalk_scenarios and not _broad_cr:
+        log('[V8-ENGINE] *** CR with %d Chalk scenarios — treating as feature-CR, '
+            'retaining grounded V8 path ***' % len(chalk.scenarios))
     if _broad_cr:
         log('[V8-ENGINE] *** Broad CR scope detected — retaining full V8 planning path ***')
 
@@ -549,6 +559,52 @@ def build_test_suite_v8(
     except Exception as _pri_err:
         log('[V8-ENGINE]   WARNING: priority finalization failed: %s — continuing' % str(_pri_err)[:100])
         _record_degraded('priority finalization', _pri_err)
+
+    # ── Combinatorial expansion (opt-in): cross eligible Happy-Path TCs across
+    #    subscriber-state / device / channel / carrier axes so the suite matches
+    #    the breadth of hand-written matrix suites (e.g. MWTGPROV-4482 = 34 TCs).
+    #    OFF unless options['expand_matrix'] is truthy — the default engine stays
+    #    additive. Runs BEFORE enrichment so every variant also gets the closer. ──
+    if options.get('expand_matrix'):
+        try:
+            from .combinatorial_expander import expand_suite as _expand_matrix
+            _exp_ctx = ('%s %s %s' % (
+                getattr(jira, 'summary', '') or '',
+                getattr(jira, 'description', '') or '',
+                getattr(chalk, 'scope', '') or '')).strip()
+            _expand_matrix(suite, feature_text=_exp_ctx, options={
+                'max_expanded_tcs': options.get('max_expanded_tcs', 60),
+                'carrier_sparse': options.get('carrier_sparse', True),
+                'axis_overrides': options.get('axis_overrides'),
+            }, log=log)
+        except Exception as _ex_err:
+            log('[V8-ENGINE]   WARNING: matrix expansion failed: %s — continuing' % str(_ex_err)[:100])
+            _record_degraded('combinatorial expansion', _ex_err)
+
+    # ── QMetry pattern enrichment (human house-style, mined from manual suites) ──
+    # Appends the universal provisioning closer (Century-DB txn trace →
+    # NBOP_MIG_* DB-table validation → Genesis/NBOP UI verify) and grounds any
+    # filler/empty preconditions. Runs LAST so closers survive the cleanup and
+    # negative-injection passes above. Skips negatives and non-provisioning
+    # (CDR/notification) features internally, and is idempotent.
+    try:
+        from .qmetry_pattern_library import enrich_suite as _qmetry_enrich
+        _qmetry_ctx = ('%s %s' % (getattr(jira, 'summary', '') or '', feature_id)).strip()
+        _qmetry_enrich(suite, feature_context=_qmetry_ctx,
+                       add_closers=True, fix_preconditions=True,
+                       pair_century=False, log=log)
+    except Exception as _ql_err:
+        log('[V8-ENGINE]   WARNING: QMetry pattern enrichment failed: %s — continuing' % str(_ql_err)[:100])
+        _record_degraded('QMetry pattern enrichment', _ql_err)
+
+    # ── API endpoint grounding: cite real NSL/NBO endpoints + HTTP method on
+    #    ungrounded 'Trigger <op> API' steps, using TMO_API_Chalk specs. ──
+    try:
+        from .api_step_grounder import ground_api_steps as _ground_api
+        _ground_api(suite, nmno_result=nmno_result, log=log)
+    except Exception as _ag_err:
+        log('[V8-ENGINE]   WARNING: API endpoint grounding failed: %s — continuing' % str(_ag_err)[:100])
+        _record_degraded('API endpoint grounding', _ag_err)
 
     try:
         from .coverage_obligations import attach_coverage_audit

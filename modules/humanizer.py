@@ -583,9 +583,21 @@ def humanize_suite(test_cases, log=print, feature_priority=''):
         if tc.category and tc.category.lower() in _cat_final:
             tc.category = _cat_final[tc.category.lower()]
             _final_fixes += 1
-        if not tc.preconditions or len(tc.preconditions.strip()) < 5:
-            tc.preconditions = '1.\tSystem in ready state\n2.\tTest data prepared'
-            _final_fixes += 1
+        # Replace filler/empty preconditions with grounded ones mined from the
+        # human QMetry corpus (falls back to the old filler only if the library
+        # is unavailable).
+        try:
+            from .qmetry_pattern_library import (
+                is_filler_precondition as _is_filler,
+                grounded_precondition as _grounded_pre,
+            )
+            if _is_filler(tc.preconditions):
+                tc.preconditions = _grounded_pre(tc.summary or '', n=2)
+                _final_fixes += 1
+        except Exception:
+            if not tc.preconditions or len(tc.preconditions.strip()) < 5:
+                tc.preconditions = '1.\tSystem in ready state\n2.\tTest data prepared'
+                _final_fixes += 1
     if _final_fixes:
         log('[HUMANIZE] Final sweep: %d fixes (dots/categories/preconditions)' % _final_fixes)
 

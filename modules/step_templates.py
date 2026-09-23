@@ -1451,11 +1451,22 @@ def _ui_flow_steps(title, validation):
     import re as _re_ui
     _action = _re_ui.sub(r'^(?:Validate|Verify|Check|Ensure|UI Verify\s*[-:]?\s*)', '', title, flags=_re_ui.IGNORECASE).strip()
     _action = _re_ui.sub(r'New\s+MVNO\s*[-:—]\s*', '', _action, flags=_re_ui.IGNORECASE).strip()
+    # Cut any trailing validation phrase so only the operation NAME remains.
+    _action = _re_ui.split(
+        r'\s+(?:menu\s+is|is|are|should|displays?|loads?|reflects?|must)\b',
+        _action, maxsplit=1)[0].strip()
     _action = strip_dangling_tail(truncate_at_word(_action, 80)) if _action else 'the feature'
+    # Resolve a real NBOP navigation path (crawl if present, else the hand-
+    # maintained feature→page map) instead of a generic 'menu for: X'.
+    try:
+        from .nbop_ui_knowledge import get_navigation_path as _get_nav
+        _nav = _get_nav(_action)
+    except Exception:
+        _nav = 'NBOP → Mobile Service Management'
     return [
         ('Launch NBOP portal and search subscriber by MDN',
          'Subscriber profile loaded with header cards showing Account, MDN, IMEI, ICCID'),
-        ('Navigate to the menu for: %s' % truncate_at_word(_action, 70),
+        ('Navigate: %s' % _nav,
          'Screen loads with all expected fields and controls'),
         ('Perform %s via NBOP portal' % truncate_at_word(_action, 70),
          'Operation submitted successfully — confirmation displayed'),

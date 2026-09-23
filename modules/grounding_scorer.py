@@ -139,7 +139,17 @@ def score_tc(tc) -> int:
     elif len(steps) == 2:
         score += 5
 
-    return min(score, 100)
+    # ── Penalty: expected-result copy-pasted across >= 3 steps (a defect where
+    #    each step should assert its own outcome). Flag it for the UI too. ──
+    try:
+        from .qmetry_pattern_library import duplicate_expected_violation
+        if duplicate_expected_violation(steps, min_repeat=3):
+            score -= 10
+            tc._dup_expected = True
+    except Exception:
+        pass
+
+    return max(0, min(score, 100))
 
 
 def score_suite(test_cases: List) -> List[int]:

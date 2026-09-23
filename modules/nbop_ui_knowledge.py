@@ -234,6 +234,23 @@ def get_navigation_path(feature_name: str, description: str = '') -> str:
         if item.lower().replace('/', ' ') in ctx.replace('/', ' '):
             return f'NBOP → Subscriber Profile → ≡ Menu → {item}'
 
+    # ── Hand-maintained fallback: feature→page map ──
+    # Used when the live crawl (nbop_ui_map.json) is absent, so navigation still
+    # resolves to a real page (e.g. 'Manage Line → Change SIM') instead of the
+    # bare default. Longest phrase first for the most specific match.
+    f2p = _feature_to_page()
+    for phrase in sorted(f2p, key=len, reverse=True):
+        if phrase in ctx:
+            page = (f2p[phrase] or '').strip()
+            if not page:
+                continue
+            low = page.lower()
+            if low.startswith('tile:'):
+                return 'NBOP → Mobile Service Management → %s' % page.split(':', 1)[1].strip()
+            if '→' in page or 'manage line' in low or 'menu' in low:
+                return 'NBOP → Subscriber Profile → ≡ Menu → %s' % page
+            return 'NBOP → Mobile Service Management → %s' % page
+
     # Default
     return 'NBOP → Mobile Service Management'
 
@@ -1074,10 +1091,16 @@ def generate_ui_steps(feature_name: str, description: str = '',
         import re as _re_vis
         _target = _re_vis.sub(r'^(?:Verify|Validate|Check|UI Verify\s*[-:]?\s*)', '', scenario_title, flags=_re_vis.IGNORECASE).strip()
         _target = _re_vis.sub(r'New\s+MVNO\s*[-:—]\s*', '', _target, flags=_re_vis.IGNORECASE).strip()
+        # Cut any trailing validation phrase so only the menu/feature NAME remains
+        # (prevents 'Navigate to the menu for: X menu is visible and accessible').
+        _target = _re_vis.split(
+            r'\s+(?:menu\s+is|is|are|should|displays?|loads?|reflects?|must)\b',
+            _target, maxsplit=1)[0].strip()
         _target = strip_dangling_tail(truncate_at_word(_target, 80)) if _target else 'the feature'
+        _nav = get_navigation_path(_target)
         return [
             ('Launch NBOP and search subscriber by MDN', 'Subscriber profile loaded'),
-            ('Navigate to the menu for: %s' % truncate_at_word(_target, 70), 'Screen loads with expected fields'),
+            ('Navigate: %s' % _nav, 'Screen loads with the expected fields and controls'),
             ('Verify %s is visible, correctly labeled, and accessible' % truncate_at_word(_target, 70),
              'Element is present, enabled, and interactive'),
         ]

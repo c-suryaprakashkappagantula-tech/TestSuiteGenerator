@@ -727,6 +727,19 @@ with left:
         inc_e2e = st.checkbox('E2E scenarios', value=True)
         inc_edge = st.checkbox('Edge Cases', value=True)
         headed = st.checkbox('Show Browser (debug only)', value=False, help='Keep unchecked for headless mode')
+    # ── Matrix expansion: cross Happy-Path TCs across subscriber-state / device /
+    #    channel / carrier axes to match hand-written matrix suites (e.g. 4482). ──
+    expand_matrix = st.checkbox(
+        'Full matrix expansion (state × device × channel)', value=False,
+        help='Cross eligible Happy-Path TCs across the subscriber-state (YL/YD/YP/PY), '
+             'device, channel and carrier axes so the suite matches the breadth of '
+             'hand-written matrix suites. Off = additive (one TC per scenario, default).')
+    max_expanded = st.slider('Max TCs when expanding', 30, 200, 60, step=10,
+                             help='Upper bound; axes are dropped (carrier→channel→device) '
+                                  'to stay within this cap, keeping subscriber-state last. '
+                                  '~60 ≈ manual count (state coverage); 80+ adds the device '
+                                  'axis for fuller state×device coverage (more TCs).') \
+        if expand_matrix else 60
     st.markdown("</div>", unsafe_allow_html=True)
 
     # ── Step 5: Upload ──
@@ -1899,6 +1912,8 @@ if run_btn:
                         'include_attachments': inc_attachments,
                         'custom_instructions': custom_instructions,
                         'engine_version': '8',
+                        'expand_matrix': expand_matrix,
+                        'max_expanded_tcs': max_expanded,
                     }
 
                     engine_result = pipe.run('Engine_V8_%s' % feature_id,
