@@ -16,6 +16,21 @@ DB_PATH = ROOT / 'tsg_cache.db'
 STALE_HOURS = 24  # data older than this shows a warning
 
 
+def _mirror_pi_pages_to_registry(pi_list):
+    """Publish the PI pages into the shared canonical registry (shared/pi_registry.db)
+    so TSE / MDA / other dashboards see the same list. Fail-safe: any problem here is
+    swallowed - the local tsg_cache.db write is the source of truth for TSG itself."""
+    try:
+        import sys as _sys
+        _shared_parent = str(ROOT.parent)
+        if _shared_parent not in _sys.path:
+            _sys.path.insert(0, _shared_parent)
+        from shared import pi_registry as _pr
+        _pr.upsert_pi_pages(list(pi_list or []))
+    except Exception:
+        pass
+
+
 def _conn():
     """Get a connection with WAL mode for concurrent reads."""
     c = sqlite3.connect(str(DB_PATH), timeout=10)
@@ -297,13 +312,14 @@ def _run_migrations(c, current_version: int):
 # ================================================================
 
 def save_pi_pages(pi_list: List[Tuple[str, str]]):
-    """Save PI list: [(label, url), ...]"""
+    """Save PI list: [(label, url), ...]. Also mirrors into the shared registry."""
     c = _conn()
     now = datetime.now().isoformat()
     for label, url in pi_list:
         c.execute('INSERT OR REPLACE INTO pi_pages (label, url, last_fetched) VALUES (?,?,?)',
                   (label, url, now))
     c.commit(); c.close()
+    _mirror_pi_pages_to_registry(pi_list)
 
 
 def load_pi_pages() -> List[Tuple[str, str]]:

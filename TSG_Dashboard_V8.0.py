@@ -127,7 +127,22 @@ st.markdown("""<style>
 CHALK_PI_BASE = 'https://chalk.charter.com/spaces/MDA/pages'
 
 def _load_pi_pages():
-    """Load PI pages from config/chalk_pi_pages.json (editable without code changes)."""
+    """Load PI pages. Precedence: shared canonical registry (shared/pi_registry.db,
+    written by any dashboard's Sync-from-Chalk) -> config/chalk_pi_pages.json ->
+    hardcoded. So a PI added anywhere shows up here automatically."""
+    # 1. Shared canonical registry (single source of truth across dashboards).
+    try:
+        import sys as _sys
+        _shared_parent = str(Path(__file__).parent.parent)
+        if _shared_parent not in _sys.path:
+            _sys.path.insert(0, _shared_parent)
+        from shared import pi_registry as _pr
+        _pairs = _pr.get_pi_pages()
+        if _pairs:
+            return _pairs
+    except Exception:
+        pass
+    # 2. Local JSON config.
     config_path = Path(__file__).parent / 'config' / 'chalk_pi_pages.json'
     try:
         import json
