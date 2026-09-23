@@ -1377,6 +1377,13 @@ def build_test_suite(jira, chalk, parsed_docs, options, log=print, deep_mine_res
 
     for i, tc in enumerate(suite.test_cases, 1):
         tc.sno = str(i)
+        # Keep the TCnnn_ prefix baked into the summary in sync with the display
+        # number. Without this the embedded id (set at construction time, before
+        # dedup/visibility-sort reordering) drifts from sno and can collide.
+        _m_pref = re.match(r'^TC(\d+)_', tc.summary or '')
+        if _m_pref:
+            tc.summary = re.sub(r'^TC\d+_', 'TC%0*d_' % (len(_m_pref.group(1)), i),
+                                tc.summary, count=1)
         for j, step in enumerate(tc.steps, 1):
             step.step_num = j
 
@@ -2393,8 +2400,12 @@ def _clean_tc_title(raw_title, feature_id):
     # Also strip leftover partial tags
     t = _re.sub(r'^[a-z]?(?:[A-Z]{2,10})\]?\s*:?\s*', '', t)
 
-    # Strip trailing tag clusters: "activation INTG NBOP" → "activation"
-    t = _re.sub(r'\s+(?:[A-Z]{2,10})(?:\s+[A-Z]{2,10})*\s*$', '', t)
+    # Strip trailing tag clusters made of KNOWN channel/system tags only, e.g.
+    # "activation INTG NBOP" → "activation". A blanket [A-Z]{2,10} match ate
+    # legitimate trailing words (".. hotline SLO is applied to TMO" → ".. to").
+    _KNOWN_TRAILING_TAGS = r'(?:INTG|NBOP|ITMBO|NENM|NSLNM|MVNO|QMETRY|JIRA|CHALK)'
+    t = _re.sub(r'\s+' + _KNOWN_TRAILING_TAGS +
+                r'(?:\s+' + _KNOWN_TRAILING_TAGS + r')*\s*$', '', t)
 
     # Strip "New MVNO -" or "New MVNO:" prefix
     t = _re.sub(r'^New\s+MVNO\s*[-:]\s*', '', t, flags=_re.IGNORECASE)
@@ -2482,7 +2493,7 @@ def _clean_tc_title(raw_title, feature_id):
                      'port', 'swap', 'activate', 'deactivate', 'change', 'cancel',
                      'schema', 'mdn', 'duplicate', 'negative', 'rollback', 'error',
                      'user', 'no ', 'if ', 'data', 'voice', 'sms', 'usage', 'batch',
-                     'line ', 'generate', 'inquiry']
+                     'generate', 'inquiry']
     if not any(t_low.startswith(v) for v in ACTION_STARTS) and len(t) > 10:
         t = 'Validate ' + t
 
