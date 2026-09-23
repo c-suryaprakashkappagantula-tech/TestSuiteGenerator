@@ -712,8 +712,11 @@ def block_generate_output(suite, feature_id, pi, strategy, jira=None, chalk=None
                         if any((tc.summary or '')[:120].startswith(ns[:60]) for ns in new_summaries):
                             tc._is_new = True
     except Exception as _diff_err:
-        log('[DIFF] Auto-diff skipped: %s' % str(_diff_err)[:80])
-        _record_degraded('auto-diff vs previous suite', _diff_err)
+        # Auto-diff is an optional convenience (mark NEW-since-last-run TCs), NOT part
+        # of suite correctness. If there is no comparable previous suite, or the diff
+        # engine is unavailable, skip quietly - do NOT flag the run as DEGRADED, which
+        # falsely warns the user their suite may be incomplete.
+        log('[DIFF] Auto-diff skipped (optional, non-fatal): %s' % str(_diff_err)[:80])
 
     # Defensive: ensure groups dict is stable before Excel generation
     if hasattr(suite, 'groups') and suite.groups:
