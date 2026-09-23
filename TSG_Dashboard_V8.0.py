@@ -1498,6 +1498,7 @@ if ss.get('_sync_running'):
             _sync_msg(_done_msg)
             _sync_header.markdown("<div class='cli-header'>>> Sync complete! (REST fast-path)</div>", unsafe_allow_html=True)
             ss['logs'] = _sync_lines
+            ss['_sync_completed'] = True
 
         else:
             # ── BROWSER FALLBACK SYNC ──
