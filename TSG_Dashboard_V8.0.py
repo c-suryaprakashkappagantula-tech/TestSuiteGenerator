@@ -1567,6 +1567,7 @@ if ss.get('_sync_running'):
             _sync_msg(_done_msg)
             _sync_header.markdown("<div class='cli-header'>>> Sync complete!</div>", unsafe_allow_html=True)
             ss['logs'] = _sync_lines
+            ss['_sync_completed'] = True
 
     except Exception as e:
         _sync_msg('ERROR: %s' % str(e)[:200])
@@ -1579,6 +1580,11 @@ if ss.get('_sync_running'):
                     if _obj_name == 'pw': _obj.stop()
                     else: _obj.close()
                 except: pass
+
+# ---- clear the Chalk 'Sync in progress' gate after completion (outside try) ----
+if ss.pop('_sync_completed', False):
+    import time as _t_cr; _t_cr.sleep(0.4)
+    st.rerun()
 
 # ================================================================
 # JIRA SYNC EXECUTION
@@ -1706,6 +1712,7 @@ if ss.get('_jira_sync_running'):
         _jsync_msg('JIRA SYNC COMPLETE (%s): %d/%d succeeded | %d failed' % (_method, _jira_ok, _jira_total, _jira_fail))
         _jsync_header.markdown("<div class='cli-header'>>> Jira sync complete! %d/%d features (%s)</div>" % (_jira_ok, _jira_total, _method), unsafe_allow_html=True)
         ss['logs'] = _jsync_lines
+        ss['_jira_sync_completed'] = True
 
     except Exception as e:
         _jsync_msg('ERROR: %s' % str(e)[:200])
@@ -1718,6 +1725,11 @@ if ss.get('_jira_sync_running'):
                     if _obj_name == 'pw': _obj.stop()
                     else: _obj.close()
                 except: pass
+
+# ---- clear the Jira 'Sync in progress' gate after completion (outside try) ----
+if ss.pop('_jira_sync_completed', False):
+    import time as _t_jcr; _t_jcr.sleep(0.4)
+    st.rerun()
 
 # ================================================================
 # MAIN EXECUTION — V8 Data-First Engine
