@@ -560,15 +560,27 @@ def _parse_feature_section(lines, data: ChalkData, feature_id: str, log=print):
     # e.g., TS_MWTGPROV4379_1 instead of TS_MWTGPROV-4379_1
     _fid_flex = fid.replace('-', '-?')
     ts_pattern = re.compile(rf'TS_{_fid_flex}_(\d+)', re.IGNORECASE)
+    # Generic TS-block id: Chalk pages often key test blocks off a LINKED story
+    # id (e.g. TS_NSLNM770_2 on a MWTGPROV feature). Recognize any TS_<TOKEN>_N so
+    # such pages use the block grouper instead of falling into per-line freeform.
+    ts_generic_pattern = re.compile(r'TS_[A-Z0-9]+_(\d+)', re.IGNORECASE)
     # Format B: lines starting with a number then tab
     numbered_row_pat = re.compile(r'^(\d+)\t(.+)', re.DOTALL)
 
     # First pass: detect which format this feature uses
     has_ts_format = any(ts_pattern.search(ln) for ln in lines)
+    has_generic_ts = any(ts_generic_pattern.search(ln) for ln in lines)
     has_numbered_format = any(numbered_row_pat.match(ln) for ln in lines)
 
     if has_ts_format:
         _parse_ts_format(lines, data, fid, ts_pattern, log)
+    elif has_generic_ts:
+        if log:
+            try:
+                log('[CHALK] TS-block format via linked-story id (generic TS_<id>_N) — grouping blocks')
+            except Exception:
+                pass
+        _parse_ts_format(lines, data, fid, ts_generic_pattern, log)
     elif has_numbered_format:
         _parse_numbered_format(lines, data, fid, numbered_row_pat, log)
     else:
@@ -934,7 +946,11 @@ def _parse_ts_format(lines, data, fid, ts_pattern, log=print):
             found_first_scenario = True
             if current_scenario:
                 data.scenarios.append(current_scenario)
-            current_scenario = ChalkScenario(scenario_id=f'TS_{fid}_{m.group(1)}')
+            # Use the ACTUAL matched TS id (m.group(0)) so linked-story ids like
+            # TS_NSLNM770_2 are preserved; fall back to the feature-scoped id only
+            # if the match somehow has no full text.
+            _matched_ts = (m.group(0) or '').strip() or f'TS_{fid}_{m.group(1)}'
+            current_scenario = ChalkScenario(scenario_id=_matched_ts)
             # Normalize: MWTGPROV4379 → MWTGPROV-4379 (Chalk pages sometimes omit the hyphen)
             current_scenario.scenario_id = re.sub(r'(MWTG(?:PROV|MED|NBOP))(\d)', r'\1-\2', current_scenario.scenario_id)
             parts = ln.split('\t')
