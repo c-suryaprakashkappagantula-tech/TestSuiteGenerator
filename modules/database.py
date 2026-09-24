@@ -535,6 +535,18 @@ def is_junk_chalk_scenario(title: str, feature_id: str = '') -> bool:
     t = _clean_chalk_text(title)
     low = t.lower()
     fid = str(feature_id or '').strip().lower()
+    # Table/section furniture that leaks in when a TS-block page is parsed row-wise:
+    # header cells ('Scenario #', 'Test Scenario', 'Validations'/'Validation'), and a
+    # bare test-id token with no title ('TS_NSLNM770_1', or 'TS_..._7 .1' style stubs).
+    _low_stripped = low.strip().rstrip('.').strip()
+    if _low_stripped in ('scenario #', 'scenario#', 'test scenario', 'test scenarios',
+                         'validation', 'validations', 'sno', 's.no', 'scenario',
+                         'expected outcome', 'pre-req', 'pre-requisite'):
+        return True
+    # A line that is ONLY a TS_<token>_N id (optionally with a tiny '.N' suffix) and
+    # no real scenario text — a fragment, not a test.
+    if re.match(r'^TS_[A-Z0-9]+_\d+\s*(?:\.\d+)?$', t.strip(), re.IGNORECASE):
+        return True
     return bool(
         # Pure Jira/feature ID reference, e.g. 'MWTGPROV-3948'
         re.match(r'^[A-Z]+-\d+$', t.strip()) or
