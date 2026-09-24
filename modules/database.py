@@ -563,12 +563,95 @@ def is_junk_chalk_scenario(title: str, feature_id: str = '') -> bool:
     )
 
 
+_ACTION_TITLE_RE = re.compile(
+    r'^(verify|validate|confirm|ensure|check|test|scenario\s*\d|ts[_\s])',
+    re.IGNORECASE)
+# Lines that are clearly CONTINUATION detail of a scenario, not a scenario of their own.
+_CONTINUATION_RE = re.compile(
+    r'^\s*(pre-?req|pre-?condition|step\s*\d|expected(\s+outcome)?|'
+    r'err\d+\b|xxxx\b|from\s+(ne|itmbo)|'
+    r'\d+[\)\.]|[a-z]\)|["{}\[\]]|"[a-z]+"\s*:|'
+    r'variation|derivation|cdr\s+input)',
+    re.IGNORECASE)
+
+
+def _looks_like_scenario_title(title: str) -> bool:
+    """True if a line reads like a real test-scenario TITLE (a parent), not a
+    continuation detail line (pre-req / step / expected / error-code / JSON fragment)."""
+    t = (title or '').strip()
+    if len(t) < 15:
+        return False
+    if _CONTINUATION_RE.match(t):
+        return False
+    # A real scenario title usually starts with an action verb or a TS id, and is a
+    # full sentence (has spaces, not a bare token / JSON blob).
+    if _ACTION_TITLE_RE.match(t) and ' ' in t and t.count('"') < 4 and '{' not in t:
+        return True
+    return False
+
+
+def _collapse_fragmented_scenarios(scenarios, feature_id='', pi_label='', log=print):
+    """UNIVERSAL, format-agnostic de-fragmentation.
+
+    Some Chalk pages (tables with multi-line cells, nested bullets, JSON payloads) get
+    flattened by the crawler into ONE 'scenario' per raw line - producing dozens/hundreds
+    of step-less fragments (e.g. MWTGPROV-4167=172, 3813=390). The reliable signal is that
+    virtually every 'scenario' has NO steps.
+
+    This regroups the flattened lines: each line that reads like a real scenario TITLE
+    becomes a parent; the continuation lines that follow (pre-req / step N / expected /
+    error-code bullets / JSON fragments) fold into that parent's steps. Healthy suites
+    (steps already attached, or small counts) are returned UNCHANGED.
+
+    Returns (possibly-collapsed) list. Never raises.
+    """
+    try:
+        n = len(scenarios)
+        if n < 25:
+            return scenarios  # small suite - trust the parse
+        zero_step = sum(1 for sc in scenarios if not (getattr(sc, 'steps', None) or []))
+        if n == 0 or (zero_step / n) < 0.7:
+            return scenarios  # steps present - already well-structured
+        # Fragmented: regroup.
+        collapsed = []
+        current = None
+        orphans = 0
+        for sc in scenarios:
+            title = (getattr(sc, 'title', '') or '').strip()
+            if _looks_like_scenario_title(title):
+                current = sc
+                collapsed.append(sc)
+            else:
+                # continuation / detail line -> attach to the current parent's steps
+                if current is not None and title:
+                    try:
+                        current.steps = list(getattr(current, 'steps', []) or []) + [title]
+                    except Exception:
+                        pass
+                elif title:
+                    orphans += 1  # detail before any parent - drop (page furniture)
+        if not collapsed:
+            # Nothing matched a title shape - don't destroy the suite; keep original.
+            return scenarios
+        try:
+            log('[CHALK-COLLAPSE] %s/%s: regrouped %d fragmented lines -> %d scenarios '
+                '(%d detail lines folded, %d pre-parent orphans dropped)'
+                % (feature_id, pi_label, n, len(collapsed),
+                   n - len(collapsed) - orphans, orphans))
+        except Exception:
+            pass
+        return collapsed
+    except Exception:
+        return scenarios
+
+
 def load_chalk_as_object(feature_id: str, pi_label: str):
     """Load cached Chalk data and reconstruct as ChalkData object. Returns None if not cached.
 
-    Scenarios are sanitised on the way out: page furniture is dropped and mis-decoded
-    characters are normalised. Doing it here fixes ALREADY-CACHED rows without a re-crawl,
-    and covers every engine, since they all load Chalk through this function.
+    Scenarios are sanitised on the way out: page furniture is dropped, mis-decoded
+    characters are normalised, and (universally) fragmented step-less scenario lists are
+    regrouped into real scenarios. Doing it here fixes ALREADY-CACHED rows without a
+    re-crawl, and covers every engine, since they all load Chalk through this function.
     """
     from .chalk_parser import ChalkData, ChalkScenario
     raw = load_chalk(feature_id, pi_label)
@@ -609,6 +692,11 @@ def load_chalk_as_object(feature_id: str, pi_label: str):
         if _dropped:
             print('[CHALK-CACHE] %s/%s: dropped %d non-scenario line(s): %s'
                   % (feature_id, pi_label, len(_dropped), '; '.join(_dropped)))
+        # Universal de-fragmentation: regroup flattened step-less scenario lists so a
+        # richly-formatted Chalk page can't explode into dozens/hundreds of TCs. No-op
+        # for well-structured suites. Applies to EVERY feature/PI, every engine.
+        data.scenarios = _collapse_fragmented_scenarios(
+            data.scenarios, feature_id, pi_label, log=print)
     except Exception as _sc_err:
         print('[CHALK-CACHE] %s/%s: scenario parse failed: %s'
               % (feature_id, pi_label, str(_sc_err)[:120]))
