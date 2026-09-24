@@ -645,6 +645,191 @@ def _collapse_fragmented_scenarios(scenarios, feature_id='', pi_label='', log=pr
         return scenarios
 
 
+
+# Hard ceiling: a single feature should never yield more than this many scenario
+# groups. If grouping ever exceeds it, we log and further-collapse so the suite can
+# never explode into 100+ garbage TCs again.
+_MAX_AREA_SCENARIOS = 30
+
+_AREA_VERB_RE = re.compile(
+    r'^(verify|validate|confirm|ensure|check|test)\b', re.IGNORECASE)
+_AREA_HDR_RE = re.compile(
+    r'^(?:\d+\)|[a-z]\)|[IVX]+\.)?\s*[A-Z][^:]{2,45}:$')
+_AREA_TSFAM_RE = re.compile(r'^TS[_\s]?([A-Z]+\d+|[A-Z]+)', re.IGNORECASE)
+_AREA_SCN_JUNK = {'scenario #', 'scenario#', 's.no', 'sno', 'scenario', 'test scenario',
+                  'test area', 'validations', 'validation', 'category', 'feature id',
+                  'scenarios', 'variations', 'expected outcome'}
+
+
+def _area_norm(s):
+    return re.sub(r'\s+', ' ', str(s or '')).strip()
+
+
+def _area_row_is_real(title):
+    t = _area_norm(title)
+    if len(t) < 10 or t.lower() in _AREA_SCN_JUNK:
+        return False
+    if t[:1] in ('"', '{') or t.lower().startswith(
+            ('summary:', 'positive scenario', 'negative scenario', 'edge scenario')):
+        return False
+    return bool(_AREA_VERB_RE.match(t) or re.match(r'^TS[_\s]?[A-Z0-9]+', t, re.IGNORECASE))
+
+
+def _extract_area_scenarios_from_tables(tables, feature_id=''):
+    """Group CLEAN scenario-table rows into TEST AREAS (one area = one scenario, its
+    detail 'Verify...' rows become steps). Returns list[dict] or [] if no clean table.
+    Skips the 'Feature ID'-led merged summary table and 1-cell JSON fragment rows."""
+    from collections import OrderedDict, Counter
+    areas = OrderedDict()
+    try:
+        for tbl in (tables or []):
+            if not isinstance(tbl, list) or len(tbl) < 2:
+                continue
+            hdr = [_area_norm(c).lower() for c in (tbl[0] if isinstance(tbl[0], list) else [tbl[0]])]
+            if 'feature id' in hdr:
+                continue  # merged summary table = poison, skip
+            scn = None
+            for i, c in enumerate(hdr):
+                if c == 'test scenario' or c == 'scenarios':
+                    scn = i
+                    break
+            if scn is None:
+                for i, c in enumerate(hdr):
+                    if 'scenario' in c and '#' not in c:
+                        scn = i
+                        break
+            if scn is None:
+                continue
+            val = next((i for i, c in enumerate(hdr) if 'validation' in c or 'expected' in c), None)
+            cat = next((i for i, c in enumerate(hdr) if c == 'category'), None)
+            idc = next((i for i, c in enumerate(hdr) if c in ('scenario #', 'scenario#', 's.no', 'sno')), None)
+            data = [r for r in tbl[1:] if isinstance(r, list) and len(r) > scn]
+            real = [r for r in data if _area_row_is_real(r[scn])]
+            if len(real) < max(1, 0.5 * len(data)):
+                continue  # not a clean scenario table
+            fams = []
+            for r in real:
+                tsid = _area_norm(r[idc]) if idc is not None and len(r) > idc else ''
+                m = _AREA_TSFAM_RE.match(tsid) or _AREA_TSFAM_RE.match(_area_norm(r[scn]))
+                if m:
+                    fams.append(m.group(1).upper())
+            if fams:
+                label = 'TS_' + Counter(fams).most_common(1)[0][0]
+            elif cat is not None:
+                cats = [_area_norm(r[cat]) for r in real if len(r) > cat and _area_norm(r[cat])]
+                _catlabel = Counter(cats).most_common(1)[0][0] if cats else ('Area %d' % (len(areas) + 1))
+                # A bare category ('Happy Path Workflow') reads as generic and gets pruned
+                # by the downstream grounding gate. Anchor it to the first real scenario so
+                # it survives and stays traceable.
+                _first = _area_norm(real[0][scn]) if real else ''
+                label = ('%s - %s' % (_catlabel, _first[:50])) if _first else _catlabel
+            else:
+                label = 'Area: ' + _area_norm(real[0][scn])[:40]
+            bucket = areas.setdefault(label, {'titles': [], 'validations': []})
+            for r in real:
+                bucket['titles'].append(_area_norm(r[scn]))
+                if val is not None and len(r) > val:
+                    bucket['validations'].append(_area_norm(r[val]))
+    except Exception:
+        return []
+    out = []
+    for label, b in areas.items():
+        out.append({'title': label, 'row_titles': b['titles'], 'validations': b['validations']})
+    return out
+
+
+def _area_group_raw_scenarios(scenarios, feature_id=''):
+    """Fallback when no clean table: group the (already de-fragmented) scenario TITLES
+    under section-header 'area' markers found among them. Returns list[dict] or []."""
+    from collections import OrderedDict
+    try:
+        areas = OrderedDict()
+        cur = None
+        for sc in scenarios:
+            t = _area_norm(getattr(sc, 'title', '') or '')
+            if not t:
+                continue
+            if _AREA_HDR_RE.match(t) and not _AREA_VERB_RE.match(t):
+                cur = t
+                areas.setdefault(cur, [])
+            elif _AREA_VERB_RE.match(t) and len(t) > 12:
+                if cur is None:
+                    cur = 'General'
+                    areas.setdefault(cur, [])
+                areas[cur].append(t)
+        # drop empty areas
+        out = [{'title': k, 'row_titles': v, 'validations': []} for k, v in areas.items() if v]
+        return out
+    except Exception:
+        return []
+
+
+def _area_group_raw_titles(titles, feature_id=''):
+    """Group a flat list of raw scenario TITLE strings under their section-header
+    'area' markers. Runs on the RAW titles (headers still present, before junk filter).
+    Header = short line ending ':' that is not itself a 'Verify...' scenario. Returns
+    list[dict] {title, row_titles} or [] if it can't find a useful grouping."""
+    from collections import OrderedDict
+    try:
+        areas = OrderedDict()
+        cur = None
+        for raw_t in titles:
+            t = _area_norm(raw_t)
+            if not t:
+                continue
+            is_hdr = bool(_AREA_HDR_RE.match(t)) and not _AREA_VERB_RE.match(t)
+            if is_hdr:
+                # normalise the header label (strip leading 1)/a)/roman and trailing colon)
+                lbl = re.sub(r'^(?:\d+\)|[a-z]\)|[IVX]+\.)\s*', '', t).rstrip(':').strip()
+                if len(lbl) < 3:
+                    lbl = t.rstrip(':').strip()
+                cur = lbl
+                areas.setdefault(cur, [])
+            elif _AREA_VERB_RE.match(t) and len(t) > 12:
+                if cur is None:
+                    cur = 'General'
+                    areas.setdefault(cur, [])
+                areas[cur].append(t)
+        out = [{'title': k, 'row_titles': v, 'validations': []} for k, v in areas.items() if v]
+        # Only trust this grouping if it found MULTIPLE real areas (else let collapse handle it)
+        if len([a for a in out if a['row_titles']]) >= 2:
+            return out
+        return []
+    except Exception:
+        return []
+
+
+def _areas_to_scenarios(areas, feature_id, pi_label):
+    """Turn area dicts into ChalkScenario objects: title = area label, steps = the
+    detail 'Verify...' row titles. Applies the hard ceiling."""
+    from .chalk_parser import ChalkScenario
+    scs = []
+    for a in areas[:_MAX_AREA_SCENARIOS]:
+        title = a.get('title', '') or 'Scenario'
+        rows = a.get('row_titles', []) or []
+        vals = a.get('validations', []) or []
+        # Build a readable, gate-surviving area title. Every area becomes a proper
+        # 'Verify ...' scenario so the downstream grounding gate does not drop short
+        # noun-phrase area labels (e.g. 'ESIM Activation', 'FROM NE').
+        disp = title
+        if title.startswith('TS_') and rows:
+            disp = 'Verify %s scenarios (%d)' % (title, len(rows))
+        elif not re.match(r'^(verify|validate|confirm|ensure|check|test)\b', title, re.IGNORECASE):
+            _area_label = title[6:].strip() if title.lower().startswith('area:') else title
+            disp = 'Verify %s (%d scenarios)' % (_area_label, len(rows)) if rows else 'Verify %s' % _area_label
+        scs.append(ChalkScenario(
+            scenario_id=title if title.startswith('TS_') else '',
+            title=disp,
+            steps=list(rows),
+            validation=' | '.join(v for v in vals[:5] if v),
+            category='',
+            owner_feature_id=feature_id,
+            owner_pi=pi_label,
+            relationship='owned',
+        ))
+    return scs
+
+
 def load_chalk_as_object(feature_id: str, pi_label: str):
     """Load cached Chalk data and reconstruct as ChalkData object. Returns None if not cached.
 
@@ -670,8 +855,10 @@ def load_chalk_as_object(feature_id: str, pi_label: str):
         data.tables = []
     try:
         _dropped = []
+        _raw_titles = []  # captured BEFORE junk filter, so section headers survive for area grouping
         for s in json.loads(raw.get('scenarios_json', '[]')):
             _title = _clean_chalk_text(s.get('title', ''))
+            _raw_titles.append(_title)
             if is_junk_chalk_scenario(_title, feature_id):
                 _dropped.append(_title[:60])
                 continue
@@ -692,11 +879,53 @@ def load_chalk_as_object(feature_id: str, pi_label: str):
         if _dropped:
             print('[CHALK-CACHE] %s/%s: dropped %d non-scenario line(s): %s'
                   % (feature_id, pi_label, len(_dropped), '; '.join(_dropped)))
-        # Universal de-fragmentation: regroup flattened step-less scenario lists so a
-        # richly-formatted Chalk page can't explode into dozens/hundreds of TCs. No-op
-        # for well-structured suites. Applies to EVERY feature/PI, every engine.
-        data.scenarios = _collapse_fragmented_scenarios(
-            data.scenarios, feature_id, pi_label, log=print)
+        # ── TEST-AREA scenario extraction (granularity: header/area = 1 scenario,
+        # detail 'Verify...' rows become steps). Prevents 100+ garbage TCs. ──
+        # 1) Prefer CLEAN scenario tables (Test Scenario | Validation), grouped by area.
+        # 2) Else fall back to grouping the de-fragmented raw-text titles under their
+        #    section headers. 3) Else keep the collapse guard. A hard ceiling applies.
+        _raw_count = len(data.scenarios)
+        _area_scs = []
+        try:
+            _areas = _extract_area_scenarios_from_tables(getattr(data, 'tables', []), feature_id)
+            if _areas:
+                _area_scs = _areas_to_scenarios(_areas, feature_id, pi_label)
+                if _area_scs:
+                    print('[CHALK-AREA] %s/%s: table-area grouping -> %d areas '
+                          '(from %d raw rows)'
+                          % (feature_id, pi_label, len(_area_scs), _raw_count))
+        except Exception as _ae:
+            print('[CHALK-AREA] %s/%s: table-area failed: %s' % (feature_id, pi_label, str(_ae)[:80]))
+        if _area_scs:
+            data.scenarios = _area_scs
+        else:
+            # No clean table. First try grouping the RAW titles by their section
+            # headers (headers still present here, before junk-filter removed them) so
+            # a page like 4167 lands at its real areas (Inbound Validation / Positive /
+            # Negative / Edge) instead of one lump.
+            _rawgrp = _area_group_raw_titles(_raw_titles, feature_id)
+            _rawgrp_scs = _areas_to_scenarios(_rawgrp, feature_id, pi_label) if _rawgrp else []
+            if _rawgrp_scs and len(_rawgrp_scs) <= _MAX_AREA_SCENARIOS:
+                print('[CHALK-AREA] %s/%s: raw-header area grouping -> %d areas '
+                      '(from %d raw titles)'
+                      % (feature_id, pi_label, len(_rawgrp_scs), len(_raw_titles)))
+                data.scenarios = _rawgrp_scs
+            else:
+                # De-fragment, then (if still large) group by area, then hard ceiling.
+                data.scenarios = _collapse_fragmented_scenarios(
+                    data.scenarios, feature_id, pi_label, log=print)
+                if len(data.scenarios) > _MAX_AREA_SCENARIOS:
+                    _fb = _area_group_raw_scenarios(data.scenarios, feature_id)
+                    _fb_scs = _areas_to_scenarios(_fb, feature_id, pi_label) if _fb else []
+                    if _fb_scs:
+                        print('[CHALK-AREA] %s/%s: raw-text area fallback -> %d areas '
+                              '(from %d scenarios)'
+                              % (feature_id, pi_label, len(_fb_scs), len(data.scenarios)))
+                        data.scenarios = _fb_scs
+                    elif len(data.scenarios) > _MAX_AREA_SCENARIOS:
+                        print('[CHALK-AREA] %s/%s: ceiling applied, capping %d -> %d'
+                              % (feature_id, pi_label, len(data.scenarios), _MAX_AREA_SCENARIOS))
+                        data.scenarios = data.scenarios[:_MAX_AREA_SCENARIOS]
     except Exception as _sc_err:
         print('[CHALK-CACHE] %s/%s: scenario parse failed: %s'
               % (feature_id, pi_label, str(_sc_err)[:120]))

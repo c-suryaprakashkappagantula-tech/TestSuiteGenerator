@@ -892,6 +892,10 @@ def _inject_operation_negatives(suite, jira, chalk, classification, log: Callabl
         tc = TestCase(summary=summary, description=desc, preconditions=pre,
                       steps=steps, story_linkage=fid, label=fid, category='Negative')
         try:
+            tc._injected_negative = True  # Option-B origin tag: engine-synthesized, not Chalk
+        except Exception:
+            pass
+        try:
             tc.priority = 'P2'
         except Exception:
             pass
@@ -1014,6 +1018,10 @@ def _inject_eligibility_negatives(suite, jira, chalk, classification, log: Calla
         tc = TestCase(
             summary=summary, description=description, preconditions=preconditions,
             steps=steps, story_linkage=feature_id, label=feature_id, category='Negative')
+        try:
+            tc._injected_negative = True  # Option-B origin tag: engine-synthesized, not Chalk
+        except Exception:
+            pass
         try:
             tc.priority = 'P2'
         except Exception:

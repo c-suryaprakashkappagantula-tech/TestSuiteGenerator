@@ -47,6 +47,39 @@ _lb = PatternFill(start_color=LIGHT_BLUE, end_color=LIGHT_BLUE, fill_type='solid
 _wf = PatternFill(start_color=WHITE, end_color=WHITE, fill_type='solid')
 
 
+def _origin_tag(tc) -> str:
+    """Option-B source tag: a compact origin label so a reviewer can see (and filter)
+    which TCs came from Chalk vs were synthesized from Jira AC / subtasks / injected
+    negatives. Derived from the TC's traceability.source_type."""
+    tr = getattr(tc, 'traceability', None)
+    st = (getattr(tr, 'source_type', '') or '').strip().lower() if tr else ''
+    # Explicit injected-negative marker wins if the engine set it.
+    if getattr(tc, '_injected_negative', False):
+        return 'Injected-Neg'
+    if st in ('chalk', 'chalk scenario', 'business rule'):
+        return 'Chalk'
+    if st in ('nbop ui', 'nbop'):
+        return 'Chalk-UI'
+    if st in ('jira ac', 'jira'):
+        return 'Jira-AC'
+    if st in ('subtask ac', 'subtask'):
+        return 'Subtask'
+    if st in ('attachment',):
+        return 'Doc'
+    if st in ('related feature',):
+        return 'Related'
+    return 'Chalk' if getattr(tc, 'from_chalk', False) else (st.title() if st else 'Other')
+
+
+def _label_with_origin(tc) -> str:
+    """Return the TC label with the origin tag appended (kept filterable in QMetry)."""
+    base = (getattr(tc, 'label', '') or '').strip()
+    tag = '[%s]' % _origin_tag(tc)
+    if tag in base:
+        return base
+    return ('%s %s' % (base, tag)).strip() if base else tag
+
+
 def generate_excel(suite: TestSuite, log=print) -> Path:
     """Generate the complete Excel workbook. Returns output path.
 
@@ -494,7 +527,7 @@ def _build_testcases_sheet(wb, suite: TestSuite, sheet_name=None, tc_subset=None
                 ws.cell(row=row, column=3, value=tc.description).alignment = _wrap
                 ws.cell(row=row, column=4, value=tc.preconditions).alignment = _wrap
                 ws.cell(row=row, column=8, value=tc.story_linkage).alignment = _wrap
-                ws.cell(row=row, column=9, value=tc.label).alignment = _wrap
+                ws.cell(row=row, column=9, value=_label_with_origin(tc)).alignment = _wrap
                 ws.cell(row=row, column=10, value=tc.story_linkage).alignment = _wrap
                 # Column 11: Grounding Score (colour-coded)
                 _gscore = getattr(tc, 'grounding_score', -1)
