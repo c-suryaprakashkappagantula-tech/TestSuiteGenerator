@@ -659,6 +659,14 @@ _AREA_TSFAM_RE = re.compile(r'^TS[_\s]?([A-Z]+\d+|[A-Z]+)', re.IGNORECASE)
 _AREA_SCN_JUNK = {'scenario #', 'scenario#', 's.no', 'sno', 'scenario', 'test scenario',
                   'test area', 'validations', 'validation', 'category', 'feature id',
                   'scenarios', 'variations', 'expected outcome'}
+# Document-section headers that are NOT test areas (they carry no executable scenarios,
+# or are meta sections). Excluded from area grouping so they never become TCs.
+_AREA_FURNITURE = {
+    'pre-requisite', 'pre-req', 'prerequisite', 'prerequisites', 'test data', 'in scope',
+    'out of scope', 'out-of-scope', 'scope', 'facts', 'summary', 'assumptions',
+    'references', 'reference', 'dependencies', 'notes', 'note', 'background', 'overview',
+    'problem', 'objective',
+}
 
 
 def _area_norm(s):
@@ -783,6 +791,11 @@ def _area_group_raw_titles(titles, feature_id=''):
                 lbl = re.sub(r'^(?:\d+\)|[a-z]\)|[IVX]+\.)\s*', '', t).rstrip(':').strip()
                 if len(lbl) < 3:
                     lbl = t.rstrip(':').strip()
+                # Skip DOCUMENT-FURNITURE headers (not test areas). Scenario lines that
+                # follow attach to the previous real area instead of a junk 'area'.
+                _lbl_low = lbl.lower()
+                if _lbl_low in _AREA_FURNITURE or any(_lbl_low.startswith(f) for f in _AREA_FURNITURE):
+                    continue
                 cur = lbl
                 areas.setdefault(cur, [])
             elif _AREA_VERB_RE.match(t) and len(t) > 12:
@@ -808,15 +821,25 @@ def _areas_to_scenarios(areas, feature_id, pi_label):
         title = a.get('title', '') or 'Scenario'
         rows = a.get('row_titles', []) or []
         vals = a.get('validations', []) or []
-        # Build a readable, gate-surviving area title. Every area becomes a proper
-        # 'Verify ...' scenario so the downstream grounding gate does not drop short
-        # noun-phrase area labels (e.g. 'ESIM Activation', 'FROM NE').
-        disp = title
-        if title.startswith('TS_') and rows:
-            disp = 'Verify %s scenarios (%d)' % (title, len(rows))
-        elif not re.match(r'^(verify|validate|confirm|ensure|check|test)\b', title, re.IGNORECASE):
-            _area_label = title[6:].strip() if title.lower().startswith('area:') else title
-            disp = 'Verify %s (%d scenarios)' % (_area_label, len(rows)) if rows else 'Verify %s' % _area_label
+        # Derive a MEANINGFUL area label (no 'TS_xxx', no '[TAGS]:', no 'Area:' prefix).
+        _lbl = title
+        if _lbl.lower().startswith('area:'):
+            _lbl = _lbl[5:].strip()
+        _lbl = re.sub(r'^\[[^\]]*\]\s*:?\s*', '', _lbl).strip()   # strip [NSLNM, INTG]: tags
+        _lbl = re.sub(r'^(?:CR|new mvno)\s*[-:]\s*', '', _lbl, flags=re.IGNORECASE).strip()
+        # For a TS-family area (TS_MWTGPROV4538), the family token is not human-readable;
+        # name the area after its FIRST real scenario row instead (a proper 'Verify...').
+        if _lbl.startswith('TS_') or re.match(r'^TS[_\s]', _lbl, re.IGNORECASE):
+            _first = next((r for r in rows if r), '')
+            _lbl = _clean_chalk_text(_first) or _lbl
+        # Build the display title: a real 'Verify ...' sentence, no '(N scenarios)' suffix.
+        disp = _clean_chalk_text(_lbl)
+        if not re.match(r'^(verify|validate|confirm|ensure|check|test)\b', disp, re.IGNORECASE):
+            disp = 'Verify ' + disp
+        disp = disp.rstrip(' .:').strip()
+        if len(disp) < 8:  # too thin to be a real name -> fall back to first row
+            _first = next((r for r in rows if r), '')
+            disp = _clean_chalk_text(_first) or ('Verify %s scenario' % (feature_id))
         scs.append(ChalkScenario(
             scenario_id=title if title.startswith('TS_') else '',
             title=disp,
