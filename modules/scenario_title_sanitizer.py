@@ -90,7 +90,11 @@ def _trim_words(s: str, limit: int = MAX_TITLE_LEN) -> str:
     sp = cut.rfind(' ')
     if sp <= 0:
         sp = limit
-    return cut[:sp].rstrip(' ,;:-–—')
+    out = cut[:sp].rstrip(' ,;:-–—')
+    # A trim can land on a conjunction/preposition ("... error code, and activation").
+    # Drop the dangling tail so the title ends on a complete thought.
+    out = _TRAILING_JOINER_RE.sub('', out).rstrip(' ,;:-–—')
+    return out
 
 
 def _strip_furniture(text: str) -> str:
