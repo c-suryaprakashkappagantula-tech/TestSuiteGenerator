@@ -191,12 +191,31 @@ def _deduplicate_scenarios(scenarios: List[ExtractedScenario]) -> tuple:
         words = set(_re.findall(r'\b[a-z]{4,}\b', title.lower()))
         return words - _PRODUCT_TOKENS
 
+    # Rule #1: Chalk is ground truth. Two distinct Chalk rows may be worded almost
+    # identically and still be different tests (e.g. "all transactions sent to TMO from
+    # NE contain Partner-Transaction-ID" vs "all unsolicited transactions from TMO
+    # contain Partner-Transaction-ID"). Near-duplicate collapsing must never silently
+    # delete Chalk coverage, so Chalk (and explicit user requests) are exempt from
+    # Phase 2. Exact-title duplicates are still removed — those are true repeats.
+    try:
+        from .scenario_title_sanitizer import is_chalk_scenario as _is_chalk
+    except Exception:
+        def _is_chalk(_sc):
+            return False
+
+    def _protected(sc) -> bool:
+        return bool(_is_chalk(sc) or getattr(sc, 'user_requested', False))
+
     # Phase 1: Exact title dedup
     seen_titles = set()
     phase1_deduped = []
     for sc in scenarios:
         normalized = _normalize_title(sc.title)
-        if not normalized or len(normalized) < 5:
+        if not normalized:
+            continue
+        # Very short titles are normally parser debris, but a protected scenario with a
+        # real (if terse) title must survive.
+        if len(normalized) < 5 and not _protected(sc):
             continue
         if normalized not in seen_titles:
             seen_titles.add(normalized)
@@ -205,6 +224,10 @@ def _deduplicate_scenarios(scenarios: List[ExtractedScenario]) -> tuple:
     # Phase 2: Near-duplicate dedup (75% word overlap)
     deduped = []
     for sc in phase1_deduped:
+        if _protected(sc):
+            deduped.append(sc)  # ground truth — never collapsed
+            continue
+
         sc_words = _meaningful_words(sc.title)
         if not sc_words or len(sc_words) < 3:
             deduped.append(sc)  # Too few words to compare — keep

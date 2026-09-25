@@ -241,6 +241,57 @@ def _negative_case(feature_id, key, text, index, pi):
                     {'special_condition': key}, 100, False, ['DA.%s' % key])
 
 
+def _chalk_case(feature_id, scenario, index, pi):
+    """Build a test case for a Chalk scenario on the obligation-first path.
+
+    Rule #1: Chalk is ground truth. The Data-Alignment builder derives its cases from
+    the violation matrix, so without this every Chalk scenario on such a page would be
+    silently dropped. Steps come from the scenario's own hint/validation text so the TC
+    stays grounded in what Chalk actually says.
+    """
+    title = (getattr(scenario, 'title', '') or '').strip()
+    validation = (getattr(scenario, 'validation', '') or '').strip()
+    trace = create_traceability('Chalk Scenario', feature_id, title[:200], pi_label=pi)
+
+    raw_steps = list(getattr(scenario, 'steps', None) or [])
+    steps = []
+    for i, st in enumerate(raw_steps[:12], 1):
+        if isinstance(st, dict):
+            action = str(st.get('action') or st.get('summary') or st.get('step') or '').strip()
+            expected = str(st.get('expected') or st.get('expected_result') or '').strip()
+        else:
+            action, expected = str(st or '').strip(), ''
+        if not action:
+            continue
+        steps.append(TestStep(len(steps) + 1, action,
+                              expected or 'The documented Chalk outcome is observed',
+                              'CHALK.STEP%d' % i))
+    if not steps:
+        steps = [
+            TestStep(1, 'Set up the preconditions described by the Chalk scenario and capture '
+                        'before-state evidence',
+                     'Environment and test data match the Chalk scenario', 'CHALK.SETUP'),
+            TestStep(2, title or 'Execute the documented Chalk scenario',
+                     validation or 'The documented Chalk outcome is observed', 'CHALK.EXEC'),
+            TestStep(3, 'Verify the Century root transaction and persisted values for this scenario',
+                     'Audit status, details, transactionId, and timestamps match the request',
+                     'CHALK.AUDIT'),
+        ]
+
+    low = ('%s %s' % (title, validation)).lower()
+    category = 'Negative' if any(k in low for k in (
+        'error', 'invalid', 'reject', 'fail', 'not found', 'incorrect', 'missing')) \
+        else ('Regression' if 'regression' in low else 'Happy Path')
+
+    summary = title if title.lower().startswith(
+        ('verify', 'validate', 'ensure', 'confirm', 'check')) else 'Verify %s' % title
+    return TestCase(str(index), 'TC%02d_%s_%s' % (index, feature_id, summary), validation or title,
+                    '1. TMO SIT subscriber and API access are available\n'
+                    '2. Before-state evidence and a unique transactionId are captured',
+                    steps, feature_id, feature_id, category, 'P2', trace,
+                    {'chalk_scenario': title[:120]}, 100, True, [])
+
+
 def build_data_alignment_suite(jira, chalk, obligations, options=None, log=print):
     feature_id = getattr(jira, 'key', '') or ''
     pi = getattr(jira, 'pi', '') or ''
@@ -250,6 +301,27 @@ def build_data_alignment_suite(jira, chalk, obligations, options=None, log=print
              for i, code in enumerate(required_codes)]
     for key, text in _SPECIALS:
         cases.append(_negative_case(feature_id, key, text, len(cases) + 1, pi))
+
+    # ── Rule #1: append a case for every Chalk scenario not already covered ──
+    # The obligation matrix above is synthesized from the violation enum; the Chalk page
+    # also documents scenarios (error codes, notification simulation, regression) that
+    # the matrix does not express. Those are ground truth and must ship.
+    _existing = ' '.join([(c.summary or '') + ' ' + (c.description or '') for c in cases]).lower()
+    _added = 0
+    for sc in (getattr(chalk, 'scenarios', None) or []):
+        _t = (getattr(sc, 'title', '') or '').strip()
+        if not _t:
+            continue
+        _key = re.sub(r'[^a-z0-9 ]', ' ', _t.lower())
+        _key = ' '.join(_key.split())
+        _key = re.sub(r'^(?:verify|validate|ensure|confirm|check)\s+(?:that\s+)?', '', _key)
+        if _key and _key in _existing:
+            continue
+        cases.append(_chalk_case(feature_id, sc, len(cases) + 1, pi))
+        _added += 1
+    if _added:
+        log('[DATA-ALIGN] Added %d Chalk scenario TC(s) on top of %d obligation TC(s)'
+            % (_added, len(cases) - _added))
     suite = TestSuite(
         feature_id=feature_id, feature_title=getattr(jira, 'summary', '') or '',
         feature_desc=getattr(jira, 'description', '') or '', test_cases=cases,

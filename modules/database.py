@@ -516,6 +516,27 @@ def _clean_chalk_text(s: str) -> str:
     return ' '.join(out.split())
 
 
+# Leading list enumeration on a Chalk row: "1)", "2.", "(3)", "4 -", "- ", "* ", "• ".
+# Chalk authors number their scenario rows; the number is layout, not meaning, and it
+# leaks into TC titles as "Verify_1)_Verify_that_..." (doubled verb + stray bracket).
+_CHALK_ENUM_RE = re.compile(r'^\s*(?:\(?\d{1,3}\s*[\)\.\:]|\d{1,3}\s*[-–—]|[-*•])\s+')
+
+
+def _clean_chalk_title(s: str) -> str:
+    """Normalise a Chalk scenario/area TITLE without changing its meaning.
+
+    Rule #1 keeps Chalk as ground truth, so this only removes layout furniture:
+    leading row numbering/bullets. The wording itself is left exactly as authored.
+    """
+    out = _clean_chalk_text(s)
+    for _ in range(3):  # "1) - Verify ..." can stack
+        new = _CHALK_ENUM_RE.sub('', out)
+        if new == out:
+            break
+        out = new
+    return out.strip()
+
+
 def is_junk_chalk_scenario(title: str, feature_id: str = '') -> bool:
     """True when a cached 'scenario' is really page furniture, not a test scenario.
 
@@ -666,6 +687,13 @@ _AREA_FURNITURE = {
     'out of scope', 'out-of-scope', 'scope', 'facts', 'summary', 'assumptions',
     'references', 'reference', 'dependencies', 'notes', 'note', 'background', 'overview',
     'problem', 'objective',
+    # Generic document headings seen on Data-Alignment / CR pages. Without these,
+    # "General" and "Testing approach" ship as TCs named "Verify General".
+    'general', 'general information', 'testing approach', 'test approach',
+    'approach', 'introduction', 'description', 'details', 'implementation',
+    'design', 'solution', 'summary of changes', 'acceptance criteria',
+    'definition of done', 'open items', 'open questions', 'risks', 'impact',
+    'high level design', 'low level design', 'conclusion', 'purpose',
 }
 
 
@@ -880,7 +908,7 @@ def load_chalk_as_object(feature_id: str, pi_label: str):
         _dropped = []
         _raw_titles = []  # captured BEFORE junk filter, so section headers survive for area grouping
         for s in json.loads(raw.get('scenarios_json', '[]')):
-            _title = _clean_chalk_text(s.get('title', ''))
+            _title = _clean_chalk_title(s.get('title', ''))
             _raw_titles.append(_title)
             if is_junk_chalk_scenario(_title, feature_id):
                 _dropped.append(_title[:60])

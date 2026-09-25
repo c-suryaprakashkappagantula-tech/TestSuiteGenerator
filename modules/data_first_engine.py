@@ -141,8 +141,14 @@ def build_test_suite_v8(
     # templates so CR routing, parser flattening, and semantic dedup cannot lose rows.
     if is_data_alignment_feature(jira, chalk):
         log('[V8-ENGINE] *** Data Alignment contract detected — obligation-first builder ***')
-        return build_data_alignment_suite(
+        _da_suite = build_data_alignment_suite(
             jira, chalk, _coverage_obligations, options=options, log=log)
+        # Rule #1 applies to every branch, including the obligation-first builder.
+        try:
+            _assert_chalk_coverage(_da_suite, chalk, log)
+        except Exception as _cc_err:
+            log('[CHALK-GUARD] WARNING: coverage check failed: %s' % str(_cc_err)[:120])
+        return _da_suite
 
     # ── Step 0b: CR/Bug Fix Detection ──
     # Ticket type and coverage scope are different. Broad CRs continue through V8;
@@ -215,6 +221,26 @@ def build_test_suite_v8(
         data_only=_data_only,
         log=log,
     )
+
+    # ── Step 1a-0: Sanitize SUPPLEMENT scenario titles (Option C, part 2) ──
+    # Chalk is ground truth and is never touched here (rule #1). This only cleans the
+    # names of Jira-AC / subtask / attachment supplements so the suite stops shipping
+    # rejected titles: feature-title-as-TC (dropped), raw Gherkin "Given…when…then"
+    # (rewritten outcome-first), and ticket furniture like "[TAGS]:" / "CR - New MVNO -".
+    try:
+        from .scenario_title_sanitizer import sanitize_supplement_scenarios
+        _before_titles = len(dimension_set.scenarios or [])
+        dimension_set.scenarios = sanitize_supplement_scenarios(
+            dimension_set.scenarios,
+            feature_summary=(getattr(jira, 'summary', '') or '') if jira else '',
+            log=log)
+        _after_titles = len(dimension_set.scenarios or [])
+        if _after_titles != _before_titles:
+            log('[V8-ENGINE]   Title sanitize: %d -> %d scenarios' % (
+                _before_titles, _after_titles))
+    except Exception as _ts_err:
+        log('[V8-ENGINE]   WARNING: title sanitize failed: %s — continuing' % str(_ts_err)[:120])
+        _record_degraded('supplement title sanitize', _ts_err)
 
     # ── Step 1a: Drop generic STRUCTURAL dimensions when grounded scenarios exist ──
     # The combination engine turns single-value structural dimensions (channel=ITMBO,
@@ -614,9 +640,142 @@ def build_test_suite_v8(
         log('[COVERAGE-GATE] Audit setup failed: %s' % str(_cov_err)[:160])
         raise
 
+    # ── RULE #1 INVARIANT: every Chalk scenario must have a test case ──
+    # Chalk is ground truth. Supplements may be added on top, never in place of it.
+    # This is a verification gate, not a generator: it surfaces any Chalk scenario that
+    # failed to reach the suite so the loss is visible instead of silent.
+    try:
+        _assert_chalk_coverage(suite, chalk, log)
+    except Exception as _cc_err:
+        log('[CHALK-GUARD] WARNING: coverage check failed: %s' % str(_cc_err)[:120])
+
     _attach_degraded(suite, log)
 
     return suite
+
+
+def _assert_chalk_coverage(suite, chalk, log=print):
+    """Verify every Chalk scenario is represented by at least one TC (rule #1).
+
+    Chalk is ground truth: supplements are added on top of it, never in place of it.
+    This is a verification gate, not a generator — it sets
+    `suite.chalk_coverage = (covered, total)` and logs any scenario that failed to
+    reach the suite, so a loss is visible instead of silent.
+
+    Titles are compared on a normalized-substring basis because builders prefix the
+    feature id and may append qualifiers (device/state variants).
+    """
+    import re as _re
+
+    scenarios = list(getattr(chalk, 'scenarios', None) or []) if chalk else []
+    if not scenarios:
+        return
+
+    def _n(s):
+        return ' '.join(_re.sub(r'[^a-z0-9 ]', ' ', (s or '').lower()).split())
+
+    def _squash(s):
+        """Separator-insensitive form: builders render INTL_CALL as INTLCALL."""
+        return _re.sub(r'[^a-z0-9]', '', (s or '').lower())
+
+    tc_norms = [_n(getattr(tc, 'summary', '') or '') for tc in (suite.test_cases or [])]
+    tc_token_sets = [set(t.split()) for t in tc_norms]
+    tc_squashed = [_squash(getattr(tc, 'summary', '') or '') for tc in (suite.test_cases or [])]
+
+    # PROVENANCE index — the reliable signal. Builders freely abbreviate and re-word
+    # summaries, so comparing rendered titles produces false alarms. Every TC built from
+    # a Chalk scenario carries that scenario's text on its traceability record, so match
+    # on that first and only fall back to text heuristics when provenance is absent.
+    prov_squashed = set()
+    for tc in (suite.test_cases or []):
+        tr = getattr(tc, 'traceability', None)
+        for attr in ('extracted_text', 'source_text', 'evidence'):
+            val = getattr(tr, attr, '') if tr else ''
+            if val:
+                prov_squashed.add(_squash(val))
+        meta = getattr(tc, 'metadata', None)
+        if isinstance(meta, dict):
+            for mk in ('chalk_scenario', 'scenario_title', 'source_scenario'):
+                if meta.get(mk):
+                    prov_squashed.add(_squash(str(meta[mk])))
+
+    def _covered_by_provenance(raw_title: str) -> bool:
+        sq = _squash(raw_title)
+        if len(sq) < 10:
+            return False
+        for p in prov_squashed:
+            if not p:
+                continue
+            # Traceability text is capped at 200 chars, so either may be a prefix.
+            if sq in p or p in sq:
+                return True
+        return False
+
+    def _covered(key: str) -> bool:
+        if not key:
+            return True
+        # Whole scenario title appears in a TC summary.
+        if any(key in tn for tn in tc_norms):
+            return True
+        # Separator-insensitive containment (INTL_CALL vs INTLCALL, Reset-Network vs
+        # ResetNetwork). Also covers the truncated-tail case from either direction.
+        ksq = _squash(key)
+        if len(ksq) >= 12:
+            for sq in tc_squashed:
+                if ksq in sq or (len(sq) >= 20 and sq in ksq):
+                    return True
+        # TC summaries are length-capped, so a long scenario title arrives truncated.
+        # Treat a TC whose tail is a prefix of the scenario key as covering it.
+        for tn in tc_norms:
+            if len(tn) >= 25 and tn in key:
+                return True
+            idx = tn.find(key[:25]) if len(key) >= 25 else -1
+            if idx >= 0:
+                return True
+        # Last resort: strong token containment (handles builder-added qualifiers).
+        # Chalk rows are sometimes cached already truncated mid-word ("... custom logic d"),
+        # so a trailing 1-2 char fragment is a crawler artifact, not a real token.
+        toks = key.split()
+        while toks and len(toks[-1]) <= 2:
+            toks.pop()
+        kt = set(toks)
+        if len(kt) >= 3:
+            for ts in tc_token_sets:
+                if kt and len(kt & ts) / len(kt) >= 0.80:
+                    return True
+        return False
+
+    missing = []
+    for sc in scenarios:
+        raw = getattr(sc, 'title', '') or ''
+        if _covered_by_provenance(raw):
+            continue
+        key = _n(_re.sub(r'^\s*verify\s+(?:that\s+)?', '', raw, flags=_re.IGNORECASE))
+        if not key:
+            continue
+        if not _covered(key):
+            missing.append(raw)
+
+    covered = len(scenarios) - len(missing)
+    try:
+        suite.chalk_coverage = (covered, len(scenarios))
+    except Exception:
+        pass
+
+    if missing:
+        log('[CHALK-GUARD] *** RULE #1 VIOLATION: %d/%d Chalk scenarios produced no TC ***'
+            % (len(missing), len(scenarios)))
+        for m in missing[:10]:
+            log('[CHALK-GUARD]   MISSING: %s' % m[:100])
+        try:
+            suite.warnings = list(getattr(suite, 'warnings', None) or []) + [
+                'Chalk coverage incomplete: %d of %d Chalk scenarios produced no test case.'
+                % (len(missing), len(scenarios))]
+        except Exception:
+            pass
+    else:
+        log('[CHALK-GUARD] Chalk coverage OK: %d/%d scenarios -> TCs' % (
+            covered, len(scenarios)))
 
 
 # ================================================================
@@ -751,6 +910,13 @@ def _build_cr_suite_v8(jira, chalk, parsed_docs, options, deep_mine_result, log,
     # generation cannot prove them, the export boundary blocks the workbook.
     from .coverage_obligations import attach_coverage_audit
     attach_coverage_audit(suite, coverage_obligations or [], log=log)
+
+    # Rule #1 applies to every branch, including the capped CR path.
+    try:
+        _assert_chalk_coverage(suite, chalk, log)
+    except Exception as _cc_err:
+        log('[CHALK-GUARD] WARNING: coverage check failed: %s' % str(_cc_err)[:120])
+
     _attach_degraded(suite, log)
 
     return suite

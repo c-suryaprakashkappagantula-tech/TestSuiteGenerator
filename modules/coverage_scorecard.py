@@ -233,7 +233,19 @@ def compute_scorecard(
             lenses.append(lens)
 
     # ── 5. Chalk scenario completeness ──
-    if hasattr(suite, 'data_inventory') and suite.data_inventory:
+    # Prefer the engine's authoritative rule-#1 measurement (suite.chalk_coverage),
+    # which matches Chalk scenarios to TCs by provenance. The data-inventory estimate
+    # below is only a fallback for suites built before that field existed.
+    _chalk_cov = getattr(suite, 'chalk_coverage', None)
+    if (isinstance(_chalk_cov, (tuple, list)) and len(_chalk_cov) == 2
+            and _chalk_cov[1]):
+        lenses.append(CoverageLens(
+            name='Chalk scenarios',
+            covered=int(_chalk_cov[0]),
+            total=int(_chalk_cov[1]),
+            risk='HIGH' if int(_chalk_cov[0]) < int(_chalk_cov[1]) else 'LOW',
+        ))
+    elif hasattr(suite, 'data_inventory') and suite.data_inventory:
         _chalk_source = next(
             (s for s in suite.data_inventory.sources if s.source_type == 'chalk' and
              'scenario' in s.source_name.lower()),

@@ -1418,6 +1418,15 @@ def _extract_scenarios_from_chalk_data(chalk, log: Callable = print) -> tuple:
         'trigger', 'execute', 'send', 'submit', 'call',
         'corrects', 'rejects', 'handles', 'returns', 'updates',
     ]
+    # A short Chalk row with no verb is usually a label — but a fault/condition label
+    # ("Invalid Pin", "Expired token", "Missing account number") IS a real negative
+    # test. Rule #1 keeps Chalk as ground truth, so these must not be filtered out.
+    _CONDITION_LABEL_RE = re.compile(
+        r'\b(invalid|missing|blank|empty|null|expired|duplicate|wrong|incorrect|'
+        r'unauthori[sz]ed|forbidden|mismatch|exceed(?:s|ed)?|timeout|timed\s*out|'
+        r'not\s+found|unavailable|failure|failed|fail|error|reject(?:ed|s)?|'
+        r'negative|bad|malformed|unsupported|inactive|suspended|locked)\b',
+        re.IGNORECASE)
 
     _skipped_info = 0
     _source_tc_num = 0
@@ -1436,11 +1445,18 @@ def _extract_scenarios_from_chalk_data(chalk, log: Callable = print) -> tuple:
                 is_info = True
                 break
 
-        # Also skip very short titles that are just labels (< 20 chars, no verb)
+        # Also skip very short titles that are just labels (< 25 chars, no verb).
+        # Rule #1 exception: keep the row when it carries testable substance (its own
+        # validation text or steps) or reads as a fault condition — those are genuine
+        # Chalk negative scenarios, not page furniture.
         if not is_info and len(title) < 25:
             has_verb = any(v in title_lower for v in _SCENARIO_VERBS)
             if not has_verb:
-                is_info = True
+                _has_substance = bool((sc.validation or '').strip()) or bool(
+                    getattr(sc, 'steps', None))
+                _is_condition = bool(_CONDITION_LABEL_RE.search(title_lower))
+                if not (_has_substance or _is_condition):
+                    is_info = True
 
         if is_info:
             # This heading occupied a TC position in the source-backed suite before
