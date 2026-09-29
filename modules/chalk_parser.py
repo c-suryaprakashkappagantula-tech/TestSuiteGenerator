@@ -105,13 +105,30 @@ def discover_features_rest(page_id: str, log=print) -> Optional[List[Tuple[str, 
         List of (feature_id, title) tuples if REST succeeds, None if it fails.
     """
     try:
-        from rest_clients import ChalkRestClient
-        client = ChalkRestClient(logger_fn=log)
+        # Same cached client the extraction pass uses, so the page it fetches and parses
+        # here is reused for every feature - no second download or re-parse.
+        client = _get_chalk_rest_client(log=log)
         features = client.discover_features_on_pi(page_id)
         return features if features else None
     except Exception as e:
         log(f'[CHALK-REST] Feature discovery failed: {e} — will use browser')
         return None
+
+
+# One ChalkRestClient per process. Building a fresh client per feature (as the old
+# code did) threw away its page-HTML and parsed-content caches AND opened a new HTTPS
+# connection every call - so a 16-feature PI page did 16 TLS handshakes, 16 page
+# downloads and 16 full-page HTML parses. Reusing the client collapses that to one of
+# each: the first feature pays the cost, the rest read from the client's cache.
+_CHALK_REST_CLIENT = None
+
+
+def _get_chalk_rest_client(log=print):
+    global _CHALK_REST_CLIENT
+    if _CHALK_REST_CLIENT is None:
+        from rest_clients import ChalkRestClient
+        _CHALK_REST_CLIENT = ChalkRestClient(logger_fn=log)
+    return _CHALK_REST_CLIENT
 
 
 def fetch_feature_rest(page_id: str, feature_id: str, log=print) -> Optional[ChalkData]:
@@ -125,10 +142,7 @@ def fetch_feature_rest(page_id: str, feature_id: str, log=print) -> Optional[Cha
         ChalkData object if REST succeeds, None if it fails.
     """
     try:
-        from rest_clients import ChalkRestClient
-        from rest_clients.chalk_data_extractor import extract_text_from_html, extract_tables_from_html
-
-        client = ChalkRestClient(logger_fn=log)
+        client = _get_chalk_rest_client(log=log)
         full_text, tables = client.fetch_feature_content(page_id, feature_id)
 
         if not full_text:
