@@ -576,6 +576,27 @@ def block_chalk_db(feature_id, pi_label, log=print):
             'poisoned': bool(rejected), 'poisoned_labels': list(rejected)}
 
 
+def _persist_and_normalize(feature_id, pi_label, chalk, source, log):
+    """Save a freshly crawled row, then RE-READ it through load_chalk_as_object so the
+    live path gets the exact same treatment as the cached path: fragmented step-less
+    scenarios are collapsed (a browser crawl of a big page flattens ~10 real scenarios
+    into 80+ step lines), and the poison guard runs. Without this the engine received the
+    raw pre-collapse crawl (e.g. 4515: 82 fragment 'scenarios' -> 85 TCs, 54 of them
+    'Verify_Step_1:' fragments) even though a later cache read would have collapsed it.
+    Returns a block result dict."""
+    from .database import save_chalk, load_chalk_as_object
+    save_chalk(feature_id, pi_label, chalk)
+    normalized = load_chalk_as_object(feature_id, pi_label)
+    if normalized is None:
+        # save_chalk refused (poison) or the re-read rejected it.
+        log('[PIPELINE] *** CHALK POISONED (live %s): crawled row for %s rejected on '
+            're-read. Not using it. ***' % (pi_label, feature_id))
+        return {'chalk': None, 'source': 'POISONED (live %s)' % pi_label, 'poisoned': True}
+    log('[PIPELINE] Chalk %s (%s): %d scenarios (normalized from %d crawled)'
+        % (source, pi_label, len(normalized.scenarios), len(chalk.scenarios)))
+    return {'chalk': normalized, 'source': '%s (%s)' % (pi_label, source)}
+
+
 def block_chalk_live(page, feature_id, pi_url, pi_label, pi_list, log=print):
     """Block 3: Fetch Chalk data from live page (fallback when DB misses).
     V8.1: REST-first — tries REST API before browser scraping."""
@@ -592,9 +613,7 @@ def block_chalk_live(page, feature_id, pi_url, pi_label, pi_list, log=print):
     if _pid:
         chalk = fetch_feature_rest(_pid, feature_id, log=log)
         if chalk and chalk.scenarios:
-            save_chalk(feature_id, pi_label, chalk)
-            log('[PIPELINE] Chalk REST hit (%s): %d scenarios' % (pi_label, len(chalk.scenarios)))
-            return {'chalk': chalk, 'source': '%s (REST)' % pi_label}
+            return _persist_and_normalize(feature_id, pi_label, chalk, 'REST', log)
 
         # REST didn't find it on selected PI — scan all PIs via REST
         for sl, su in pi_list:
@@ -606,9 +625,7 @@ def block_chalk_live(page, feature_id, pi_url, pi_label, pi_list, log=print):
             try:
                 sc = fetch_feature_rest(_spid, feature_id, log=lambda m: None)
                 if sc and sc.scenarios:
-                    save_chalk(feature_id, sl, sc)
-                    log('[PIPELINE] Chalk REST found on %s: %d scenarios' % (sl, len(sc.scenarios)))
-                    return {'chalk': sc, 'source': '%s (REST scanned)' % sl}
+                    return _persist_and_normalize(feature_id, sl, sc, 'REST scanned', log)
             except:
                 pass
 
@@ -626,9 +643,7 @@ def block_chalk_live(page, feature_id, pi_url, pi_label, pi_list, log=print):
         log('[PIPELINE] Fetching Chalk via browser...')
         chalk = fetch_feature_from_pi(page, pi_url, feature_id, log=log)
         if chalk and chalk.scenarios:
-            save_chalk(feature_id, pi_label, chalk)
-            log('[PIPELINE] Chalk live hit (%s): %d scenarios' % (pi_label, len(chalk.scenarios)))
-            return {'chalk': chalk, 'source': '%s (live)' % pi_label}
+            return _persist_and_normalize(feature_id, pi_label, chalk, 'live', log)
 
         # Scan all PIs via browser
         for sl, su in pi_list:
@@ -637,9 +652,7 @@ def block_chalk_live(page, feature_id, pi_url, pi_label, pi_list, log=print):
             try:
                 sc = fetch_feature_from_pi(page, su, feature_id, log=lambda m: None)
                 if sc and sc.scenarios:
-                    save_chalk(feature_id, sl, sc)
-                    log('[PIPELINE] Chalk found on %s: %d scenarios' % (sl, len(sc.scenarios)))
-                    return {'chalk': sc, 'source': '%s (scanned)' % sl}
+                    return _persist_and_normalize(feature_id, sl, sc, 'scanned', log)
             except:
                 pass
 

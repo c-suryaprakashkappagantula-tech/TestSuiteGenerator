@@ -1349,6 +1349,16 @@ def _build_scenario_tc(
     clean_title = re.sub(r'\{\{[^}]{0,40}\}\}', '', clean_title)
     clean_title = re.sub(r'\}\}+', '', clean_title)
     clean_title = re.sub(r'(?<!\{)\}(?!\})', '', clean_title)
+    # Confluence single-brace macro remnants: {panel}, {panel:title=..}, {color}, {code:..
+    # A browser crawl leaks these into titles (e.g. TC85 '...unchanged{panel'). Strip a
+    # brace that starts a lowercase macro word and everything to its closing brace or EOL.
+    clean_title = re.sub(r'\{[a-z][a-z0-9]*(?::[^}\n]{0,60})?\}?', '', clean_title)
+    clean_title = re.sub(r'[{}]', '', clean_title)  # any residual lone brace
+    # Confluence single-brace macro remnants: {panel}, {panel:title=..}, {color}, {code:..
+    # A browser crawl leaks these into titles (e.g. TC85 '...unchanged{panel'). Strip a
+    # brace that starts a lowercase macro word and everything to its closing brace or EOL.
+    clean_title = re.sub(r'\{[a-z][a-z0-9]*(?::[^}\n]{0,60})?\}?', '', clean_title)
+    clean_title = re.sub(r'[{}]', '', clean_title)  # any residual lone brace
     # Strip problematic special chars from title (/+, keep hyphens)
     clean_title = re.sub(r'[/+,]', ' ', clean_title)
     clean_title = re.sub(r'\s{2,}', ' ', clean_title).strip(' .,;:-–—')
