@@ -510,7 +510,30 @@ def _chalk_row_is_poison(feature_id, chalk_data):
     if n_scn >= 3 and len(fams) == 1:
         only = next(iter(fams))
         if only != fid_up:
-            return (True, [only])
+            # Exemption: an Epic Split legitimately shares ONE scenario set across sibling
+            # tickets. On PI-59, MWTGPROV-3982/4481/4538 are one feature in three parts
+            # ("## Epic Split (3 parts) - Part 1 MWTGPROV-3982 ... Part 3 MWTGPROV-4538"),
+            # all scenarios stamped TS_MWTGPROV-4538_*. That is shared ownership, not
+            # contamination. Treat the family owner as a sibling - not poison - only when
+            # the row's own text declares the split AND names BOTH this feature and the
+            # owner. A row that merely mentions the owner in passing (e.g. 4560, which only
+            # cross-references 'until MWTGPROV-4560' inside 4535's text) is NOT exempted.
+            blob = ' '.join([
+                getattr(chalk_data, 'raw_text', '') or '',
+                getattr(chalk_data, 'scope', '') or '',
+                getattr(chalk_data, 'rules', '') or '',
+            ]).upper()
+            # Precise: collect ids DECLARED as parts ('Part N - MWTGPROV-XXXX'). Exempt only
+            # when BOTH this feature and the family owner are declared parts of the SAME split.
+            # 4560's row carries the Manage-Promotions split text (parts 3982/4481/4538) but
+            # 4560 is not itself a declared part, so it stays flagged as poison.
+            _declared = set(re.findall(
+                r'PART\s*\d+\s*[-–—:]\s*(MWTGPROV-\d+)', blob))
+            if fid_up in _declared and only in _declared:
+                # Sibling row of a declared epic split - shared scenarios are legitimate.
+                pass
+            else:
+                return (True, [only])
 
     # ── Signal 1: whole-page raw_text (only trustworthy when NOT truncated) ──
     raw = getattr(chalk_data, 'raw_text', '') or ''
