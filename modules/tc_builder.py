@@ -29,6 +29,26 @@ from .integration_contract import (
 )
 
 
+# Confluence macro remnants ({{code}}, trailing }}, stray }) leak from Jira AC and
+# subtask text into step and description BODIES, not just titles. The title sanitizer
+# already scrubs titles, but validation/step text was passed through raw - which is how
+# "where } contains 16 significant digits" and "VARCHAR{" reached the workbook. Scrub
+# body text through the same rules so a supplement TC is clean end to end.
+_TCB_MACRO_RE = re.compile(
+    r'\{\{[^}]{0,60}\}\}|\}\}+|(?<![{])\}(?![}])|(?<![}])\{(?![{])', re.DOTALL)
+_TCB_PARAM_RE = re.compile(
+    r'\|\s*(?:language|title|linenumbers)\s*=[^|}\n]{0,40}', re.I)
+
+
+def _scrub_body_artifacts(text):
+    """Strip Confluence macro markup from step/description body text."""
+    if not text:
+        return text
+    t = _TCB_PARAM_RE.sub('', str(text))
+    t = _TCB_MACRO_RE.sub('', t)
+    return re.sub(r'\s{2,}', ' ', t).strip()
+
+
 # ================================================================
 # FEATURE CLASSIFICATION
 # ================================================================
@@ -1353,7 +1373,19 @@ def _build_scenario_tc(
     # Ensure ends with punctuation
     if _desc_val and not _desc_val[-1] in '.!?)':
         _desc_val = _desc_val.rstrip(',;: ') + '.'
+    _desc_val = _scrub_body_artifacts(_desc_val)
     description = 'To validate: %s' % _desc_val
+
+    # Scrub the same macro remnants from step bodies (summary + expected). steps is fully
+    # built above and feeds every TestCase(...) return below, so scrub it once here.
+    for _s in (steps or []):
+        try:
+            if getattr(_s, 'summary', None):
+                _s.summary = _scrub_body_artifacts(_s.summary)
+            if getattr(_s, 'expected', None):
+                _s.expected = _scrub_body_artifacts(_s.expected)
+        except Exception:
+            pass
 
     # Environment-specific preconditions
     # For state-matrix/partial-failure TCs: derive actual line state from steps_hint[0]
