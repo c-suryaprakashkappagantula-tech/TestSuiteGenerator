@@ -185,11 +185,31 @@ def provisioning_closer(feature_context: str = '',
 
 
 def is_provisioning_feature(feature_context: str) -> bool:
-    """Heuristic: does this feature provision on NSL/NBOP (closer applies)?"""
+    """Heuristic: does this feature provision on NSL/NBOP (closer applies)?
+
+    File-ingestion features are checked FIRST and always lose: a PRR/batch feature
+    carries NSL/subscriber/line words in its title, which would otherwise match a
+    provisioning hint and bolt Century-DB / NBOP_MIG / Genesis closers onto a test
+    that never touches a provisioning API.
+    """
     t = (feature_context or '').lower()
+    if is_file_ingestion_feature(t):
+        return False
     if any(h in t for h in _NON_PROVISIONING_HINTS):
         return False
     return any(h in t for h in _PROVISIONING_HINTS)
+
+
+def is_file_ingestion_feature(feature_context: str) -> bool:
+    """True when the feature ingests batch/PRR files (not an API feature)."""
+    t = (feature_context or '').lower()
+    return any(h in t for h in _FILE_INGESTION_HINTS)
+
+
+def file_ingestion_precondition(context_text: str = '') -> str:
+    """Return preconditions appropriate for PRR/batch file-ingestion TCs."""
+    picks = list(_FILE_INGESTION_PRECON)
+    return '\n'.join('%d. %s' % (i, p) for i, p in enumerate(picks, 1))
 
 
 # ── Trigger -> Century-report pairing ─────────────────────────────────────────
@@ -233,7 +253,11 @@ def interleave_century_reports(
 # The exact filler the humanizer currently injects — what we want to overwrite.
 _FILLER_PRECON_RE = re.compile(
     r'system\s+in\s+ready\s+state|test\s+data\s+prepared|'
-    r'preconditions?\s+met|environment\s+is\s+ready|as\s+needed',
+    r'preconditions?\s+met|environment\s+is\s+ready|as\s+needed|'
+    # Generic API 3-liner template emitted by tc_builder._build_scenario_tc
+    r'active\s+tmo\s+(?:subscriber\s+line|mdn)\s+(?:available\s+)?in\s+sit(?:\s+environment)?|'
+    r'api\s+endpoint\s+accessible|'
+    r'line\s+status\s*:\s*active',
     re.I)
 
 _FALLBACK_PRECON = [
@@ -241,6 +265,16 @@ _FALLBACK_PRECON = [
     'Agent should have MNO_TMO permission.',
     'User should have NBOP admin access.',
 ]
+
+# Preconditions for batch/PRR file-ingestion features (not API-based).
+_FILE_INGESTION_PRECON = [
+    'SIT environment is ready and SFTP server is accessible.',
+    'Valid PRR/batch file is prepared with test subscriber data (correct format, field lengths).',
+    'Subscriber line exists in NSL DB with matching MDN for file processing.',
+]
+
+_FILE_INGESTION_HINTS = ('prr', 'batch file', 'sftp', 'file ingest', 'differential report',
+                          'batch report', 'usage file', 'data volume')
 
 
 def is_filler_precondition(text: str) -> bool:
@@ -376,11 +410,14 @@ def enrich_test_case(tc, feature_context: str = '',
     category = (getattr(tc, 'category', '') or '').lower()
     ctx = (feature_context + ' ' + summary).strip()
 
-    # 1. Preconditions
-    if fix_preconditions:
+    # 1. Preconditions — never touch one authored in Chalk (ground truth, Rule #1)
+    if fix_preconditions and not getattr(tc, 'precond_from_chalk', False):
         pre = getattr(tc, 'preconditions', '') or ''
         if is_filler_precondition(pre):
-            tc.preconditions = grounded_precondition(ctx, n=2)
+            if is_file_ingestion_feature(ctx):
+                tc.preconditions = file_ingestion_precondition(ctx)
+            else:
+                tc.preconditions = grounded_precondition(ctx, n=2)
             changed.append('preconditions')
 
     # 2. Century pairing (rebuild the step list with paired validations)

@@ -20,6 +20,26 @@ from __future__ import annotations
 import re
 from typing import Callable, List
 
+# Confluence wiki-markup artifacts that leak from Jira AC text.
+# Must be stripped before any Gherkin parsing so {{code}} remnants
+# don't end up in TC titles as "}}", "}", "{", etc.
+_CONFLUENCE_MACRO_RE = re.compile(
+    r'\{\{[^}]{0,60}\}\}|'   # full {{macro}} or {{code:...}}
+    r'\}\}+|'                  # trailing }} from unclosed macros
+    r'(?<![{])\}(?![}])',      # stray single } (not part of {{ }})
+    re.DOTALL)
+_CONFLUENCE_PARAM_RE = re.compile(r'\|\s*(?:language|title|linenumbers)\s*=[^|}\n]{0,40}', re.I)
+
+
+def _strip_confluence_artifacts(text: str) -> str:
+    """Remove Confluence macro markup that leaks from Jira AC fields."""
+    if not text:
+        return text
+    t = _CONFLUENCE_PARAM_RE.sub('', text)
+    t = _CONFLUENCE_MACRO_RE.sub('', t)
+    return ' '.join(t.split()).strip()
+
+
 # Source types that ARE ground truth. Left completely alone.
 CHALK_SOURCE_TYPES = {
     'chalk', 'chalk scenario', 'chalk db scenario', 'business rule',
@@ -196,7 +216,7 @@ def clean_supplement_title(title: str, detail: str = '') -> str:
     `detail` is the fuller source text (validation/description); it is used to
     recover an outcome when the title itself was truncated mid-Gherkin.
     """
-    raw = ' '.join((title or '').split())
+    raw = _strip_confluence_artifacts(' '.join((title or '').split()))
     if not raw:
         return ''
 
@@ -206,7 +226,7 @@ def clean_supplement_title(title: str, detail: str = '') -> str:
     # Prefer the fuller detail text for Gherkin, since titles arrive truncated.
     candidates = []
     if detail:
-        candidates.append(_strip_furniture(' '.join(str(detail).split())))
+        candidates.append(_strip_furniture(_strip_confluence_artifacts(' '.join(str(detail).split()))))
     candidates.append(base)
 
     for cand in candidates:
@@ -253,7 +273,19 @@ def sanitize_supplement_scenarios(
     feat_norm = _norm(feat_clean)
     feat_tokens = _tokens(feat_clean)
 
-    kept, renamed, dropped_title, dropped_empty = [], 0, 0, 0
+    kept, renamed, dropped_title, dropped_empty, dropped_dup = [], 0, 0, 0, 0
+
+    # Build normalised Chalk title set for semantic dedup of supplement scenarios.
+    # A supplement scenario whose normalised title overlaps >=75% with a Chalk
+    # scenario title is a duplicate — drop it (Chalk version is canonical).
+    _chalk_norms = set()
+    _chalk_token_sets = []
+    for _sc in scenarios:
+        if is_chalk_scenario(_sc):
+            _ct = _norm(_strip_furniture(getattr(_sc, 'title', '') or ''))
+            if _ct:
+                _chalk_norms.add(_ct)
+                _chalk_token_sets.append(_tokens(_ct))
 
     for sc in scenarios:
         # Rule #1: Chalk is ground truth. Never rename, never drop.
@@ -281,6 +313,21 @@ def sanitize_supplement_scenarios(
                     dropped_title += 1
                     continue
 
+        # Semantic dedup: drop supplement scenarios that duplicate a Chalk scenario.
+        # Chalk is canonical; supplement with >=75% token overlap is redundant.
+        _sc_toks = _tokens(cand_norm) if cand_norm else set()
+        _is_chalk_dup = False
+        if _sc_toks and _chalk_token_sets:
+            for _chalk_toks in _chalk_token_sets:
+                if _chalk_toks:
+                    _ov = len(_sc_toks & _chalk_toks) / max(1, len(_sc_toks | _chalk_toks))
+                    if _ov >= 0.75:
+                        _is_chalk_dup = True
+                        break
+        if _is_chalk_dup:
+            dropped_dup += 1
+            continue
+
         cleaned = clean_supplement_title(original, detail)
         if not cleaned:
             dropped_empty += 1
@@ -294,7 +341,8 @@ def sanitize_supplement_scenarios(
                 pass
         kept.append(sc)
 
-    if renamed or dropped_title or dropped_empty:
+    if renamed or dropped_title or dropped_empty or dropped_dup:
         log('[TITLE-SANITIZE]   supplements: %d renamed, %d feature-title dropped, '
-            '%d unusable dropped (Chalk untouched)' % (renamed, dropped_title, dropped_empty))
+            '%d chalk-dup dropped, %d unusable dropped (Chalk untouched)'
+            % (renamed, dropped_title, dropped_dup, dropped_empty))
     return kept

@@ -477,7 +477,7 @@ def save_chalk(feature_id: str, pi_label: str, chalk_data):
         } for s in chalk_data.scenarios]),
         json.dumps(chalk_data.open_items),
         chalk_data.raw_text[:50000] if chalk_data.raw_text else '',
-        json.dumps(chalk_data.tables[:20]) if chalk_data.tables else '[]',
+        json.dumps(chalk_data.tables[:50]) if chalk_data.tables else '[]',
         datetime.now().isoformat(),
     ))
     c.commit(); c.close()
@@ -611,6 +611,17 @@ def _looks_like_scenario_title(title: str) -> bool:
     return False
 
 
+# A folded fragment line that is really the scenario's precondition.
+_FRAG_PREREQ_RE = re.compile(
+    r'^\s*pre[\s\-]?(?:req|requisite|requisites|condition|conditions)s?\s*[:\-]\s*',
+    re.IGNORECASE)
+
+# A folded fragment line that is the scenario's expected outcome/result.
+_FRAG_EXPECTED_RE = re.compile(
+    r'^\s*expected\s+(?:outcome|result)s?\s*[:\-]\s*',
+    re.IGNORECASE)
+
+
 def _collapse_fragmented_scenarios(scenarios, feature_id='', pi_label='', log=print):
     """UNIVERSAL, format-agnostic de-fragmentation.
 
@@ -643,10 +654,25 @@ def _collapse_fragmented_scenarios(scenarios, feature_id='', pi_label='', log=pr
                 current = sc
                 collapsed.append(sc)
             else:
-                # continuation / detail line -> attach to the current parent's steps
+                # continuation / detail line -> attach to the current parent
                 if current is not None and title:
                     try:
-                        current.steps = list(getattr(current, 'steps', []) or []) + [title]
+                        # "Pre-req:" → .prereq (keeps Chalk's own wording as TC precondition)
+                        _m_req = _FRAG_PREREQ_RE.match(title)
+                        # "Expected Outcome:" → .validation (not a step)
+                        _m_exp = _FRAG_EXPECTED_RE.match(title)
+                        if _m_req:
+                            _body = title[_m_req.end():].strip()
+                            _existing = (getattr(current, 'prereq', '') or '').strip()
+                            current.prereq = ('%s\n%s' % (_existing, _body)).strip() \
+                                if _existing else _body
+                        elif _m_exp:
+                            _body = title[_m_exp.end():].strip()
+                            _existing = (getattr(current, 'validation', '') or '').strip()
+                            current.validation = ('%s %s' % (_existing, _body)).strip() \
+                                if _existing else _body
+                        else:
+                            current.steps = list(getattr(current, 'steps', []) or []) + [title]
                     except Exception:
                         pass
                 elif title:
@@ -670,7 +696,11 @@ def _collapse_fragmented_scenarios(scenarios, feature_id='', pi_label='', log=pr
 # Hard ceiling: a single feature should never yield more than this many scenario
 # groups. If grouping ever exceeds it, we log and further-collapse so the suite can
 # never explode into 100+ garbage TCs again.
-_MAX_AREA_SCENARIOS = 30
+# Raised from 30 -> 60: _real_count now correctly counts Verify* rows (not raw
+# fragment lines), so features with 30-54 genuinely distinct scenarios no longer
+# hit the ceiling. Plan-matrix Requirement 11.3 (spec doc) should be updated to
+# reflect the new effective maximum of 60.
+_MAX_AREA_SCENARIOS = 60
 
 _AREA_VERB_RE = re.compile(
     r'^(verify|validate|confirm|ensure|check|test)\b', re.IGNORECASE)
@@ -711,12 +741,45 @@ def _area_row_is_real(title):
     return bool(_AREA_VERB_RE.match(t) or re.match(r'^TS[_\s]?[A-Z0-9]+', t, re.IGNORECASE))
 
 
-def _extract_area_scenarios_from_tables(tables, feature_id=''):
+def _owned_title_keys(titles, n=55):
+    """Normalised prefix keys for the feature's OWN scenario titles (for table scoping)."""
+    keys = set()
+    for t in (titles or []):
+        k = re.sub(r'[^a-z0-9 ]', ' ', _area_norm(t).lower())
+        k = ' '.join(k.split())
+        if len(k) >= 20:
+            keys.add(k[:n])
+    return keys
+
+
+def _row_belongs_to_feature(row_title, owned_keys, n=55):
+    """True when a table row title matches one of the feature's own scenario titles."""
+    if not owned_keys:
+        return True  # no scoping signal available — keep legacy behaviour
+    k = re.sub(r'[^a-z0-9 ]', ' ', _area_norm(row_title).lower())
+    k = ' '.join(k.split())
+    if len(k) < 20:
+        return False
+    kp = k[:n]
+    for ok in owned_keys:
+        if kp == ok or kp.startswith(ok[:35]) or ok.startswith(kp[:35]):
+            return True
+    return False
+
+
+def _extract_area_scenarios_from_tables(tables, feature_id='', owned_titles=None):
     """Group CLEAN scenario-table rows into TEST AREAS (one area = one scenario, its
     detail 'Verify...' rows become steps). Returns list[dict] or [] if no clean table.
-    Skips the 'Feature ID'-led merged summary table and 1-cell JSON fragment rows."""
+    Skips the 'Feature ID'-led merged summary table and 1-cell JSON fragment rows.
+
+    A Chalk PI page carries tables for EVERY feature on that page, so tables are scoped
+    to this feature by cross-checking row titles against the feature's own parsed
+    scenarios (owned_titles). Without this, a feature inherits other features' tables.
+    """
     from collections import OrderedDict, Counter
     areas = OrderedDict()
+    owned_keys = _owned_title_keys(owned_titles)
+    _skipped_foreign = 0
     try:
         for tbl in (tables or []):
             if not isinstance(tbl, list) or len(tbl) < 2:
@@ -743,6 +806,15 @@ def _extract_area_scenarios_from_tables(tables, feature_id=''):
             real = [r for r in data if _area_row_is_real(r[scn])]
             if len(real) < max(1, 0.5 * len(data)):
                 continue  # not a clean scenario table
+            # FEATURE SCOPING: a PI page holds tables for every feature on it. Keep only
+            # tables whose rows match this feature's own parsed scenarios.
+            if owned_keys:
+                _owned_rows = [r for r in real
+                               if _row_belongs_to_feature(r[scn], owned_keys)]
+                if not _owned_rows:
+                    _skipped_foreign += 1
+                    continue  # table belongs to a different feature on the same page
+                real = _owned_rows
             fams = []
             for r in real:
                 tsid = _area_norm(r[idc]) if idc is not None and len(r) > idc else ''
@@ -768,6 +840,9 @@ def _extract_area_scenarios_from_tables(tables, feature_id=''):
                     bucket['validations'].append(_area_norm(r[val]))
     except Exception:
         return []
+    if _skipped_foreign:
+        print('[CHALK-AREA] %s: skipped %d table(s) belonging to other features on this PI page'
+              % (feature_id or '?', _skipped_foreign))
     out = []
     for label, b in areas.items():
         out.append({'title': label, 'row_titles': b['titles'], 'validations': b['validations']})
@@ -893,6 +968,27 @@ def load_chalk_as_object(feature_id: str, pi_label: str):
     raw = load_chalk(feature_id, pi_label)
     if not raw:
         return None
+
+    # ── Cache-poisoning guard ──────────────────────────────────────────────
+    # An older crawl "self-healed" a missing feature by caching the WHOLE PI page
+    # under that feature id, so the row actually holds a different feature's
+    # scenarios. Reject such a row instead of generating a suite from it.
+    # Conservative on purpose: only fires when the feature's own id is absent AND
+    # the text was not truncated (so absence is real) AND other feature headers
+    # are present (so it is demonstrably someone else's page).
+    _rt = raw.get('raw_text', '') or ''
+    if _rt and len(_rt) < 50000 and feature_id.upper() not in _rt.upper():
+        _others = [k for k in dict.fromkeys(
+            re.findall(r'\b([A-Z][A-Z0-9]{2,}-\d+)\b', _rt.upper()))
+            if k != feature_id.upper()][:3]
+        if _others:
+            print('[CHALK-CACHE] POISONED ROW REJECTED: %s/%s holds content for %s '
+                  '(its own id never appears). Re-crawl %s from the PI page that '
+                  'actually hosts it.'
+                  % (feature_id, pi_label, ', '.join(_others), feature_id))
+            return None
+    # ───────────────────────────────────────────────────────────────────────
+
     data = ChalkData(
         feature_id=feature_id,
         scope=raw.get('scope', ''),
@@ -936,9 +1032,19 @@ def load_chalk_as_object(feature_id: str, pi_label: str):
         # 2) Else fall back to grouping the de-fragmented raw-text titles under their
         #    section headers. 3) Else keep the collapse guard. A hard ceiling applies.
         _raw_count = len(data.scenarios)
+        # Chalk often arrives FRAGMENTED: one table row becomes a title row plus
+        # separate "Pre-req:"/"Step N:"/validation rows. Counting those fragments
+        # against the area ceiling is apples-to-oranges (86 fragments = 16 real
+        # scenarios) and wrongly triggers a collapse to a single mega-TC. Count
+        # only rows that actually read as a scenario title.
+        _real_count = sum(1 for _s in data.scenarios
+                          if _AREA_VERB_RE.match((getattr(_s, 'title', '') or '').strip()))
+        _scenario_count = _real_count if _real_count else _raw_count
         _area_scs = []
         try:
-            _areas = _extract_area_scenarios_from_tables(getattr(data, 'tables', []), feature_id)
+            _areas = _extract_area_scenarios_from_tables(
+                getattr(data, 'tables', []), feature_id,
+                owned_titles=[sc.title for sc in data.scenarios])
             if _areas:
                 _area_scs = _areas_to_scenarios(_areas, feature_id, pi_label)
                 if _area_scs:
@@ -947,8 +1053,18 @@ def load_chalk_as_object(feature_id: str, pi_label: str):
                           % (feature_id, pi_label, len(_area_scs), _raw_count))
         except Exception as _ae:
             print('[CHALK-AREA] %s/%s: table-area failed: %s' % (feature_id, pi_label, str(_ae)[:80]))
-        if _area_scs:
+        # Area grouping is a VOLUME-REDUCTION strategy: it collapses a large scenario
+        # table into one TC per test area, with the individual rows becoming steps.
+        # When the feature's own scenario count is already within the ceiling, that
+        # collapse destroys real, distinct scenarios (12 PRR scenarios -> 1 TC). Only
+        # group when the raw count actually exceeds the ceiling.
+        if _area_scs and _scenario_count > _MAX_AREA_SCENARIOS:
             data.scenarios = _area_scs
+        elif _area_scs:
+            print('[CHALK-AREA] %s/%s: %d real scenarios within ceiling (%d) — keeping 1:1 '
+                  '(no area collapse)' % (feature_id, pi_label, _scenario_count, _MAX_AREA_SCENARIOS))
+            data.scenarios = _collapse_fragmented_scenarios(
+                data.scenarios, feature_id, pi_label, log=print)
         else:
             # No clean table. First try grouping the RAW titles by their section
             # headers (headers still present here, before junk-filter removed them) so

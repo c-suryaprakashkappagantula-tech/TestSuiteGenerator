@@ -36,8 +36,13 @@ def _load_ui_map() -> dict:
         if p.exists():
             with open(p, 'r', encoding='utf-8') as f:
                 _UI_MAP = json.load(f)
+            logger.info('NBOP UI map loaded from %s (%d entries)', p, len(_UI_MAP))
             return _UI_MAP
     _UI_MAP = {}
+    logger.warning(
+        '[NBOP-UI] nbop_ui_map.json NOT FOUND — UI step grounding disabled. '
+        'Place nbop_ui_map.json at one of: %s',
+        ', '.join(str(p) for p in _UI_MAP_PATHS))
     return _UI_MAP
 
 

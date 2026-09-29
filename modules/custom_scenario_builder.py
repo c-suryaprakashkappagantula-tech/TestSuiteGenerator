@@ -345,6 +345,45 @@ def build_custom_scenarios(custom_text: str, jira=None, log=print) -> List:
                 if sc is not None:
                     scenarios.append(sc)
 
+        # 3. Negative scenario coverage — when explicitly requested.
+        _NEGATIVE_KEYWORDS = ['negative', 'negative scenario', 'include negative',
+                               'negative test', 'error', 'invalid', 'boundary']
+        _wants_negative = any(kw in tl for kw in _NEGATIVE_KEYWORDS)
+        if _wants_negative:
+            _neg_types = [
+                ('Invalid Input', 'Submit request with invalid/missing required fields'),
+                ('Boundary Exceeded', 'Submit request where a field value exceeds defined length/range'),
+                ('Unauthorized Access', 'Submit request without valid credentials or permissions'),
+            ]
+            for _neg_title, _neg_desc in _neg_types:
+                sc = _new_scenario(
+                    title='Negative: Verify %s handles %s gracefully' % (feat_short, _neg_title.lower()),
+                    description=_neg_desc + '. System should return appropriate error code.',
+                    category='Negative',
+                    tags=['user_requested', 'negative'])
+                if sc is not None:
+                    scenarios.append(sc)
+
+        # 4. Lifecycle operation scenarios — when matrix/full-coverage requested.
+        _MATRIX_KEYWORDS = ['device matrix', 'plan matrix', 'all device', 'all plan',
+                             'every device', 'every plan', 'prepare for all', 'prepare test suite for all']
+        _wants_matrix = any(kw in tl for kw in _MATRIX_KEYWORDS)
+        if _wants_matrix:
+            _lifecycle_ops = [
+                ('Activation', 'Verify device can be activated end-to-end'),
+                ('Deactivation', 'Verify device can be deactivated and line status updates'),
+                ('Hotline', 'Verify hotline restriction is applied and removed correctly'),
+                ('Suspend', 'Verify line suspension and restoration flow'),
+            ]
+            for _op_title, _op_desc in _lifecycle_ops:
+                sc = _new_scenario(
+                    title='Verify %s - %s flow' % (feat_short, _op_title),
+                    description=_op_desc + ' Confirm downstream system updates.',
+                    category='Happy Path',
+                    tags=['user_requested', 'lifecycle:%s' % _op_title.lower()])
+                if sc is not None:
+                    scenarios.append(sc)
+
         if scenarios and log:
             try:
                 log('[V8-CUSTOM]   Custom builder added %d scenario(s) '

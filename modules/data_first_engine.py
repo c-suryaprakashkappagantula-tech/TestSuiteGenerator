@@ -665,6 +665,16 @@ def build_test_suite_v8(
         log('[V8-ENGINE]   WARNING: QMetry pattern enrichment failed: %s — continuing' % str(_ql_err)[:100])
         _record_degraded('QMetry pattern enrichment', _ql_err)
 
+    # ── TC-name polish: strip implementation detail (VARCHAR(45), (regression))
+    #    and prefix bare-data-field titles with the feature's subject entity,
+    #    mined from Chalk's own "Verify a <X> with ..." phrasing. ──
+    try:
+        from .tc_name_polish import polish_suite_names as _polish_names
+        _polish_names(suite, chalk=chalk, log=log)
+    except Exception as _np_err:
+        log('[V8-ENGINE]   WARNING: TC name polish failed: %s — continuing' % str(_np_err)[:100])
+        _record_degraded('TC name polish', _np_err)
+
     # ── API endpoint grounding: cite real NSL/NBO endpoints + HTTP method on
     #    ungrounded 'Trigger <op> API' steps, using TMO_API_Chalk specs. ──
     try:
@@ -2150,6 +2160,25 @@ def _apply_custom_instructions(
     except Exception as _cs_err:
         log('[V8-CUSTOM]   WARNING: custom scenario builder failed: %s — continuing' % str(_cs_err)[:120])
         _record_degraded('custom scenario builder', _cs_err)
+
+    # ── Structured instruction parsing (keyword overrides + extra_negatives + expand_matrix) ──
+    try:
+        from .instruction_parser import parse_instructions, apply_adjustments
+        adjustments = parse_instructions(custom_text, options, log)
+        options = apply_adjustments(options, adjustments)
+        # Wire extra_negatives into options so downstream step builders pick it up
+        if adjustments.get('extra_negatives'):
+            options.setdefault('extra_negatives', [])
+            options['extra_negatives'] = list(set(
+                options.get('extra_negatives', []) + adjustments['extra_negatives']))
+            log('[CUSTOM]   extra_negatives wired: %s' % options['extra_negatives'])
+        # Wire expand_matrix so the combinatorial expander fires
+        if adjustments.get('expand_matrix'):
+            options['expand_matrix'] = True
+            log('[CUSTOM]   expand_matrix=True wired from custom instructions')
+    except Exception as _ip_err:
+        log('[V8-CUSTOM]   WARNING: instruction parser failed: %s — continuing' % str(_ip_err)[:120])
+        _record_degraded('instruction parser', _ip_err)
 
     return dimension_set
 

@@ -921,6 +921,30 @@ def _group_ac_items_with_children(ac_items: List[str], subtask_key: str) -> List
     return results
 
 
+# A bare "no"/"without" is NOT a negative-test signal: "processes files without
+# rejection" and "no downtime" are positive assertions. Only real prohibitions
+# ("should not", "must not", "never") mark a scenario as negative.
+_TRUE_NEGATION_RE = re.compile(
+    r'\b(?:should\s+not|shall\s+not|must\s+not|does\s+not|do\s+not|is\s+not|are\s+not|'
+    r'cannot|can\'?t|won\'?t|never|not\s+be\s+(?:sent|created|allowed|processed|updated))\b',
+    re.IGNORECASE)
+
+
+def _lower_first_word(s: str) -> str:
+    """Lowercase the first character, unless the first token is an acronym.
+
+    Blind s[0].lower() turned "NSL successfully processes..." into
+    "nSL successfully processes..." in generated TC titles.
+    """
+    if not s:
+        return s
+    m = re.match(r'^(\S+)', s)
+    tok = m.group(1) if m else ''
+    if len(tok) > 1 and tok[0].isupper() and any(c.isupper() for c in tok[1:]):
+        return s  # NSL / TMO / API / PRR — leave as written
+    return s[0].lower() + s[1:]
+
+
 def _clean_ac_title(ac_text: str) -> str:
     """Clean an AC line into a usable scenario title.
 
@@ -1092,8 +1116,15 @@ def _infer_category_from_ac(ac_text: str) -> str:
     # NOT "removed" or "hidden" — those are intentional UI behavior for hide features
     negative_keywords = ['error', 'fail', 'invalid', 'reject', 'denied',
                          'unauthorized', 'forbidden', 'timeout']
+    # A NEGATED failure word asserts success, not failure: "processes files without
+    # rejection", "completes with no error". Only an un-negated one means Negative.
+    _negated_before = re.compile(
+        r'\b(?:without|no|not|never|avoid[s]?|avoiding|free\s+of|instead\s+of|'
+        r'rather\s+than)\s+(?:\w+\s+){0,2}$')
     for kw in negative_keywords:
-        if kw in text_lower:
+        for _m in re.finditer(r'\b' + re.escape(kw), text_lower):
+            if _negated_before.search(text_lower[max(0, _m.start() - 24):_m.start()]):
+                continue  # negated -> this is a success assertion
             return 'Negative'
 
     # Edge case indicators (boundary conditions)
@@ -1496,6 +1527,9 @@ def _extract_scenarios_from_chalk_data(chalk, log: Callable = print) -> tuple:
         # Dataclass instances are intentionally extensible; carrying this private
         # source ordinal avoids changing the shared model or unrelated call sites.
         setattr(extracted, '_source_tc_num', _source_tc_num)
+        # Chalk's own "Pre-req:" text is ground truth written by the test architect.
+        # Carry it so tc_builder can use it verbatim instead of a generic template.
+        setattr(extracted, 'chalk_prereq', (getattr(sc, 'prereq', '') or '').strip())
         scenarios.append(extracted)
 
     if scenarios:
@@ -2181,11 +2215,11 @@ def _extract_scenarios_from_direct_subtasks(
             # Convert to "Verify..." if not already starting with an action verb
             if not re.match(r'^(verify|validate|ensure|confirm|check)\b', title, re.IGNORECASE):
                 # Detect explicitly negative assertion (must NOT happen)
-                if re.search(r'\b(not|no|never|without)\b', b_lower):
+                if _TRUE_NEGATION_RE.search(b_stripped):
                     # Keep the phrasing — category will be Negative
-                    title = 'Verify that: ' + title[0].lower() + title[1:]
+                    title = 'Verify that: ' + _lower_first_word(title)
                 else:
-                    title = 'Verify ' + title[0].lower() + title[1:]
+                    title = 'Verify ' + _lower_first_word(title)
 
             category = _infer_category_from_ac(b_stripped)
             # Override: explicit "no X" / "not send" → always Negative
@@ -2302,11 +2336,16 @@ def _extract_no_notification_negative_from_jira_ac(
             continue
         if _SKIP_PATTERNS.match(line_stripped):
             continue
-        # Must contain at least one action verb OR a negation keyword to be testable
+        # Must contain at least one action verb OR any negation-ish word to be testable.
+        # The ADMISSION test stays broad (a line like "... remains unchanged" is
+        # testable); only the NEGATIVE-category decision below uses the strict test.
         has_verb = bool(_TESTABLE_VERBS.search(line_stripped))
-        has_negation = bool(re.search(r'\b(no|not|never|without|zero)\b', line_stripped, re.IGNORECASE))
-        if not (has_verb or has_negation):
+        has_neg_word = bool(re.search(r'\b(no|not|never|without|zero|unchanged|unaffected)\b',
+                                      line_stripped, re.IGNORECASE))
+        if not (has_verb or has_neg_word):
             continue
+        # Strict: only a real prohibition makes this a negative test.
+        has_negation = bool(_TRUE_NEGATION_RE.search(line_stripped))
 
         # ── Build title ──────────────────────────────────────────────
         title = _clean_ac_title(line_stripped)
@@ -2318,9 +2357,9 @@ def _extract_no_notification_negative_from_jira_ac(
             if matched_neg:
                 title = matched_neg
             elif has_negation:
-                title = 'Verify that: ' + title[0].lower() + title[1:]
+                title = 'Verify that: ' + _lower_first_word(title)
             else:
-                title = 'Verify ' + title[0].lower() + title[1:]
+                title = 'Verify ' + _lower_first_word(title)
 
         norm_title = re.sub(r'\s+', ' ', title.lower()).strip()
         if norm_title in norm_existing or len(norm_title) < 15:

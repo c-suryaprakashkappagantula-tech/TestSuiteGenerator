@@ -29,6 +29,7 @@ def parse_instructions(text, options, log=print):
         'include_data_integrity': False,
         'include_auth_failure': False,
         'prioritize_e2e': False,
+        'expand_matrix': False,
         'raw_instructions': text,
     }
 
@@ -103,6 +104,20 @@ def parse_instructions(text, options, log=print):
         adjustments['prioritize_e2e'] = True
         log('[CUSTOM]   Priority: E2E scenarios')
 
+    # ── Negative scenario coverage ──
+    if any(kw in t for kw in ['negative scenario', 'include negative', 'negative test',
+                                'add negative', 'negative case', 'negative coverage']):
+        adjustments['extra_negatives'].extend(['invalid_input', 'missing_field', 'boundary_exceeded'])
+        log('[CUSTOM]   Extra: negative/error scenarios requested')
+
+    # ── Device / plan matrix expansion ──
+    if any(kw in t for kw in ['device matrix', 'all device', 'all devices',
+                                'every device', 'device combination', 'device/plan matrix',
+                                'plan matrix', 'all plan', 'all plans', 'every plan',
+                                'prepare test suite for all', 'prepare for all']):
+        adjustments['expand_matrix'] = True
+        log('[CUSTOM]   Matrix: full device/plan combinatorial expansion requested')
+
     # ── Focus on specific features ──
     feature_keywords = {
         'change bcd': 'Change BCD', 'bcd': 'Change BCD',
@@ -155,5 +170,9 @@ def apply_adjustments(options, adjustments):
         opts['networks'] = adjustments['filter_networks']
     if adjustments.get('filter_os'):
         opts['os_platforms'] = adjustments['filter_os']
+    if adjustments.get('expand_matrix'):
+        opts['expand_matrix'] = True
+    if adjustments.get('extra_negatives'):
+        opts['extra_negatives'] = list(adjustments['extra_negatives'])
 
     return opts

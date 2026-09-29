@@ -516,7 +516,12 @@ def _build_testcases_sheet(wb, suite: TestSuite, sheet_name=None, tc_subset=None
         sheet_sno = str(sheet_idx)
         # Clean summary: replace old global TC number with per-sheet number
         import re as _re2
-        clean_summary = _re2.sub(r'^TC\d+_', 'TC%02d_' % sheet_idx, tc.summary)
+        # Renumber an existing TCnn_ prefix, or ADD one when the summary has none -
+        # otherwise a non-prefixed summary reached the sheet name unnumbered.
+        if _re2.match(r'^TC\d+_', tc.summary):
+            clean_summary = _re2.sub(r'^TC\d+_', 'TC%02d_' % sheet_idx, tc.summary)
+        else:
+            clean_summary = 'TC%02d_%s' % (sheet_idx, tc.summary)
         # Add NEW tag for auto-diff identified new TCs
         if getattr(tc, '_is_new', False):
             clean_summary = '🆕 ' + clean_summary

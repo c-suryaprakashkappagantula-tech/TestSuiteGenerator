@@ -79,9 +79,8 @@ def discover_pi_links_rest(log=print, pi_range=range(46, 60)) -> Optional[List[P
         # health_check_with_refresh, not health_check: PI discovery is USER-INITIATED, so
         # recovering an expired session here is appropriate - and Chalk's auto_refresh_session
         # tries silent headless SSO first, only opening a visible login window if that fails.
-        # Every other Chalk entry point in the dashboard already does this; this one was the
-        # odd one out, so an expired cookie sent discovery to the browser path with no attempt
-        # to re-authenticate.
+        # Every other Chalk entry point already does this; this one was the odd one out, so an
+        # expired cookie sent discovery to the browser path with no attempt to re-authenticate.
         if not client.health_check_with_refresh():
             log('[CHALK-REST] Health check failed (refresh attempted) — will use browser')
             return None
@@ -154,6 +153,28 @@ def fetch_feature_rest(page_id: str, feature_id: str, log=print) -> Optional[Cha
         return None
 
 
+_OTHER_FID_RE = re.compile(r'^([A-Z][A-Z0-9]{2,}-\d+)\b')
+
+
+def _other_feature_ids_on_page(lines: List[str], fid: str, limit: int = 6) -> List[str]:
+    """Jira feature keys that head a line on this page but are NOT the requested one.
+
+    Used to tell a multi-feature PI page (where an absent feature must yield NOTHING)
+    apart from a direct single-feature page (where self-heal is legitimate).
+    """
+    seen = []
+    for ln in lines:
+        m = _OTHER_FID_RE.match((ln or '').strip())
+        if not m:
+            continue
+        key = m.group(1).upper()
+        if key != fid.upper() and key not in seen:
+            seen.append(key)
+            if len(seen) >= limit:
+                break
+    return seen
+
+
 def _parse_feature_from_lines(lines: List[str], data: ChalkData, feature_id: str, log=print):
     """Parse feature content from text lines into ChalkData.
 
@@ -177,7 +198,18 @@ def _parse_feature_from_lines(lines: List[str], data: ChalkData, feature_id: str
                 break
 
     if feature_start == -1:
-        # Treat entire content as feature (same self-heal as browser path)
+        # The feature is not on this page. Self-heal (treat the whole page as the
+        # feature) is ONLY valid for a direct single-feature URL. On a multi-feature
+        # PI page it would cache a DIFFERENT feature's content under this feature id,
+        # which is how a suite ends up full of another feature's scenarios.
+        _others = _other_feature_ids_on_page(lines, fid)
+        if _others:
+            log('[CHALK-REST] ERROR: %s is NOT on this page (page carries %s). '
+                'Refusing to self-heal — returning no data rather than another '
+                "feature's content." % (feature_id, ', '.join(_others[:3])))
+            data.raw_text = ''
+            data.tables = []
+            return
         if len(lines) > 10:
             feature_start = 0
             feature_end = len(lines)
@@ -282,13 +314,28 @@ EXTRACT_TABLES_JS = """() => {
     var roots = document.querySelectorAll('.tabs-pane, [role="tabpanel"], #main-content, .wiki-content, article');
     if (!roots.length) roots = [document.body];
     var result = [], seen = new Set();
+    // Recognized scenario-table headers — we include nested tables only when they look like
+    // scenario tables (Scenario # | Test Scenario | Validations). Pure outer tables that have
+    // 'Feature ID' in the header are summary tables and are skipped by database.py anyway.
+    var SCENARIO_HDR_RE = /\\b(scenario|test scenario|validations?|scenario\\s*#)\\b/i;
     roots.forEach(function(root) {
         root.querySelectorAll('table').forEach(function(tbl) {
-            if (tbl.closest('table') !== tbl) return;
             if (seen.has(tbl)) return;
             seen.add(tbl);
+            var isTopLevel = (tbl.closest('table') === tbl);
+            // For nested tables, only include them when they look like scenario tables
+            if (!isTopLevel) {
+                var hdrRow = tbl.querySelector('tr');
+                var hdrText = hdrRow ? hdrRow.textContent : '';
+                if (!SCENARIO_HDR_RE.test(hdrText)) return;
+            }
             var rows = [];
-            tbl.querySelectorAll('tr').forEach(function(tr) {
+            // For top-level tables: use direct child rows to avoid nested table bleed-in.
+            // For nested scenario tables: capture all rows.
+            var trSelector = isTopLevel ? ':scope > tbody > tr, :scope > tr' : 'tr';
+            tbl.querySelectorAll(trSelector).forEach(function(tr) {
+                // Skip rows that belong to a deeper nested table inside this one
+                if (!isTopLevel && tr.closest('table') !== tbl) return;
                 var cells = [];
                 tr.querySelectorAll('th,td').forEach(function(td) {
                     cells.push(td.textContent.trim());
@@ -473,8 +520,19 @@ def fetch_feature_from_pi(page, pi_url: str, feature_id: str, log=print) -> Chal
 
     if feature_start == -1:
         log(f'[CHALK] [WARN] Feature {feature_id} not found on this page')
-        # SELF-HEAL: If the page was provided as a direct feature URL (manual mode),
-        # the entire page IS the feature content. Parse all lines as the feature section.
+        # SELF-HEAL: valid ONLY when the page was provided as a direct feature URL
+        # (manual mode), i.e. it carries no other feature headers. On a multi-feature
+        # PI page, self-healing would cache a DIFFERENT feature's content under this
+        # feature id — the cause of suites full of unrelated scenarios.
+        _others = _other_feature_ids_on_page(lines, fid)
+        if _others:
+            log('[CHALK] ERROR: %s is NOT on this page (page carries %s). '
+                'Refusing to self-heal — returning no data rather than another '
+                "feature's content. Point the crawl at the PI page that actually "
+                'hosts %s.' % (feature_id, ', '.join(_others[:3]), feature_id))
+            data.raw_text = ''
+            data.tables = []
+            return data
         if len(lines) > 10:
             log(f'[CHALK]   Self-heal: treating entire page ({len(lines)} lines) as feature content')
             feature_start = 0
@@ -654,7 +712,11 @@ def _parse_numbered_format(lines, data, fid, numbered_row_pat, log=print):
 
             # Save previous scenario
             if current_scenario:
-                data.scenarios.append(current_scenario)
+                _title_raw = (current_scenario.title or '').strip()
+                if len(_title_raw) < 5 or re.match(r'^[.\s\d]*$', _title_raw):
+                    log('[CHALK-PARSE] SKIP degenerate title %r — likely broken table row' % _title_raw[:20])
+                else:
+                    data.scenarios.append(current_scenario)
 
             title = parts[0] if parts else rest
             # Guard: reject table header text leaking into validation column
@@ -683,7 +745,11 @@ def _parse_numbered_format(lines, data, fid, numbered_row_pat, log=print):
 
     # Last scenario
     if current_scenario:
-        data.scenarios.append(current_scenario)
+        _title_raw = (current_scenario.title or '').strip()
+        if len(_title_raw) < 5 or re.match(r'^[.\s\d]*$', _title_raw):
+            log('[CHALK-PARSE] SKIP degenerate title %r — likely broken table row' % _title_raw[:20])
+        else:
+            data.scenarios.append(current_scenario)
 
     log('[CHALK]   Parsed %d scenarios (numbered format)' % len(data.scenarios))
 
@@ -715,6 +781,14 @@ def _parse_freeform(lines, data, fid, log=print):
         'happy path workflow': 'Happy Path',
         'failure workflow': 'Negative',
         'edge case workflow': 'Edge Case',
+        # PI-54 format uses "Test Scenarios:" / "Test Scenario" as the section header
+        'test scenarios': 'Happy Path',
+        'test scenarios:': 'Happy Path',
+        'test scenario': 'Happy Path',
+        'test scenario:': 'Happy Path',
+        # Generic "scenarios:" sections in older PI format
+        'scenarios': 'Happy Path',
+        'scenarios:': 'Happy Path',
     }
     SKIP_WORDS = ['summary:', 'scope:', 'description:', 'feature id', 'feature:',
                   'note:', 'notes:', 'channels -', 'devices:', 'external systems',
@@ -756,7 +830,8 @@ def _parse_freeform(lines, data, fid, log=print):
         if is_section:
             continue
 
-        if ln_low.startswith('confirm'):
+        # Only skip bare "Confirm:" label (section divider), NOT "Confirm that..." scenario lines
+        if ln_low.strip() in ('confirm:', 'confirm'):
             continue
 
         # If we haven't hit a section header yet, everything is scope
@@ -795,7 +870,11 @@ def _parse_freeform(lines, data, fid, log=print):
 
         # This is a scenario line
         if current_scenario:
-            data.scenarios.append(current_scenario)
+            _title_raw = (current_scenario.title or '').strip()
+            if len(_title_raw) < 5 or re.match(r'^[.\s\d]*$', _title_raw):
+                log('[CHALK-PARSE] SKIP degenerate title %r — likely broken table row' % _title_raw[:20])
+            else:
+                data.scenarios.append(current_scenario)
 
         current_scenario = ChalkScenario(
             scenario_id='TS_%s_%d' % (fid, idx),
@@ -806,7 +885,11 @@ def _parse_freeform(lines, data, fid, log=print):
         idx += 1
 
     if current_scenario:
-        data.scenarios.append(current_scenario)
+        _title_raw = (current_scenario.title or '').strip()
+        if len(_title_raw) < 5 or re.match(r'^[.\s\d]*$', _title_raw):
+            log('[CHALK-PARSE] SKIP degenerate title %r — likely broken table row' % _title_raw[:20])
+        else:
+            data.scenarios.append(current_scenario)
 
     # Fix 3: Dedup uses TITLE-BASED comparison, not word overlap.
     # Similar scenarios like "YL sync active→suspend" vs "YL sync suspend→active"
@@ -912,12 +995,30 @@ def _is_section_header_text(text: str) -> bool:
     )
 
 
+_TS_SECTION_CAT = {
+    'positive scenarios': 'Happy Path',
+    'positive:': 'Happy Path',
+    'happy path workflow': 'Happy Path',
+    'happy path': 'Happy Path',
+    'negative scenarios': 'Negative',
+    'negative:': 'Negative',
+    'failure workflow': 'Negative',
+    'failure scenarios': 'Negative',
+    'edge scenarios': 'Edge Case',
+    'edge cases': 'Edge Case',
+    'edge case workflow': 'Edge Case',
+    'regression scenarios': 'Regression',
+    'regression:': 'Regression',
+}
+
+
 def _parse_ts_format(lines, data, fid, ts_pattern, log=print):
     """Parse Format A: TS_MWTGPROV-XXXX_N scenario blocks.
     Captures all text before first TS_ pattern as feature description."""
     current_scenario = None
     current_section = ''
     found_first_scenario = False
+    _section_category = None  # category inferred from Test Area column header
 
 
     for ln in lines:
@@ -951,7 +1052,11 @@ def _parse_ts_format(lines, data, fid, ts_pattern, log=print):
         if m:
             found_first_scenario = True
             if current_scenario:
-                data.scenarios.append(current_scenario)
+                _title_raw = (current_scenario.title or '').strip()
+                if len(_title_raw) < 5 or re.match(r'^[.\s\d]*$', _title_raw):
+                    log('[CHALK-PARSE] SKIP degenerate title %r — likely broken table row' % _title_raw[:20])
+                else:
+                    data.scenarios.append(current_scenario)
             # Use the ACTUAL matched TS id (m.group(0)) so linked-story ids like
             # TS_NSLNM770_2 are preserved; fall back to the feature-scoped id only
             # if the match somehow has no full text.
@@ -971,6 +1076,10 @@ def _parse_ts_format(lines, data, fid, ts_pattern, log=print):
                 current_scenario.title = remaining  # May be empty — filled by next line
             current_section = 'scenario_title_pending' if not current_scenario.title else 'scenario'
 
+            # Apply Test Area section category if no inline category found yet
+            if _section_category:
+                current_scenario.category = _section_category
+
             # Check for validation and category in tab-separated parts
             for p in parts:
                 p_low = p.strip().lower()
@@ -983,6 +1092,13 @@ def _parse_ts_format(lines, data, fid, ts_pattern, log=print):
             continue
 
         if not current_scenario:
+            # Between TS blocks: detect Test Area section headers ("Positive Scenarios", etc.)
+            # to set category for the upcoming TS blocks.
+            _ln_low_bare = ln.lower().strip().rstrip(':')
+            for _hdr, _cat in _TS_SECTION_CAT.items():
+                if _hdr == _ln_low_bare or _hdr == _ln_low_bare + ':':
+                    _section_category = _cat
+                    break
             continue
 
         # If title is pending (scenario ID was alone on its line), grab first content line as title
@@ -1040,8 +1156,25 @@ def _parse_ts_format(lines, data, fid, ts_pattern, log=print):
         elif current_section == 'derivation' and not any(ln_low.startswith(p) for p in ['step', 'variation', 'note', 'pre-', 'cdr']):
             current_scenario.derivation_rule += '\n' + ln.strip()
         elif current_section == 'steps' and ln.strip() and not ln_low.startswith('step '):
+            # Check for "Expected Outcome:" → route to validation, not steps
+            if re.match(r'^\s*expected\s+(?:outcome|result)s?\s*[:\-]', ln, re.IGNORECASE):
+                _exp_body = re.sub(r'^\s*expected\s+(?:outcome|result)s?\s*[:\-]\s*', '', ln, flags=re.IGNORECASE).strip()
+                if _exp_body:
+                    current_scenario.validation = _exp_body
+                current_section = 'validation'
+                continue
+            # Skip Test Area section headers ("Positive Scenarios", "Negative Scenarios") that
+            # leak between TS blocks from the outer table's Test Area column.
+            _ln_low_bare = ln_low.rstrip(':')
+            _is_sect_hdr = any(_ln_low_bare == _h or _ln_low_bare == _h.rstrip(':')
+                               for _h in _TS_SECTION_CAT)
+            if _is_sect_hdr:
+                for _h, _cat in _TS_SECTION_CAT.items():
+                    if _ln_low_bare == _h or _ln_low_bare == _h.rstrip(':'):
+                        _section_category = _cat
+                        break
+                continue
             # After steps: remaining content is the validation/expected result
-            # (e.g., "Response contains: houseNo='123', streetName='Main Street'...")
             if current_scenario.validation == current_scenario.title or not current_scenario.validation:
                 current_scenario.validation = ln.strip()
             else:
@@ -1072,7 +1205,11 @@ def _parse_ts_format(lines, data, fid, ts_pattern, log=print):
 
     # Last scenario
     if current_scenario:
-        data.scenarios.append(current_scenario)
+        _title_raw = (current_scenario.title or '').strip()
+        if len(_title_raw) < 5 or re.match(r'^[.\s\d]*$', _title_raw):
+            log('[CHALK-PARSE] SKIP degenerate title %r — likely broken table row' % _title_raw[:20])
+        else:
+            data.scenarios.append(current_scenario)
 
     log('[CHALK]   Parsed %d scenarios (TS format)' % len(data.scenarios))
 

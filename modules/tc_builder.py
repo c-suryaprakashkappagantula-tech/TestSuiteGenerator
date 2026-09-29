@@ -1000,6 +1000,9 @@ def _build_scenario_tc(
             _success_msg = _success_msg.rstrip(',;: ') + '.'
 
         for i, hint in enumerate(scenario.steps_hint, 1):
+            # Chalk writes "Step 1: ..." inline; the workbook already has a Step #
+            # column, so drop the prefix rather than repeating the number.
+            hint = _STEP_NUM_PREFIX_RE.sub('', (hint or '').strip()).strip() or hint
             # Derive step-appropriate expected result from the hint text
             step_low = hint.lower()
             _is_last_step = (i == len(scenario.steps_hint))
@@ -1034,10 +1037,15 @@ def _build_scenario_tc(
                 if not _exp.endswith('.'):
                     _exp += ' — confirmed.'
             elif any(kw in step_low for kw in ['verify', 'validate', 'check', 'confirm']):
-                # Generic verify — derive expected from the hint text (not raw AC)
-                _hint_as_expected = hint.replace('Verify ', '').replace('Verify: ', '').replace('Validate ', '').strip()
+                # Generic verify — derive expected from the hint text (not raw AC).
+                # Strip ANY leading check-verb (verify/validate/check/confirm/ensure);
+                # leaving it in produced an expected identical to the step summary.
+                _hint_as_expected = re.sub(
+                    r'^(?:verify|validate|check|confirm|ensure)\b[\s:,\-]*', '',
+                    hint.strip(), flags=re.IGNORECASE).strip()
                 if _hint_as_expected and len(_hint_as_expected) > 10:
-                    _exp = _hint_as_expected if _hint_as_expected.endswith('.') else _hint_as_expected + '.'
+                    _hint_as_expected = _hint_as_expected[0].upper() + _hint_as_expected[1:]
+                    _exp = '%s — confirmed.' % _hint_as_expected.rstrip(' .')
                 elif _is_negative:
                     _exp = _rejection_msg if not _val_is_header else 'System rejects as expected with appropriate error'
                 else:
@@ -1049,13 +1057,13 @@ def _build_scenario_tc(
             elif any(kw in step_low for kw in ['view', 'display', 'observe']):
                 _exp = 'Data displayed correctly matches expected values'
             else:
-                # Fallback: use validation for last step, neutral for others
+                # Fallback: use validation for last step, else derive an outcome from
+                # the step's own text. A bare "Step completed successfully" tells the
+                # tester nothing and reads as filler in review.
                 if _is_last_step and _val and not _val_is_header:
                     _exp = _val
-                elif _is_negative:
-                    _exp = 'Step completed — continue to verification'
                 else:
-                    _exp = 'Step completed successfully'
+                    _exp = _expected_from_step_text(hint, negative=_is_negative)
 
             steps.append(TestStep(
                 step_num=i,
@@ -1316,13 +1324,21 @@ def _build_scenario_tc(
     # chopping mid-phrase at the last underscore.
     clean_title = re.sub(r'[\r\n\t]+', ' ', clean_title)
     clean_title = re.sub(r'\s{2,}', ' ', clean_title).strip()
+    # Strip Confluence macro artifacts that leak from Jira AC text
+    # e.g. "}}",  "}" trailing from {{code}} blocks, "{{...}}" macros
+    clean_title = re.sub(r'\{\{[^}]{0,40}\}\}', '', clean_title)
+    clean_title = re.sub(r'\}\}+', '', clean_title)
+    clean_title = re.sub(r'(?<!\{)\}(?!\})', '', clean_title)
+    # Strip problematic special chars from title (/+, keep hyphens)
+    clean_title = re.sub(r'[/+,]', ' ', clean_title)
+    clean_title = re.sub(r'\s{2,}', ' ', clean_title).strip(' .,;:-–—')
     # If multi-sentence and will exceed limit, keep only the first sentence
-    if len(clean_title) > 140:
+    if len(clean_title) > 90:
         _sentence_break = re.search(r'\.\s+[A-Z]', clean_title)
-        if _sentence_break and _sentence_break.start() > 40:
+        if _sentence_break and _sentence_break.start() > 30:
             clean_title = clean_title[:_sentence_break.start()]
     clean_title_safe = clean_title.replace(' ', '_')
-    _TITLE_MAX = 150  # title portion only — feature_id prefix adds ~15 more chars
+    _TITLE_MAX = 80  # keep titles short and readable; feature_id prefix adds ~15 more chars
     if len(clean_title_safe) > _TITLE_MAX:
         clean_title_safe = _smart_truncate_title(clean_title_safe, _TITLE_MAX)
     summary = '%s_%s' % (feature_id, clean_title_safe)
@@ -1352,7 +1368,50 @@ def _build_scenario_tc(
             if _m:
                 _derived_state = _m.group(1).strip().title()
 
-    if scenario.source.source_type == 'Subtask AC':
+    # Chalk's own "Pre-req:" is ground truth (Rule #1) — prefer it over any template.
+    _chalk_prereq = (getattr(scenario, 'chalk_prereq', '') or '').strip()
+    _chalk_prereq = re.sub(r'^\s*pre-?(?:req|requisite|condition)s?\s*[:\-]\s*', '',
+                           _chalk_prereq, flags=re.IGNORECASE).strip()
+    if _chalk_prereq and len(_chalk_prereq) > 8 and _chalk_prereq.lower() not in (
+            'none', 'n/a', 'na', 'none.', 'nil'):
+        _pc_lines = [p.strip() for p in re.split(r'\n+', _chalk_prereq) if p.strip()]
+        if len(_pc_lines) == 1:
+            # "An ACTIVE TMO Phone host line (NETWORK_PROVIDER=TMO). eSIM smartwatch to pair."
+            # -> split on sentence boundaries so each precondition is its own numbered line.
+            _parts = [s.strip() for s in re.split(r'(?<=[.;])\s+(?=[A-Z0-9])', _pc_lines[0])
+                      if len(s.strip()) > 3]
+            if len(_parts) > 1:
+                _pc_lines = _parts
+        _tc = TestCase(
+            summary=summary,
+            description=description,
+            preconditions='\n'.join('%d. %s' % (i, p) for i, p in enumerate(_pc_lines, 1)),
+            steps=steps,
+            story_linkage=feature_id,
+            label=feature_id,
+            category=scenario.category,
+            priority=(getattr(scenario, 'priority_hint', '') or 'P2'),
+            traceability=scenario.source,
+            dimension_values={},
+            user_requested=getattr(scenario, 'user_requested', False),
+        )
+        # Rule #1: a Chalk-authored precondition must never be replaced by enrichment.
+        setattr(_tc, 'precond_from_chalk', True)
+        return _tc
+
+    # Detect batch/PRR file-ingestion features — they need entirely different preconditions.
+    _feature_name_lower = (feature_name or '').lower()
+    _is_file_ingestion = any(kw in _feature_name_lower for kw in (
+        'prr', 'batch file', 'sftp', 'file ingest', 'usage file', 'differential report',
+        'batch report', 'data volume', 'mediation file'))
+
+    if _is_file_ingestion:
+        preconditions = '\n'.join([
+            '1. SIT environment is ready and SFTP server is accessible.',
+            '2. Valid PRR/batch test file prepared with correct format and field lengths.',
+            '3. Subscriber line exists in NSL DB with matching MDN for file processing.',
+        ])
+    elif scenario.source.source_type == 'Subtask AC':
         preconditions = '\n'.join([
             '1. Active TMO MDN available in SIT environment',
             '2. User logged into NBOP' if 'nbop' in (scenario.source.source_id or '').lower() or 'ui' in (scenario.source.source_id or '').lower() else '2. API endpoint accessible',
@@ -2029,6 +2088,47 @@ def _assign_serial_numbers(test_cases: List[TestCase], feature_priority: str = '
             tc.priority = 'P2'
 
 
+# Imperative verb -> past participle, for turning a step action into its outcome.
+_STEP_VERB_RESULT = {
+    'ingest': 'ingested', 'submit': 'submitted', 'send': 'sent', 'post': 'posted',
+    'activate': 'activated', 'deactivate': 'deactivated', 'trigger': 'triggered',
+    'monitor': 'monitored', 'observe': 'observed', 'confirm': 'confirmed',
+    'run': 'run', 'execute': 'executed', 'apply': 'applied', 'process': 'processed',
+    'load': 'loaded', 'create': 'created', 'update': 'updated', 'add': 'added',
+    'remove': 'removed', 'delete': 'deleted', 'set': 'set', 'place': 'placed',
+    'upload': 'uploaded', 'download': 'downloaded', 'capture': 'captured',
+    'search': 'searched', 'select': 'selected', 'enter': 'entered',
+}
+
+_STEP_NUM_PREFIX_RE = re.compile(r'^\s*step\s*\d+\s*[:.)\-]\s*', re.IGNORECASE)
+
+
+def _expected_from_step_text(hint: str, negative: bool = False) -> str:
+    """Derive a step-specific expected result from the step's own text.
+
+    Chalk steps are either imperative ("Ingest a TMO PRR file ...") or already
+    declarative ("NETWORK_PROVIDER=TMO == requestType=TMO -> validation passes.").
+    Imperatives are restated as a completed outcome; declaratives are asserted as
+    confirmed. Either way the tester gets something specific rather than a constant.
+    """
+    h = _STEP_NUM_PREFIX_RE.sub('', (hint or '').strip()).strip()
+    h = re.sub(r'\s{2,}', ' ', h).rstrip(' .;:')
+    if len(h) < 8:
+        return 'Step completed — continue to verification.' if negative \
+            else 'Step completed successfully.'
+
+    m = re.match(r'^([A-Za-z]+)\b\s*(.*)$', h, re.DOTALL)
+    verb = (m.group(1).lower() if m else '')
+    rest = (m.group(2).strip() if m else '')
+
+    if verb in _STEP_VERB_RESULT and rest:
+        rest = rest[0].upper() + rest[1:]
+        return '%s %s successfully.' % (rest, _STEP_VERB_RESULT[verb])
+
+    # Declarative / technical assertion — assert it holds.
+    return '%s — confirmed.' % (h[0].upper() + h[1:])
+
+
 def _smart_truncate_title(title: str, max_len: int) -> str:
     """Truncate a TC title at a natural sentence/phrase boundary.
 
@@ -2077,14 +2177,27 @@ def _smart_truncate_title(title: str, max_len: int) -> str:
 
 
 def _strip_unclosed_paren(title: str) -> str:
-    """Remove trailing unclosed parenthesis content from a title.
+    """Remove trailing unclosed parenthesis content and any word left dangling.
+
     E.g. 'foo_(single-bucket' → 'foo'
+         'foo_the_old_assumption_is' → 'foo_the_old_assumption'
+    Truncating on a word boundary can still land on a connective ("...assumption_is"),
+    which reads as an unfinished name in review.
     """
     import re as _re
     # If there's a '(' without a matching ')' at the end, strip from the '(' onwards
     if '(' in title and title.count('(') > title.count(')'):
         title = _re.sub(r'_?\([^)]*$', '', title)
-    return title.rstrip('_-,')
+    title = title.rstrip('_-,')
+    _dangling = _re.compile(
+        r'_(?:is|are|was|were|be|been|being|the|a|an|to|of|with|for|and|or|in|on|'
+        r'at|as|that|than|from|by|via|when|if|into|over|under|per)$', _re.IGNORECASE)
+    for _ in range(3):
+        _before = title
+        title = _dangling.sub('', title).rstrip('_-,')
+        if title == _before:
+            break
+    return title
 
 
 def _transform_to_scenario_title(raw_text: str, feature_name: str) -> str:

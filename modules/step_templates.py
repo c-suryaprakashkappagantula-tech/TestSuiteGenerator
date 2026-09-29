@@ -25,6 +25,14 @@ def _sanitize_val(validation, title):
     return v
 
 
+def _trim_title(s: str, n: int) -> str:
+    s = (s or '').strip()
+    if len(s) <= n:
+        return s
+    cut = s.rfind(' ', 0, n)
+    return s[:cut].rstrip(' ,;:-') if cut > n // 2 else s[:n]
+
+
 def get_step_chain(sc_title, sc_validation, feature_context, feature_type=''):
     """Return list of (step_summary, expected_result) tuples based on scenario type.
 
@@ -61,6 +69,36 @@ def get_step_chain(sc_title, sc_validation, feature_context, feature_type=''):
         if _is_notification_content(t):
             return _notification_content_steps(sc_title, sc_validation)
         return _notification_steps(sc_title, sc_validation)
+
+    # GATE: batch_file / PRR features — file ingestion, NOT API features.
+    # Steps: prepare file → ingest via SFTP → check processing → validate output fields.
+    if feature_type == 'batch_file' or any(kw in ctx for kw in (
+            'prr file', 'prr usage', 'batch file', 'sftp ingest', 'file ingestion',
+            'batch ingest', 'usage file', 'tmo prr')):
+        if _is_negative(t):
+            return [
+                ('Prepare a PRR/batch file with invalid or out-of-spec data (e.g. wrong field type, '
+                 'field length exceeds maximum, non-numeric value in numeric field)',
+                 'Invalid file prepared and staged on SFTP for ingestion'),
+                ('Trigger the batch file ingestion process for the prepared invalid file',
+                 'File is picked up by the ingest scheduler / triggered manually'),
+                ('Monitor the processing log / error report for the ingested file',
+                 'Processing log shows file rejected or records skipped — error details captured'),
+                ('Verify no invalid data is written to NSL DB (subscriber records unchanged)',
+                 'NSL DB records for test subscriber remain unaffected; no corrupted data persists'),
+            ]
+        return [
+            ('Prepare a valid PRR/batch file with test subscriber data matching the scenario: %s'
+             % _trim_title(sc_title, 70),
+             'PRR/batch file is correctly formatted, field types/lengths within spec, '
+             'staged on SFTP server ready for ingestion'),
+            ('Trigger the batch file ingestion process (scheduler pick-up or manual trigger)',
+             'File is picked up from SFTP and ingestion process starts successfully'),
+            ('Monitor processing log to confirm file is processed without errors',
+             'Processing log shows all records accepted; no parse errors or field violations'),
+            ('Verify NSL DB / downstream system reflects the updated subscriber data from the file',
+             sc_validation or 'Subscriber data updated correctly — field values match PRR file input'),
+        ]
 
     # Check negative/error FIRST — but Sync Key Info negatives get their own handler
     if _is_negative(t):
