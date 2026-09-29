@@ -209,11 +209,25 @@ def build_test_suite_v8(
 
     # ── Step 1: Dimension Extraction ──
     _data_only = options.get('data_only', True)
+    # Feature-CR with strong Chalk: the 12+ grounded Chalk scenarios ARE the coverage.
+    # Deep-mining the subtasks on top of that adds low-quality supplements - one Gherkin
+    # AC split on its clauses into fragment-titled TCs ("...then NSL stores it as a generic
+    # string"), with rich-text markup mangled into stray braces and positive assertions
+    # dressed in negative/error step skeletons. Chalk is ground truth here (rule #1), so
+    # drop the deep-mine input for this path. Narrow CRs (no Chalk) never reach here - they
+    # already delegated to _build_cr_suite_v8 above - and feature tickets keep deep mining.
+    _dm_for_extract = deep_mine_result
+    if _is_cr and _has_chalk_scenarios and deep_mine_result is not None:
+        _n_sub = len(getattr(deep_mine_result, 'subtask_mines', None) or [])
+        log('[V8-ENGINE]   Feature-CR with %d Chalk scenarios: skipping deep-mine '
+            'supplements (%d subtask mine(s)) - Chalk is ground truth for CRs.'
+            % (len(chalk.scenarios), _n_sub))
+        _dm_for_extract = None
     log('[V8-ENGINE] Step 1: Extracting dimensions from all data sources (data_only=%s)...' % _data_only)
     dimension_set = extract_dimensions(
         jira=jira,
         chalk=chalk,
-        deep_mine_result=deep_mine_result,
+        deep_mine_result=_dm_for_extract,
         parsed_docs=parsed_docs,
         nmno_result=nmno_result,
         nbop_data=nbop_data,
