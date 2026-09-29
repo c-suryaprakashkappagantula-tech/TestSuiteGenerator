@@ -97,6 +97,36 @@ def generate_excel(suite: TestSuite, log=print) -> Path:
     assert_suite_complete(suite, context='Excel output for %s'
                           % (getattr(suite, 'feature_id', '') or 'suite'), log=log)
 
+    # Final Confluence-macro scrub across EVERY TC, at the one chokepoint all write paths
+    # share. The scrub in tc_builder._build_scenario_tc only covers the scenario builder;
+    # the UI builders (_build_ui_scenario_tc etc.) construct description/steps separately,
+    # so subtask-derived remnants like 'onsp}}' / 'modifiedDate{' reached 4526's UI TCs.
+    # Sweeping here guarantees no {{macro}} / stray brace survives regardless of builder.
+    try:
+        from .tc_builder import _scrub_body_artifacts as _scrub
+        _n = 0
+        for _tc in (suite.test_cases or []):
+            _s = _scrub(getattr(_tc, 'summary', '') or '')
+            if _s != getattr(_tc, 'summary', ''):
+                _tc.summary = _s; _n += 1
+            if getattr(_tc, 'description', None):
+                _d = _scrub(_tc.description)
+                if _d != _tc.description:
+                    _tc.description = _d; _n += 1
+            for _st in (getattr(_tc, 'steps', None) or []):
+                if getattr(_st, 'summary', None):
+                    _v = _scrub(_st.summary)
+                    if _v != _st.summary:
+                        _st.summary = _v; _n += 1
+                if getattr(_st, 'expected', None):
+                    _v = _scrub(_st.expected)
+                    if _v != _st.expected:
+                        _st.expected = _v; _n += 1
+        if _n:
+            log('[EXCEL] Final macro scrub: cleaned %d field(s) of Confluence remnants' % _n)
+    except Exception as _scrub_err:
+        log('[EXCEL] macro scrub skipped: %s' % str(_scrub_err)[:100])
+
     wb = openpyxl.Workbook()
 
     # ── Sheet 1: Summary ──
