@@ -76,8 +76,14 @@ def discover_pi_links_rest(log=print, pi_range=range(46, 60)) -> Optional[List[P
     try:
         from rest_clients import ChalkRestClient
         client = ChalkRestClient(logger_fn=log)
-        if not client.health_check():
-            log('[CHALK-REST] Health check failed — will use browser')
+        # health_check_with_refresh, not health_check: PI discovery is USER-INITIATED, so
+        # recovering an expired session here is appropriate - and Chalk's auto_refresh_session
+        # tries silent headless SSO first, only opening a visible login window if that fails.
+        # Every other Chalk entry point in the dashboard already does this; this one was the
+        # odd one out, so an expired cookie sent discovery to the browser path with no attempt
+        # to re-authenticate.
+        if not client.health_check_with_refresh():
+            log('[CHALK-REST] Health check failed (refresh attempted) — will use browser')
             return None
 
         pi_pages = client.discover_pi_pages(pi_range)

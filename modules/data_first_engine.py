@@ -589,20 +589,62 @@ def build_test_suite_v8(
     # ── Combinatorial expansion (opt-in): cross eligible Happy-Path TCs across
     #    subscriber-state / device / channel / carrier axes so the suite matches
     #    the breadth of hand-written matrix suites (e.g. MWTGPROV-4482 = 34 TCs).
-    #    OFF unless options['expand_matrix'] is truthy — the default engine stays
-    #    additive. Runs BEFORE enrichment so every variant also gets the closer. ──
-    if options.get('expand_matrix'):
+    #    OFF unless options['expand_matrix'] or options['plan_matrix'] is truthy — the
+    #    default engine stays additive. Runs BEFORE enrichment so every variant also
+    #    gets the closer.
+    #    Plan_Matrix_Control is sufficient ON ITS OWN (Requirement 1.3): ticking it
+    #    without 'Full matrix expansion' still reaches the expander, which discovers the
+    #    plan axis from options['plan_matrix']. Before this, plan_matrix=True was inert
+    #    because the gate only read expand_matrix and neither flag was passed down.
+    #    'include_negative' is threaded through because the expander gates its ERR07 pair
+    #    on it (Requirement 4.5), so clearing 'Negative scenarios' omits those cases. ──
+    _plan_matrix_on = bool(options.get('plan_matrix'))
+    if options.get('expand_matrix') or _plan_matrix_on:
+        if _plan_matrix_on and not options.get('expand_matrix'):
+            log('[V8-ENGINE] plan matrix on -> enabling matrix expansion')
         try:
             from .combinatorial_expander import expand_suite as _expand_matrix
             _exp_ctx = ('%s %s %s' % (
                 getattr(jira, 'summary', '') or '',
                 getattr(jira, 'description', '') or '',
                 getattr(chalk, 'scope', '') or '')).strip()
+            # ── Chalk rollback snapshot (Requirement 9.3) ──
+            # Chalk is ground truth, so plan-matrix additions are all-or-nothing: if the
+            # expanded suite no longer covers every Chalk scenario, the whole expansion is
+            # discarded and the pre-expansion suite is restored. Snapshotted only for
+            # plan-matrix runs — plain expand_matrix=True runs are pinned by the existing
+            # snapshot regression tests and must stay byte-identical.
+            # The expander's _finalise_names_and_numbers renumbers the base TCs IN PLACE
+            # (summary + sno), so a list-only snapshot would restore the right objects
+            # carrying expansion-era names like '..._TC36_Edge_Scenarios'. Their summary
+            # and sno are snapshotted too, which is the full set of fields it rewrites.
+            _pre_tcs = list(suite.test_cases) if _plan_matrix_on else None
+            _pre_names = [(getattr(tc, 'summary', ''), getattr(tc, 'sno', ''))
+                          for tc in (_pre_tcs or [])]
+            _pre_cov = getattr(suite, 'chalk_coverage', None) if _plan_matrix_on else None
             _expand_matrix(suite, feature_text=_exp_ctx, options={
                 'max_expanded_tcs': options.get('max_expanded_tcs', 60),
                 'carrier_sparse': options.get('carrier_sparse', True),
                 'axis_overrides': options.get('axis_overrides'),
+                'plan_matrix': _plan_matrix_on,
+                'include_negative': options.get('include_negative', True),
             }, log=log)
+            if _plan_matrix_on:
+                # _assert_chalk_coverage is idempotent and sets the (covered, total)
+                # tuple; the late call before return re-confirms the final suite.
+                _assert_chalk_coverage(suite, chalk, log)
+                _cov = getattr(suite, 'chalk_coverage', None) or (0, 0)
+                if _cov[1] and _cov[0] < _cov[1]:
+                    suite.test_cases = _pre_tcs
+                    for _tc, (_nm, _sn) in zip(_pre_tcs, _pre_names):
+                        _tc.summary, _tc.sno = _nm, _sn
+                    suite.chalk_coverage = _pre_cov
+                    log('[CHALK-GUARD] plan-matrix additions discarded: coverage would fall to %d/%d' % _cov)
+                else:
+                    # Only a suite that KEPT its plan variants gets combination rows: a
+                    # rolled-back suite has no variants left, so populating would describe
+                    # combinations that no test case exercises.
+                    _populate_plan_combinations(suite, log)
         except Exception as _ex_err:
             log('[V8-ENGINE]   WARNING: matrix expansion failed: %s — continuing' % str(_ex_err)[:100])
             _record_degraded('combinatorial expansion', _ex_err)
@@ -652,6 +694,74 @@ def build_test_suite_v8(
     _attach_degraded(suite, log)
 
     return suite
+
+
+def _populate_plan_combinations(suite, log: Callable = print) -> None:
+    """Write one `suite.combinations` row per distinct plan combination in the suite.
+
+    The V8 engine never populated `suite.combinations` itself — only the V7 path did, when
+    delegating — so a plan-matrix run produced 39 TCs and an empty Combinations sheet
+    (`excel_generator` renders it only when `len(suite.combinations) > 1`). This closes that
+    gap from the data the expander already stashed on each variant.
+
+    Rows are keyed on `combo['plan']`, which is the PlanCombo.key ('Phone_5G_eSIM_CMUNLP') and
+    already carries Device_Class + network + SIM + retail plan, so distinctness needs no
+    composite tuple. First-seen order is preserved and `id` is assigned 1-based over the
+    retained rows, because the Combinations sheet prints it as Combination_ID.
+
+    TCs WITHOUT `_variant_combo` are skipped: ERR07 negatives deliberately carry none (they are
+    not a device × network × SIM point) and neither do passthrough base TCs, so including them
+    would emit rows with empty plan cells. The dict shape is the existing
+    `id/channel/device/os/sim/network/key` one that `_build_combinations_sheet` reads today,
+    plus `retail_plan` / `wholesale_plan` for the two columns task 8.1 adds.
+
+    Never raises (Requirement 8.6): a failure here is recorded as a degraded pass so the
+    workbook still exports, minus the sheet. `suite.combinations` is left untouched when no
+    plan variant is found — a plan axis dropped by the cap must not clobber rows another path
+    populated.
+    """
+    try:
+        rows = []
+        seen = set()
+        for tc in (getattr(suite, 'test_cases', None) or []):
+            combo = getattr(tc, '_variant_combo', None)
+            if not combo:
+                continue
+            key = combo.get('plan')
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            rows.append({
+                'id': len(rows) + 1,
+                'channel': combo.get('channel', '') or '',
+                'device': combo.get('device', '') or '',
+                'os': combo.get('os', '') or '',
+                'sim': combo.get('sim', '') or '',
+                'network': combo.get('network', '') or '',
+                'retail_plan': combo.get('retail_plan', '') or '',
+                'wholesale_plan': combo.get('wholesale_plan', '') or '',
+                'key': key,
+            })
+        if not rows:
+            log('[PLAN-MATRIX] no plan variants found — suite.combinations left unchanged')
+            return
+        suite.combinations = rows
+        log('[PLAN-MATRIX] suite.combinations populated: %d distinct combination(s)' % len(rows))
+        # One summary note only. The expander already appended its own trim/drop notes via
+        # _record_reduction_notes, so this does not restate them. Defensive for the same
+        # reason it is there: combination_plan may be absent, None or read-only.
+        plan = getattr(suite, 'combination_plan', None)
+        if plan is not None:
+            note = 'plan matrix: %d distinct combination(s) retained' % len(rows)
+            existing = getattr(plan, 'reduction_notes', None)
+            if existing is None:
+                plan.reduction_notes = [note]
+            elif note not in existing:
+                existing.append(note)
+    except Exception as exc:
+        log('[PLAN-MATRIX] WARNING: combination population failed: %s — continuing'
+            % str(exc)[:120])
+        _record_degraded('plan combination population', exc)
 
 
 def _assert_chalk_coverage(suite, chalk, log=print):
@@ -1842,9 +1952,20 @@ def _gather_nbop_data(jira, log: Callable = print) -> Optional[Dict]:
 # ================================================================
 
 
-# Mapping of instruction keywords to dimension values
+# Mapping of instruction keywords to dimension values.
+#
+# The PRODUCT entries are DERIVED from the one device vocabulary — KNOWN_DEVICES +
+# DEVICE_ALIASES in modules/combinatorial_expander.py (Requirement 10.3) — so the bare term
+# `watch` resolves to Device_Class `Wearable` (Requirement 12.3) without a third alias table
+# appearing here. The literal entries below are the IMPORT-FAILURE FALLBACK: if the
+# vocabulary cannot be reached, the map stays exactly as it reads here and instruction
+# parsing keeps working with the pre-feature keywords.
+#
+# NON-product entries (sim_type / channel / input_type / network) are NOT derived and are
+# untouched by the derivation — the expander vocabulary says nothing about them.
 _INSTRUCTION_DIMENSION_MAP = {
-    # Products
+    # Products (derived at first use from KNOWN_DEVICES + DEVICE_ALIASES; see
+    # _instruction_dimension_map(). These literals are the fallback.)
     'tablet': ('product', 'Tablet'),
     'phone': ('product', 'Phone'),
     'smartwatch': ('product', 'Smartwatch'),
@@ -1870,16 +1991,71 @@ _INSTRUCTION_DIMENSION_MAP = {
     'lte': ('network', 'LTE'),
 }
 
+_DIMENSION_MAP_DERIVED = False
+
+
+def _instruction_dimension_map(log: Callable = None) -> Dict:
+    """The instruction keyword map, with its PRODUCT entries derived from the expander
+    vocabulary. Merged in place, once, on FIRST USE — not at module import.
+
+    WHY LAZY rather than at import. Importing combinatorial_expander pulls in plan_matrix,
+    which pulls in rateplan_rule, which resolves the shared `shared/lifecycle_validator`
+    rule and prints `[RATEPLAN] rule source = ...` at ITS import. Doing that from this
+    module's body would run that resolution — and emit that line — on every single
+    `import data_first_engine`, including runs with the plan matrix off, which breaks the
+    "toggle off is byte-identical" contract (Requirement 1.4) and drags the shared module's
+    heavy dependencies into every import on a VDI box. Deriving on first use keeps the cost
+    and the output inside the runs that actually parse custom instructions.
+
+    The derived entries are MERGED OVER the literals rather than replacing them, so a
+    product keyword with no counterpart in the expander vocabulary (`iot`) is retained
+    instead of silently lost. Aliases are applied AFTER KNOWN_DEVICES so `smartwatch`
+    resolves to the canonical `Wearable` — the same precedence plan_matrix.canonical_device
+    uses, and what Requirement 10.2 asks for.
+    """
+    global _DIMENSION_MAP_DERIVED
+    if _DIMENSION_MAP_DERIVED:
+        return _INSTRUCTION_DIMENSION_MAP
+    try:
+        from .combinatorial_expander import KNOWN_DEVICES, DEVICE_ALIASES
+        derived = {}
+        for name in KNOWN_DEVICES:
+            key = str(name).strip().lower()
+            if key:
+                derived[key] = ('product', name)
+        # Aliases last: KNOWN_DEVICES holds both 'Smartwatch' and 'Wearable', and the alias
+        # table is what makes 'smartwatch'/'watch' mean 'Wearable'.
+        for alias, canon in DEVICE_ALIASES.items():
+            key = str(alias).strip().lower()
+            if key:
+                derived[key] = ('product', canon)
+        _INSTRUCTION_DIMENSION_MAP.update(derived)
+        if log:
+            log('[V8-CUSTOM]   Product keywords derived from the expander vocabulary: %s'
+                % ', '.join(sorted(derived)))
+    except Exception as _dv_err:
+        if log:
+            log('[V8-CUSTOM]   WARNING: device vocabulary unavailable (%s) — using the '
+                'literal instruction keywords' % str(_dv_err)[:80])
+    _DIMENSION_MAP_DERIVED = True
+    return _INSTRUCTION_DIMENSION_MAP
+
+
 # Keywords that indicate "add more" intent
 _ADD_MORE_PATTERNS = [
     'add more', 'more', 'include', 'add', 'extra', 'additional',
-    'focus on', 'emphasize', 'prioritize', 'expand',
+    'focus on', 'emphasize', 'prioritize', 'expand', 'cover',
 ]
 
 # Keywords that indicate "only" / "filter" intent
 _ONLY_PATTERNS = [
     'only', 'skip', 'no ', 'exclude', 'remove', 'without',
 ]
+
+# Phrases that turn the opt-in plan matrix on for this run (Requirement 12.1), so typed
+# instructions and Plan_Matrix_Control agree. Same precedent as the axis-override block
+# below, which already sets options['expand_matrix'] from parsed instructions.
+_PLAN_MATRIX_PHRASES = ('plan matrix', 'all plan matrix', 'plan fan out', 'all plans')
 
 
 def _apply_custom_instructions(
@@ -1903,9 +2079,20 @@ def _apply_custom_instructions(
 
     log('[V8-CUSTOM] Parsing: "%s"' % custom_text[:80])
 
+    # Product keywords come from the single device vocabulary; derived on first use.
+    dimension_map = _instruction_dimension_map(log)
+
+    # ── Plan-matrix phrase -> enable the opt-in plan axis for this run (Req 12.1) ──
+    # Set before anything below can raise, so a typed request is never lost to an
+    # unrelated parsing failure.
+    _pm_phrase = next((p for p in _PLAN_MATRIX_PHRASES if p in t), None)
+    if _pm_phrase:
+        options['plan_matrix'] = True
+        log('[V8-CUSTOM]   Plan-matrix phrase "%s" -> plan matrix enabled' % _pm_phrase)
+
     # ── Detect "add more X" patterns ──
     # These inject additional dimension values or ensure a value exists
-    for keyword, (dim_name, dim_value) in _INSTRUCTION_DIMENSION_MAP.items():
+    for keyword, (dim_name, dim_value) in dimension_map.items():
         # Check if user wants MORE of this thing
         wants_more = any(
             ('%s %s' % (pattern, keyword) in t) or ('%s %s' % (keyword, pattern) in t)
@@ -1916,7 +2103,7 @@ def _apply_custom_instructions(
             _ensure_dimension_value(dimension_set, dim_name, dim_value, log)
 
     # ── Detect "only X" / "skip X" patterns ──
-    for keyword, (dim_name, dim_value) in _INSTRUCTION_DIMENSION_MAP.items():
+    for keyword, (dim_name, dim_value) in dimension_map.items():
         # "only X" — keep only this value in the dimension
         if 'only %s' % keyword in t or '%s only' % keyword in t:
             _filter_dimension_to(dimension_set, dim_name, [dim_value], log)
@@ -1932,8 +2119,8 @@ def _apply_custom_instructions(
     for topic in scenario_match:
         # Check if topic maps to a known dimension value
         topic_lower = topic.lower()
-        if topic_lower in _INSTRUCTION_DIMENSION_MAP:
-            dim_name, dim_value = _INSTRUCTION_DIMENSION_MAP[topic_lower]
+        if topic_lower in dimension_map:
+            dim_name, dim_value = dimension_map[topic_lower]
             _ensure_dimension_value(dimension_set, dim_name, dim_value, log)
             log('[V8-CUSTOM]   Ensuring %s=%s has scenarios' % (dim_name, dim_value))
 
@@ -2117,6 +2304,20 @@ def _prune_near_duplicate_tcs(test_cases: List, threshold: float = 0.70, log: Ca
     _MIN_FINGERPRINT_WORDS = 3
 
     for tc in test_cases:
+        # Expander-produced variants are kept WITHOUT comparison. A plan-matrix variant
+        # differs from its siblings by a single token, so on an ~8-token fingerprint the
+        # Jaccard overlap is ≈0.78 — above the 0.70 threshold — and a whole fan-out would
+        # silently collapse into one test case. Expansion currently runs AFTER this prune
+        # (prune ~line 383, expansion ~line 594), so the guard is defensive against a future
+        # pipeline reorder rather than load-bearing today. It weakens nothing else: only
+        # expander variants carry _variant_slug. Deliberately NOT solved by adding plan codes
+        # to _PRODUCT_TOKENS — membership there REMOVES a token from the fingerprint, which is
+        # backwards for a discriminator.
+        if getattr(tc, '_variant_slug', ''):
+            kept.append(tc)
+            kept_fps.append(_fingerprint(tc))
+            continue
+
         # User-requested scenarios always survive dedup (kept as-is, and never
         # used to displace another TC).
         if getattr(tc, 'user_requested', False) or _is_chalk_ground_truth(tc):

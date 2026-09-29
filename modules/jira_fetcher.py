@@ -562,6 +562,45 @@ def download_attachments(page, issue: JiraIssue, log=print) -> List[Path]:
 # REST-FIRST WRAPPER (V8.1 — try REST, fall back to browser)
 # ============================================================
 
+# ?? Cached REST client ????????????????????????????????????????????????????????
+# fetch_jira_issue_rest() used to build a NEW JiraRestClient per issue and call
+# health_check() every time. On a 217-issue sync that was 217 redundant /myself
+# round-trips plus 217 x _request_delay of pure sleep - measured at ~65s of the
+# ~11min runtime, for information the caller already established once before the
+# loop. The client is now built ONCE per process and the health check runs ONCE.
+#
+# reset_rest_client() exists so a session refresh mid-run can force a rebuild.
+_REST_CLIENT = None
+_REST_CLIENT_FAILED = False
+
+
+def reset_rest_client():
+    """Drop the cached client so the next call re-creates it (e.g. after a re-auth)."""
+    global _REST_CLIENT, _REST_CLIENT_FAILED
+    _REST_CLIENT = None
+    _REST_CLIENT_FAILED = False
+
+
+def _get_rest_client(log=print):
+    """The shared JiraRestClient, health-checked once. None when REST is unavailable."""
+    global _REST_CLIENT, _REST_CLIENT_FAILED
+    if _REST_CLIENT is not None:
+        return _REST_CLIENT
+    if _REST_CLIENT_FAILED:
+        return None
+    try:
+        from rest_clients import JiraRestClient
+        client = JiraRestClient(logger_fn=log)
+        if not client.health_check():
+            _REST_CLIENT_FAILED = True
+            return None
+        _REST_CLIENT = client
+        return _REST_CLIENT
+    except Exception:
+        _REST_CLIENT_FAILED = True
+        return None
+
+
 def fetch_jira_issue_rest(issue_key: str, log=print) -> Optional[JiraIssue]:
     """Try to fetch a Jira issue via direct REST API (no browser needed).
 
@@ -569,10 +608,8 @@ def fetch_jira_issue_rest(issue_key: str, log=print) -> Optional[JiraIssue]:
         JiraIssue if REST succeeds, None if it fails (caller should use browser).
     """
     try:
-        from rest_clients import JiraRestClient
-
-        client = JiraRestClient(logger_fn=log)
-        if not client.health_check():
+        client = _get_rest_client(log)
+        if client is None:
             return None
 
         rest_issue = client.fetch_issue(issue_key, log=log)

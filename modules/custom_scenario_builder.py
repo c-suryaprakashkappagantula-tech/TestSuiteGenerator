@@ -23,9 +23,22 @@ If the V8 scenario model can't be imported, it returns [] (fail-safe).
 import re
 from typing import List, Optional
 
-# Keyword -> canonical device label. "smart watch" (with space) and "watch" both
-# map to Wearable, fixing the exact miss in the reported run.
-_DEVICE_KEYWORDS = {
+# ── Device keywords: DERIVED, not hand-maintained (Requirement 10.3) ─────────
+# The SINGLE device vocabulary is combinatorial_expander's KNOWN_DEVICES +
+# DEVICE_ALIASES. _device_keywords() derives the keyword map from those two on
+# FIRST USE and merges the literal dict below on top only for the spellings that
+# vocabulary does not carry ("smart watch" with a space, "iot").
+#
+# WHY LAZY: importing combinatorial_expander pulls in plan_matrix -> rateplan_rule,
+# whose module body resolves the shared `shared/lifecycle_validator` rule (heavy
+# deps) and prints "[RATEPLAN] rule source = ...". A plain
+# `import modules.custom_scenario_builder` must stay silent and side-effect free,
+# so every plan/device import in this module happens inside a function and is
+# cached in a module global afterwards.
+#
+# FALLBACK ONLY: used verbatim when that lazy import fails, so a changed import
+# shape degrades to today's behaviour instead of losing device recognition.
+_FALLBACK_DEVICE_KEYWORDS = {
     'tablet': 'Tablet',
     'tab': 'Tablet',
     'phone': 'Phone',
@@ -37,9 +50,103 @@ _DEVICE_KEYWORDS = {
     'hotspot': 'Hotspot',
     'iot': 'IoT',
 }
+
+# Spellings the expander vocabulary cannot produce (multi-word, or a device class
+# outside KNOWN_DEVICES). Merged INTO the derived map - never replacing it.
+_EXTRA_DEVICE_KEYWORDS = {
+    'smart watch': 'Wearable',
+    'iot': 'IoT',
+}
+
 _SIM_KEYWORDS = {'esim': 'eSIM', 'psim': 'pSIM', 'physical sim': 'pSIM'}
 _CHANNEL_KEYWORDS = {'nbop': 'NBOP', 'itmbo': 'ITMBO', 'websheet': 'WEBSHEET'}
 _STATE_KEYWORDS = {'yl': 'YL', 'yd': 'YD', 'yp': 'YP', 'py': 'PY', 'pn': 'PN'}
+
+# Retail plan keyword -> canonical plan code (Requirement 12.2). `_found` anchors
+# each keyword with \b, so 'cmunl' does NOT match inside 'cmunlp'.
+_PLAN_KEYWORDS = {
+    'cmunl': 'CMUNL',
+    'cmunlp': 'CMUNLP',
+    'ctunl': 'CTUNL',
+    'ctunlp': 'CTUNLP',
+    'mswap': 'MSWAP',
+}
+
+_DEVICE_KEYWORDS_CACHE = None
+_PLAN_VOCAB_CACHE = None
+
+
+def _device_keywords(log=None):
+    """Keyword -> canonical Device_Class, derived on first use and cached.
+
+    Build order matters: KNOWN_DEVICES first (lower-cased name -> canonical name),
+    then DEVICE_ALIASES on top - KNOWN_DEVICES holds BOTH 'Smartwatch' and
+    'Wearable', and the alias 'smartwatch' -> 'Wearable' must win (Requirement
+    10.2). _EXTRA_DEVICE_KEYWORDS is merged last for the spellings neither table
+    can express. Never raises: any failure yields the literal fallback.
+    """
+    global _DEVICE_KEYWORDS_CACHE
+    if _DEVICE_KEYWORDS_CACHE is not None:
+        return _DEVICE_KEYWORDS_CACHE
+    try:
+        try:
+            from .combinatorial_expander import KNOWN_DEVICES, DEVICE_ALIASES
+        except Exception:
+            from combinatorial_expander import KNOWN_DEVICES, DEVICE_ALIASES  # noqa: F401
+        derived = {}
+        for name in KNOWN_DEVICES:
+            key = str(name).strip().lower()
+            if key:
+                derived[key] = name
+        for alias, canon in DEVICE_ALIASES.items():
+            key = str(alias).strip().lower()
+            if key:
+                derived[key] = canon
+        derived.update(_EXTRA_DEVICE_KEYWORDS)
+        if not derived:
+            raise ValueError('empty device vocabulary')
+        _DEVICE_KEYWORDS_CACHE = derived
+    except Exception as exc:
+        if log:
+            try:
+                log('[V8-CUSTOM]   device vocabulary import failed (%s) - using the '
+                    'fallback keyword map' % str(exc)[:80])
+            except Exception:
+                pass
+        _DEVICE_KEYWORDS_CACHE = dict(_FALLBACK_DEVICE_KEYWORDS)
+    return _DEVICE_KEYWORDS_CACHE
+
+
+def _plan_vocab(log=None):
+    """(RETAIL_BY_DEVICE, CURRENT_PLAN_BY_DEVICE, canonical_device, compute_new_rateplan).
+
+    Imported lazily for the same reason as the device vocabulary. Returns None when
+    unavailable, in which case the caller SKIPS conflict resolution and passes the
+    requested plans through untouched rather than erroring.
+    """
+    global _PLAN_VOCAB_CACHE
+    if _PLAN_VOCAB_CACHE is not None:
+        return _PLAN_VOCAB_CACHE or None
+    try:
+        try:
+            from .plan_matrix import (RETAIL_BY_DEVICE, CURRENT_PLAN_BY_DEVICE,
+                                      canonical_device)
+            from .rateplan_rule import compute_new_rateplan
+        except Exception:
+            from plan_matrix import (RETAIL_BY_DEVICE, CURRENT_PLAN_BY_DEVICE,
+                                     canonical_device)                   # noqa: F401
+            from rateplan_rule import compute_new_rateplan               # noqa: F401
+        _PLAN_VOCAB_CACHE = (RETAIL_BY_DEVICE, CURRENT_PLAN_BY_DEVICE,
+                             canonical_device, compute_new_rateplan)
+    except Exception as exc:
+        if log:
+            try:
+                log('[V8-CUSTOM]   plan vocabulary unavailable (%s) - plan/device '
+                    'conflict resolution skipped' % str(exc)[:80])
+            except Exception:
+                pass
+        _PLAN_VOCAB_CACHE = ()
+    return _PLAN_VOCAB_CACHE or None
 
 
 def _new_scenario(title, description='', category='Happy Path', tags=None):
@@ -91,17 +198,100 @@ def _found(text, mapping):
     return out
 
 
-def parse_axis_overrides(custom_text: str) -> dict:
-    """Extract device/sim/channel/state requests from the instruction text.
+def _substitute_plan_for(device, vocab):
+    """The legal retail plan to use instead of a conflicting request, or ''.
+
+    Mirrors plan_matrix's own substitution: take the device's assumed CURRENT plan
+    and run the family rule over it, so a Tablet lands on CTUNL -> CTUNLP. A
+    single-plan family (Wearable -> MSWAP) has no base/Plus pair to toggle, so its
+    one legal plan is returned directly - the CM/CT rule does not reach MSWAP.
+    """
+    retail_by_device, current_by_device, _canon, compute = vocab
+    legal = tuple(retail_by_device.get(device, ()))
+    if not legal:
+        return ''
+    if len(legal) < 2:
+        return legal[0]
+    try:
+        resolved = compute(current_by_device.get(device, legal[0]), device)
+    except Exception:
+        resolved = ''
+    resolved = (resolved or '').strip().upper()
+    return resolved if resolved in legal else legal[-1]
+
+
+def _resolve_plan_conflicts(devices, plans, log=None):
+    """Device wins; a plan illegal for EVERY requested device is replaced (Req 12.5).
+
+    A plan legal for at least one requested device passes through untouched. A plan
+    legal for none is swapped for the first requested device's own family plan and
+    the substitution is logged as
+    `[V8-CUSTOM] plan <x> invalid for <device> -> using <y>`.
+
+    Never raises: with no plan vocabulary, or no devices requested, the requested
+    plans are returned unchanged.
+    """
+    if not plans or not devices:
+        return list(plans or [])
+    vocab = _plan_vocab(log)
+    if not vocab:
+        return list(plans)
+
+    retail_by_device, _current, canonical_device, _compute = vocab
+    canon_devices = []
+    for raw in devices:
+        try:
+            canon = canonical_device(raw)
+        except Exception:
+            canon = None
+        if canon and canon in retail_by_device and canon not in canon_devices:
+            canon_devices.append(canon)
+    if not canon_devices:
+        return list(plans)
+
+    out = []
+    for plan in plans:
+        code = (plan or '').strip().upper()
+        if not code:
+            continue
+        if any(code in tuple(retail_by_device.get(d, ())) for d in canon_devices):
+            keep = code
+        else:
+            device = canon_devices[0]
+            keep = _substitute_plan_for(device, vocab)
+            if not keep:
+                continue
+            if log:
+                try:
+                    log('[V8-CUSTOM] plan %s invalid for %s -> using %s'
+                        % (code, device, keep))
+                except Exception:
+                    pass
+        if keep not in out:
+            out.append(keep)
+    return out
+
+
+def parse_axis_overrides(custom_text: str, log=print) -> dict:
+    """Extract device/sim/channel/state/plan requests from the instruction text.
 
     Returned dict is suitable to merge into options['axis_overrides'] so the
-    combinatorial expander crosses exactly what the user asked for.
+    combinatorial expander crosses exactly what the user asked for. `plans` feeds
+    the plan axis (Requirement 12.2); a plan that conflicts with a requested device
+    is resolved through the family rule with the device winning (Requirement 12.5).
+
+    Safe on empty/None input: returns {}.
     """
     t = (custom_text or '').lower()
     ov = {}
-    devs = _found(t, _DEVICE_KEYWORDS)
+    devs = _found(t, _device_keywords(log))
     if devs:
         ov['devices'] = devs
+    plans = _found(t, _PLAN_KEYWORDS)
+    if plans:
+        plans = _resolve_plan_conflicts(devs, plans, log)
+        if plans:
+            ov['plans'] = plans
     sims = _found(t, _SIM_KEYWORDS)
     if sims:
         ov['sim_types'] = sims
@@ -132,7 +322,7 @@ def build_custom_scenarios(custom_text: str, jira=None, log=print) -> List:
         feat_short = re.sub(r'^\[.*?\]\s*:?\s*', '', feat).strip() or 'the feature'
 
         # 1. Device coverage requests -> one explicit scenario per device.
-        devices = _found(tl, _DEVICE_KEYWORDS)
+        devices = _found(tl, _device_keywords(log))
         for dev in devices:
             sc = _new_scenario(
                 title='Verify %s on a %s device' % (feat_short, dev),

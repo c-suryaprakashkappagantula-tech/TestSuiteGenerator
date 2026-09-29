@@ -757,12 +757,19 @@ with left:
         help='Cross eligible Happy-Path TCs across subscriber-state (YL/YD/YP/PY), '
              'device, channel and carrier axes so the suite matches hand-written '
              'matrix suites. Off = additive (one TC per scenario, default).')
+    # Plan matrix: fan out real TCs across device x network x SIM x rate plan,
+    # sharing the "Max TCs when expanding" budget with the axes above.
+    plan_matrix = st.checkbox(
+        'Plan matrix (device x network x SIM x rate plan)', value=False,
+        help='Fan out real TCs across Phone/Tablet/Watch with the resolved retail and '
+             'wholesale plan per combination, plus an ERR07 wrong-family negative per '
+             'plan family. Shares the "Max TCs when expanding" budget.')
     max_expanded = st.slider('Max TCs when expanding', 30, 200, 60, step=10,
                              help='Upper bound; axes are dropped '
                                   '(carrier->channel->device) to stay within this cap, '
                                   'keeping subscriber-state last. ~60 = state coverage; '
                                   '80+ adds the device axis (more TCs).') \
-        if expand_matrix else 60
+        if (expand_matrix or plan_matrix) else 60
     st.markdown("</div>", unsafe_allow_html=True)
 
     # ── Step 5: Upload ──
@@ -1591,9 +1598,11 @@ if ss.get('_sync_running'):
                 except: pass
 
 # ---- clear the Chalk 'Sync in progress' gate after completion (outside try) ----
-if ss.pop('_sync_completed', False):
-    import time as _t_cr; _t_cr.sleep(0.4)
-    st.rerun()
+# The Chalk sync gate (_sync_running) is already cleared at the top of the sync block,
+# so the old st.rerun() here cleared nothing - it only discarded the finished CLI
+# output and the completion banner, dropping the user back to a blank home screen.
+# The completion summary now lives in ss['exit_report'] and renders normally.
+ss.pop('_sync_completed', False)
 
 # ================================================================
 # JIRA SYNC EXECUTION
@@ -1601,6 +1610,7 @@ if ss.pop('_sync_completed', False):
 if ss.get('_jira_sync_running'):
     ss['_jira_sync_running'] = False
     ss['logs'] = []
+    _jsync_t0 = time.time()
     ss['result_path'] = None
     ss['exit_report'] = None
 
@@ -1627,7 +1637,7 @@ if ss.get('_jira_sync_running'):
         from modules.jira_fetcher import fetch_jira_issue_rest
 
         _jira_rc = JiraRestClient(logger_fn=_jsync_msg)
-        if _jira_rc.health_check():
+        if _jira_rc.health_check_with_refresh():
             _jira_rest_available = True
             _jsync_msg('✅ Jira REST API available — using fast-path (no browser needed)')
         else:
@@ -1721,6 +1731,25 @@ if ss.get('_jira_sync_running'):
         _jsync_msg('JIRA SYNC COMPLETE (%s): %d/%d succeeded | %d failed' % (_method, _jira_ok, _jira_total, _jira_fail))
         _jsync_header.markdown("<div class='cli-header'>>> Jira sync complete! %d/%d features (%s)</div>" % (_jira_ok, _jira_total, _method), unsafe_allow_html=True)
         ss['logs'] = _jsync_lines
+        # Persistent exit report. The live _jsync_log writes are placeholder-bound and vanish on
+        # the next render, so the summary is stored in session state and rendered by the Exit
+        # Report block instead of being lost the moment the script re-runs.
+        _jel = int(time.time() - _jsync_t0)
+        _jitems = ['Method: %s' % _method,
+                   'Succeeded: %d / %d' % (_jira_ok, _jira_total),
+                   'Failed: %d' % _jira_fail]
+        if _jira_rest_failures:
+            _jitems.append('REST empty -> browser retry: %d' % len(_jira_rest_failures))
+        if _jira_total:
+            _jitems.append('Average: %.2fs per feature' % ((time.time() - _jsync_t0) / _jira_total))
+        ss['exit_report'] = {
+            'title': ('Jira Sync Complete - %d/%d features' % (_jira_ok, _jira_total)
+                      if not _jira_fail else
+                      'Jira Sync FAILED - %d/%d succeeded, %d failed' % (_jira_ok, _jira_total, _jira_fail)),
+            'items': _jitems,
+            'footer': 'Finished %s | Duration: %dm %ds | %s' % (
+                datetime.now().strftime('%Y-%m-%d %H:%M:%S'), _jel // 60, _jel % 60, _method),
+        }
         ss['_jira_sync_completed'] = True
 
     except Exception as e:
@@ -1736,9 +1765,11 @@ if ss.get('_jira_sync_running'):
                 except: pass
 
 # ---- clear the Jira 'Sync in progress' gate after completion (outside try) ----
-if ss.pop('_jira_sync_completed', False):
-    import time as _t_jcr; _t_jcr.sleep(0.4)
-    st.rerun()
+# The Jira sync gate (_jira_sync_running) is already cleared at the top of the sync block,
+# so the old st.rerun() here cleared nothing - it only discarded the finished CLI
+# output and the completion banner, dropping the user back to a blank home screen.
+# The completion summary now lives in ss['exit_report'] and renders normally.
+ss.pop('_jira_sync_completed', False)
 
 # ================================================================
 # MAIN EXECUTION — V8 Data-First Engine
@@ -1950,6 +1981,7 @@ if run_btn:
                         'engine_version': '8',
                         'expand_matrix': expand_matrix,
                         'max_expanded_tcs': max_expanded,
+                        'plan_matrix': plan_matrix,
                     }
 
                     engine_result = pipe.run('Engine_V8_%s' % feature_id,

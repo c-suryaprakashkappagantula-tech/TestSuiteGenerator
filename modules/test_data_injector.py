@@ -419,6 +419,22 @@ def seed_sit_defaults() -> int:
     return seeded
 
 
+def _dimension_plan_value(dimension_values: Dict, *keys) -> str:
+    """First non-empty value among ``keys`` in ``dimension_values``, trimmed.
+
+    Returns '' when every key is missing, None or blank, so "not supplied" is a
+    single condition at the call site.
+    """
+    for key in keys:
+        val = dimension_values.get(key)
+        if val is None:
+            continue
+        text = str(val).strip()
+        if text:
+            return text
+    return ''
+
+
 def get_varied_test_data(
     tc_index: int,
     api_name: str = '',
@@ -437,7 +453,9 @@ def get_varied_test_data(
         dimension_values: dict of dimension key→value for this TC
 
     Returns:
-        Formatted string like "MDN=7206814569, lineId=5634541233, RequestType=TMO"
+        Formatted string like "MDN=7206814569, lineId=5634541233, RequestType=TMO",
+        with ", ratePlanCode=..., wholesalePlan=..." appended when the plan matrix
+        supplied plan codes for this TC.
     """
     dimension_values = dimension_values or {}
 
@@ -456,6 +474,29 @@ def get_varied_test_data(
     _assert_safe_mapping({'MDN': mdn, 'lineId': line_id, 'accountNumber': account},
                          'test_data_injector.get_varied_test_data(tc_index=%d)' % tc_index)
 
+    # Plan-matrix payload fields (Req 6.5). Unlike the context fields noted further
+    # down, a resolved retail/wholesale plan IS part of a rate-plan request body, so
+    # the plan axis writes them onto TestCase.dimension_values and they are emitted
+    # here. The already-final key names are accepted too, for a caller that supplies
+    # them directly. Missing / None / blank all mean "not supplied", in which case the
+    # output is byte-identical to a pre-plan-matrix run.
+    retail_plan = _dimension_plan_value(dimension_values, 'retail_plan', 'ratePlanCode')
+    wholesale_plan = _dimension_plan_value(dimension_values, 'wholesale_plan', 'wholesalePlan')
+    plan_fields = {}
+    if retail_plan:
+        # Overrides the OPERATION_SAMPLES['change-rateplan'] ratePlanCode='CMUNL'
+        # literal for this TC; that literal stays as the no-plan-matrix default.
+        plan_fields['ratePlanCode'] = retail_plan
+    if wholesale_plan:
+        plan_fields['wholesalePlan'] = wholesale_plan
+    if plan_fields:
+        # dimension_values is caller-supplied, so plan codes go through the same gate
+        # as every other value this module hands out.
+        _assert_safe_mapping(
+            dict(plan_fields),
+            'test_data_injector.get_varied_test_data(plans tc_index=%d)' % tc_index)
+    plan_suffix = ', '.join('%s=%s' % (k, v) for k, v in plan_fields.items())
+
     # RequestType is the only payload field influenced by scenario metadata.
     # A dual-provider case needs two valid provider-specific contexts; never invent
     # a synthetic RequestType or a scenario-specific MDN.
@@ -466,10 +507,13 @@ def get_varied_test_data(
         _assert_safe_mapping(
             {'MDN': second_mdn, 'lineId': second_line_id},
             'test_data_injector.get_varied_test_data(mixed tc_index=%d)' % tc_index)
-        return (
+        mixed = (
             'TMO: MDN=%s, lineId=%s, RequestType=TMO; '
             'VZW: MDN=%s, lineId=%s, RequestType=VZW'
         ) % (mdn, line_id, second_mdn, second_line_id)
+        # Plan codes apply to both lines, so they are stated once after the pair
+        # rather than dropped — a MIXED TC must not silently lose its plan data.
+        return '%s; %s' % (mixed, plan_suffix) if plan_suffix else mixed
 
     request_type = 'VZW' if network_provider == 'VZW' else 'TMO'
 
@@ -484,6 +528,7 @@ def get_varied_test_data(
     # are NOT added to the request payload fields. They belong in description/preconditions only.
     # See BUG-TDI-1: context fields must stay separate from API request body fields.
 
-    # Format output — only the 3 core request fields
+    # Format output — the 3 core request fields, plus the plan codes when supplied
+    fields.update(plan_fields)
     items = list(fields.items())
     return ', '.join('%s=%s' % (k, v) for k, v in items)

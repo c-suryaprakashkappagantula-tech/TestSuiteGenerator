@@ -659,18 +659,33 @@ def _build_traceability_sheet(wb, suite: TestSuite):
         r += 1
 
 
+def _display_device_label(device):
+    """Reviewer-facing Device label for the Combinations sheet (Requirement 10.4).
+
+    'Wearable' renders as 'Watch' while the underlying combo dict keeps its canonical value.
+    Guarded import: excel export must never hard-fail if plan_matrix is unavailable.
+    """
+    try:
+        from .plan_matrix import display_device
+        return display_device(device)
+    except Exception:
+        return device
+
+
 def _build_combinations_sheet(wb, suite: TestSuite):
-    """Build the Combinations sheet listing all device matrix combinations."""
+    """Build the Combinations sheet listing all device matrix combinations.
+
+    V10: nine columns — the plan pair (Retail Plan / Wholesale Plan) is now part of the
+    combination identity, so a reviewer can see which plan pair each row exercises.
+    Legacy V7 rows carry no plan keys; those two cells simply render empty.
+    """
     ws = wb.create_sheet('Combinations')
-    ws.column_dimensions['A'].width = 15
-    ws.column_dimensions['B'].width = 15
-    ws.column_dimensions['C'].width = 15
-    ws.column_dimensions['D'].width = 15
-    ws.column_dimensions['E'].width = 15
-    ws.column_dimensions['F'].width = 30
+    for _col, _w in zip('ABCDEFGHI', (15, 15, 15, 15, 15, 15, 16, 24, 30)):
+        ws.column_dimensions[_col].width = _w
 
     # Headers
-    headers = ['Combination_ID', 'Channel', 'Device', 'OS', 'SIM Type', 'Network', 'Key']
+    headers = ['Combination_ID', 'Channel', 'Device', 'OS', 'SIM Type', 'Network',
+               'Retail Plan', 'Wholesale Plan', 'Key']
     for ci, h in enumerate(headers, 1):
         c = ws.cell(row=1, column=ci, value=h)
         c.font = _hf; c.fill = _hfill; c.alignment = _center; c.border = _bdr
@@ -681,7 +696,7 @@ def _build_combinations_sheet(wb, suite: TestSuite):
         ws.cell(row=ri, column=1).alignment = _center
         ws.cell(row=ri, column=2, value=combo.get('channel', '')).border = _bdr
         ws.cell(row=ri, column=2).alignment = _center
-        ws.cell(row=ri, column=3, value=combo.get('device', '')).border = _bdr
+        ws.cell(row=ri, column=3, value=_display_device_label(combo.get('device', ''))).border = _bdr
         ws.cell(row=ri, column=3).alignment = _center
         ws.cell(row=ri, column=4, value=combo.get('os', '')).border = _bdr
         ws.cell(row=ri, column=4).alignment = _center
@@ -689,8 +704,12 @@ def _build_combinations_sheet(wb, suite: TestSuite):
         ws.cell(row=ri, column=5).alignment = _center
         ws.cell(row=ri, column=6, value=combo.get('network', '')).border = _bdr
         ws.cell(row=ri, column=6).alignment = _center
-        ws.cell(row=ri, column=7, value=combo.get('key', '')).border = _bdr
+        ws.cell(row=ri, column=7, value=combo.get('retail_plan', '')).border = _bdr
         ws.cell(row=ri, column=7).alignment = _center
+        ws.cell(row=ri, column=8, value=combo.get('wholesale_plan', '')).border = _bdr
+        ws.cell(row=ri, column=8).alignment = _center
+        ws.cell(row=ri, column=9, value=combo.get('key', '')).border = _bdr
+        ws.cell(row=ri, column=9).alignment = _center
 
 
 def _build_data_sources_sheet(wb, suite):
