@@ -19,7 +19,8 @@ from modules.database import (
     init_db, load_chalk_as_object, load_jira, get_chalk_cache_count
 )
 from modules.pipeline import (
-    block_chalk_db, block_build_suite_v8, block_generate_output, block_deep_mine
+    block_chalk_db, block_build_suite_v8, block_generate_output, block_deep_mine,
+    block_parse_docs
 )
 from modules.chalk_parser import ChalkData
 
@@ -32,7 +33,7 @@ def log(msg):
 
 
 def run_headless(feature_id: str, pi_label: str, custom_instructions: str = '',
-                 deep_mine: bool = True):
+                 deep_mine: bool = True, doc_paths=None):
     log('\n' + '=' * 70)
     log('TSG V8.0 Headless Run: %s  [%s]' % (feature_id, pi_label))
     log('=' * 70)
@@ -136,10 +137,19 @@ def run_headless(feature_id: str, pi_label: str, custom_instructions: str = '',
 
     # 5. Build suite
     log('\n[BUILD] Building test suite...')
+    parsed_docs = []
+    if doc_paths:
+        from modules.config import INPUTS
+        try:
+            parsed_docs = block_parse_docs(list(doc_paths), None, INPUTS, log=log)
+        except Exception as _doc_err:
+            log('[DOCS] WARNING: %s - continuing with empty docs' % str(_doc_err)[:120])
+            parsed_docs = []
+
     build_result = block_build_suite_v8(
         jira=jira,
         chalk=chalk,
-        parsed_docs=[],
+        parsed_docs=parsed_docs,
         options=options,
         deep_mine_result=deep_mine_result,
         log=log,
@@ -170,17 +180,30 @@ def run_headless(feature_id: str, pi_label: str, custom_instructions: str = '',
 
 if __name__ == '__main__':
     if len(sys.argv) < 3:
-        print('Usage: python run_headless.py <FEATURE_ID> <PI_LABEL> [custom_instructions] [--no-deep-mine]')
+        print('Usage: python run_headless.py <FEATURE_ID> <PI_LABEL> [custom_instructions] [--no-deep-mine] [--docs <file> ...]')
         print('  e.g. python run_headless.py MWTGPROV-4503 PI-59')
         sys.exit(1)
 
-    _args = [a for a in sys.argv[1:] if a != '--no-deep-mine']
-    _deep = '--no-deep-mine' not in sys.argv
-    fid = _args[0]
-    pi = _args[1]
-    ci = _args[2] if len(_args) > 2 else ''
+    _raw = sys.argv[1:]
+    _deep = '--no-deep-mine' not in _raw
+    _docs = []
+    _pos = []
+    _i = 0
+    while _i < len(_raw):
+        _a = _raw[_i]
+        if _a == '--no-deep-mine':
+            _i += 1; continue
+        if _a == '--docs':
+            _i += 1
+            while _i < len(_raw) and not _raw[_i].startswith('--'):
+                _docs.append(_raw[_i]); _i += 1
+            continue
+        _pos.append(_a); _i += 1
+    fid = _pos[0]
+    pi = _pos[1]
+    ci = _pos[2] if len(_pos) > 2 else ''
 
-    suite = run_headless(fid, pi, ci, deep_mine=_deep)
+    suite = run_headless(fid, pi, ci, deep_mine=_deep, doc_paths=_docs or None)
     if suite:
         print('\nDone — %d test cases' % len(suite.test_cases))
     else:
