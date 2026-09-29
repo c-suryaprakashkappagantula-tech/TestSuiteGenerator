@@ -956,6 +956,33 @@ def _areas_to_scenarios(areas, feature_id, pi_label):
     return scs
 
 
+# ── Cache-poisoning rejection registry ─────────────────────────────────────
+# The guard inside load_chalk_as_object() can only signal failure by returning
+# None, which is indistinguishable from "no row cached". Callers need to tell
+# those apart so a rejected row becomes a loud, reportable condition instead of
+# a silent fall-through to ungrounded generation. Keyed by (feature_id, pi_label);
+# a later successful load of the same key clears it, so a re-crawl self-heals.
+_CHALK_REJECTIONS = {}
+
+
+def record_chalk_rejection(feature_id: str, pi_label: str, reason: str):
+    """Note that a cached Chalk row was rejected rather than merely absent."""
+    _CHALK_REJECTIONS[(str(feature_id), str(pi_label))] = str(reason)
+
+
+def clear_chalk_rejection(feature_id: str, pi_label: str):
+    """Drop a recorded rejection once the same key loads successfully."""
+    _CHALK_REJECTIONS.pop((str(feature_id), str(pi_label)), None)
+
+
+def get_chalk_rejections(feature_id=None) -> dict:
+    """Rejections recorded this process. Filtered to one feature when given."""
+    if feature_id is None:
+        return dict(_CHALK_REJECTIONS)
+    fid = str(feature_id)
+    return {k: v for k, v in _CHALK_REJECTIONS.items() if k[0] == fid}
+
+
 def load_chalk_as_object(feature_id: str, pi_label: str):
     """Load cached Chalk data and reconstruct as ChalkData object. Returns None if not cached.
 
@@ -986,6 +1013,10 @@ def load_chalk_as_object(feature_id: str, pi_label: str):
                   '(its own id never appears). Re-crawl %s from the PI page that '
                   'actually hosts it.'
                   % (feature_id, pi_label, ', '.join(_others), feature_id))
+            record_chalk_rejection(
+                feature_id, pi_label,
+                'row holds content for %s; own id never appears in raw_text'
+                % ', '.join(_others))
             return None
     # ───────────────────────────────────────────────────────────────────────
 
@@ -1096,6 +1127,8 @@ def load_chalk_as_object(feature_id: str, pi_label: str):
     except Exception as _sc_err:
         print('[CHALK-CACHE] %s/%s: scenario parse failed: %s'
               % (feature_id, pi_label, str(_sc_err)[:120]))
+    # This key loaded, so any earlier rejection for it no longer holds.
+    clear_chalk_rejection(feature_id, pi_label)
     return data
 
 

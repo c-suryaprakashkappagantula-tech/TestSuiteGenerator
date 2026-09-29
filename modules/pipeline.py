@@ -516,9 +516,18 @@ def block_chalk_db(feature_id, pi_label, log=print):
     merged = ChalkData(feature_id=feature_id)
     seen = set()
     source_parts = []
+    # Every label here came from a row whose scenarios_json is non-empty, so a None
+    # result means the cache-poisoning guard rejected it - not that the row is absent.
+    # Keep the two apart: a rejected row must never fall through silently.
+    rejected = []
+    emptied = []
     for label in labels:
         item = load_chalk_as_object(feature_id, label)
-        if not item or not item.scenarios:
+        if item is None:
+            rejected.append(label)
+            continue
+        if not item.scenarios:
+            emptied.append(label)
             continue
         source_parts.append('%s:%d' % (label, len(item.scenarios)))
         if not merged.feature_title:
@@ -542,11 +551,29 @@ def block_chalk_db(feature_id, pi_label, log=print):
             merged.scenarios.append(scenario)
 
     if not merged.scenarios:
+        if rejected:
+            # Wrong TCs are worse than no TCs: say so plainly rather than degrading
+            # to Jira-only generation behind a bland "miss" line.
+            log('[PIPELINE] *** CHALK POISONED: %s has %d cached row(s) (%s) and every '
+                'one was rejected - each holds a different feature\'s content (its own '
+                'id never appears in raw_text). Proceeding Jira-only will produce '
+                'INCORRECT test cases. Fix: re-crawl %s from its correct PI page. ***'
+                % (feature_id, len(rejected), ', '.join(rejected), feature_id))
+            return {'chalk': None,
+                    'source': 'POISONED (%s) - Jira-only; TCs may be wrong'
+                              % ', '.join(rejected),
+                    'poisoned': True, 'poisoned_labels': list(rejected)}
         log('[PIPELINE] Chalk DB miss for %s' % feature_id)
-        return {'chalk': None, 'source': 'not in DB'}
+        return {'chalk': None, 'source': 'not in DB',
+                'empty_labels': list(emptied)}
+    if rejected:
+        log('[PIPELINE] WARNING: %s - %d cached Chalk row(s) rejected as poisoned (%s); '
+            'suite built from the %d scenario(s) that survived. Coverage is PARTIAL.'
+            % (feature_id, len(rejected), ', '.join(rejected), len(merged.scenarios)))
     log('[PIPELINE] Contract-v1 Chalk merge for %s: %d owned scenarios (%s)' %
         (feature_id, len(merged.scenarios), ', '.join(source_parts)))
-    return {'chalk': merged, 'source': 'DB cache merged (%s)' % ', '.join(labels)}
+    return {'chalk': merged, 'source': 'DB cache merged (%s)' % ', '.join(labels),
+            'poisoned': bool(rejected), 'poisoned_labels': list(rejected)}
 
 
 def block_chalk_live(page, feature_id, pi_url, pi_label, pi_list, log=print):
@@ -686,6 +713,36 @@ def block_build_suite_v8(jira, chalk, parsed_docs, options, deep_mine_result=Non
     total_steps = sum(len(tc.steps) for tc in suite.test_cases)
     log('[PIPELINE] V8 Suite built: %d TCs | %d steps | %.1fs' % (
         len(suite.test_cases), total_steps, _duration))
+
+    # A rejected Chalk row has to be visible in the workbook, not just the console -
+    # the Data Sources sheet is what a reviewer actually reads. Stamped here because
+    # every engine path (CR delegation, data-alignment, main planning) returns through
+    # this block, and the CR path builds an empty inventory of its own.
+    try:
+        from .database import get_chalk_rejections
+        _rej = get_chalk_rejections(getattr(jira, 'key', '') or '')
+        if _rej and suite is not None and getattr(suite, 'data_inventory', None) is not None:
+            from .data_models_v8 import DataSourceEntry
+            for (_fid, _pi), _reason in sorted(_rej.items()):
+                suite.data_inventory.sources.append(DataSourceEntry(
+                    source_name='Chalk %s (REJECTED)' % _pi,
+                    source_type='chalk',
+                    items_extracted=0,
+                    items_detail=[_reason],
+                    status='failed',
+                ))
+                _w = ('Chalk row %s/%s rejected as poisoned (%s). These test cases are '
+                      'NOT grounded in Chalk - re-crawl %s from its correct PI page and '
+                      'regenerate before trusting them.' % (_fid, _pi, _reason, _fid))
+                if _w not in suite.data_inventory.warnings:
+                    suite.data_inventory.warnings.append(_w)
+                _sw = getattr(suite, 'warnings', None)
+                if isinstance(_sw, list) and _w not in _sw:
+                    _sw.append(_w)
+            log('[PIPELINE] Stamped %d poisoned-Chalk warning(s) into suite provenance '
+                '(Data Sources sheet).' % len(_rej))
+    except Exception as _pe:
+        log('[PIPELINE] Could not stamp Chalk rejection provenance: %s' % str(_pe)[:120])
 
     # Log data sources processed
     if suite.data_inventory and suite.data_inventory.sources:
