@@ -214,6 +214,82 @@ def apply_subject_prefix(title: str, subject: str) -> str:
 
 # ── Suite-level entry point ──────────────────────────────────────────────────
 
+# ── Rule 4: distinct names for TCs that collide ──────────────────────────────
+# The UI title cascade in tc_builder keys off coarse keywords (portin + status),
+# so genuinely different tests ("MNO filter displayed", "ONSP search", "combined
+# filtering", "tabs get MNO not ONSP") can land on ONE name. Rather than grow that
+# cascade, break ties here from each TC's OWN description - the intent a reviewer
+# reads - so the count stays honest and every name is unique.
+_DESC_LEAD_RE = re.compile(
+    r'^\s*(?:UI verification:|To validate:|Validate:|Verify:)\s*', re.IGNORECASE)
+_DESC_VERB_RE = re.compile(
+    r'^\s*(?:verify|validate|ensure|confirm|check)\s+(?:that\s+)?(?:the\s+)?',
+    re.IGNORECASE)
+_STOPWORDS = {'the','a','an','is','are','of','to','and','or','on','in','at','for',
+              'with','that','then','when','be','via','as','it','its','no','not',
+              'displayed','screen','page','field','fields'}
+
+
+def _distinct_token(description, existing_words, max_words=5):
+    """A short differentiator mined from a TC's description: the first content
+    words of its intent clause that are not already in the shared name."""
+    d = description or ''
+    d = _DESC_LEAD_RE.sub('', d)
+    d = _DESC_VERB_RE.sub('', d)
+    # first clause only (up to a comma / period / ' and ')
+    d = re.split(r'[.,;]| and | but ', d, maxsplit=1)[0]
+    words = re.findall(r"[A-Za-z0-9]+", d)
+    picked = []
+    for w in words:
+        wl = w.lower()
+        if wl in _STOPWORDS or wl in existing_words:
+            continue
+        picked.append(w)
+        if len(picked) >= max_words:
+            break
+    return '_'.join(picked)
+
+
+def _dedupe_collided_names(suite, log):
+    """Append a description-mined differentiator to any TCs sharing a summary."""
+    tcs = getattr(suite, 'test_cases', []) or []
+    from collections import defaultdict
+    # Group by the name with any embedded ordinal(s) removed. The UI builder bakes a
+    # 'TCnn_' sequence INTO the name (TC01_NBOP_PortIn_..., TC04_NBOP_PortIn_...), which
+    # makes four genuinely identical names look distinct. Strip every leading/embedded
+    # TCnn_ and the feature-id prefix so the comparison sees the real, shared stem.
+    def _norm_key(s):
+        s = s or ''
+        s = re.sub(r'(?:^|_)(?:TC\d+_)+', '_', s)          # drop TCnn_ runs anywhere
+        s = re.sub(r'^_?[A-Z][A-Z0-9]+-\d+_', '', s)       # drop FEATUREID_ prefix
+        return re.sub(r'_{2,}', '_', s).strip('_').lower()
+    by_name = defaultdict(list)
+    for tc in tcs:
+        by_name[_norm_key(getattr(tc, 'summary', '') or '')].append(tc)
+    n_fixed = 0
+    for name, group in by_name.items():
+        if len(group) < 2 or not name:
+            continue
+        existing = {w.lower() for w in re.findall(r'[A-Za-z0-9]+', name)}
+        seen = set()
+        for tc in group:
+            token = _distinct_token(getattr(tc, 'description', ''), existing)
+            # keep the differentiator itself unique within the colliding group
+            base = token
+            i = 2
+            while token and token.lower() in seen:
+                token = '%s_%d' % (base, i); i += 1
+            if token:
+                seen.add(token.lower())
+                # append to the ORIGINAL summary (preserve case/prefix), not the
+                # lowercased grouping key
+                tc.summary = '%s_%s' % ((getattr(tc, 'summary', '') or '').rstrip('_'), token)
+                n_fixed += 1
+    if log and n_fixed:
+        log('[NAME-POLISH] %d colliding name(s) differentiated from their descriptions'
+            % n_fixed)
+
+
 def polish_suite_names(suite, chalk=None, log: Callable = print) -> object:
     """Apply the naming conventions to every TC summary in the suite.
 
@@ -244,6 +320,8 @@ def polish_suite_names(suite, chalk=None, log: Callable = print) -> object:
                     tc.summary = final
             except Exception:
                 continue
+
+        _dedupe_collided_names(suite, log)
 
         if log and (n_strip or n_subj):
             log('[NAME-POLISH] %d title(s) had implementation detail stripped, '

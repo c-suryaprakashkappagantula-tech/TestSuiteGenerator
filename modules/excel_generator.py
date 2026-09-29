@@ -127,6 +127,17 @@ def generate_excel(suite: TestSuite, log=print) -> Path:
     except Exception as _scrub_err:
         log('[EXCEL] macro scrub skipped: %s' % str(_scrub_err)[:100])
 
+    # Break identical TC names here, at the final chokepoint - after all pruning, so
+    # names are settled. The UI title cascade can map several distinct scenarios onto one
+    # coarse name (4526: four Port_Status_Removed TCs that are really MNO-filter / ONSP /
+    # combined / tabs). Differentiate them from each TC's own description so every name in
+    # the workbook is unique and reviewer-legible.
+    try:
+        from .tc_name_polish import _dedupe_collided_names
+        _dedupe_collided_names(suite, log)
+    except Exception as _dc_err:
+        log('[EXCEL] name-collision break skipped: %s' % str(_dc_err)[:100])
+
     wb = openpyxl.Workbook()
 
     # ── Sheet 1: Summary ──
