@@ -19,7 +19,7 @@ from modules.database import (
     init_db, load_chalk_as_object, load_jira, get_chalk_cache_count
 )
 from modules.pipeline import (
-    block_chalk_db, block_build_suite_v8, block_generate_output
+    block_chalk_db, block_build_suite_v8, block_generate_output, block_deep_mine
 )
 from modules.chalk_parser import ChalkData
 
@@ -31,7 +31,8 @@ def log(msg):
         print(msg.encode('ascii', 'replace').decode('ascii'), flush=True)
 
 
-def run_headless(feature_id: str, pi_label: str, custom_instructions: str = ''):
+def run_headless(feature_id: str, pi_label: str, custom_instructions: str = '',
+                 deep_mine: bool = True):
     log('\n' + '=' * 70)
     log('TSG V8.0 Headless Run: %s  [%s]' % (feature_id, pi_label))
     log('=' * 70)
@@ -88,6 +89,38 @@ def run_headless(feature_id: str, pi_label: str, custom_instructions: str = ''):
         log('[CHALK] No scenarios in DB cache — will proceed with Jira AC only')
         chalk = ChalkData(feature_id=feature_id)
 
+    # 3b. Deep Mine (Block 4b) — mirrors the dashboard so the headless path is not a
+    # false safety net. This is the input that made a live 4503 run diverge from cache
+    # (subtask mining), so verifying without it hides real regressions. Browserless:
+    # page=None, so API-spec crawling is skipped but Jira-subtask mining still runs.
+    deep_mine_result = None
+    if deep_mine:
+        try:
+            from modules.nmno_api_lookup import (extract_api_operation_name as _ean,
+                                                 lookup_api_specs as _las)
+            import re as _re_dm
+            _urls = _re_dm.findall(r'https?://[^\s<>"\']+chalk[^\s<>"\']*',
+                                   jira.acceptance_criteria or '') if jira else []
+            _api = _ean(jira.summary if jira else '', _urls)
+            _nmno = _las(_api, log=lambda x: None) if _api else None
+            if _nmno and _nmno.business_rules:
+                from modules.deep_miner import DeepMineResult, _mine_subtask
+                deep_mine_result = DeepMineResult(feature_id=feature_id)
+                for _st in (jira.subtasks or []):
+                    _m = _mine_subtask(_st, log=lambda x: None)
+                    if _m.ac_items or _m.testable_rules:
+                        deep_mine_result.subtask_mines.append(_m)
+                log('[DEEP-MINE] NMNO has %d business rules — subtask-only mine (%d)'
+                    % (len(_nmno.business_rules), len(deep_mine_result.subtask_mines)))
+            else:
+                dm = block_deep_mine(jira, chalk, page=None, log=log)
+                deep_mine_result = dm.get('deep_mine_result')
+        except Exception as _dm_err:
+            log('[DEEP-MINE] WARNING: %s — continuing without deep data' % str(_dm_err)[:120])
+            deep_mine_result = None
+    else:
+        log('[DEEP-MINE] skipped (--no-deep-mine)')
+
     # 4. Build options
     options = {
         'engine_version': '8',
@@ -108,7 +141,7 @@ def run_headless(feature_id: str, pi_label: str, custom_instructions: str = ''):
         chalk=chalk,
         parsed_docs=[],
         options=options,
-        deep_mine_result=None,
+        deep_mine_result=deep_mine_result,
         log=log,
     )
     suite = build_result.get('suite')
@@ -137,15 +170,17 @@ def run_headless(feature_id: str, pi_label: str, custom_instructions: str = ''):
 
 if __name__ == '__main__':
     if len(sys.argv) < 3:
-        print('Usage: python run_headless.py <FEATURE_ID> <PI_LABEL> [custom_instructions]')
+        print('Usage: python run_headless.py <FEATURE_ID> <PI_LABEL> [custom_instructions] [--no-deep-mine]')
         print('  e.g. python run_headless.py MWTGPROV-4503 PI-59')
         sys.exit(1)
 
-    fid = sys.argv[1]
-    pi = sys.argv[2]
-    ci = sys.argv[3] if len(sys.argv) > 3 else ''
+    _args = [a for a in sys.argv[1:] if a != '--no-deep-mine']
+    _deep = '--no-deep-mine' not in sys.argv
+    fid = _args[0]
+    pi = _args[1]
+    ci = _args[2] if len(_args) > 2 else ''
 
-    suite = run_headless(fid, pi, ci)
+    suite = run_headless(fid, pi, ci, deep_mine=_deep)
     if suite:
         print('\nDone — %d test cases' % len(suite.test_cases))
     else:
