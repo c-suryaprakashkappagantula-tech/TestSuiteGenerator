@@ -461,10 +461,24 @@ def block_chalk_db(feature_id, pi_label, log=print):
 
     # Legacy behavior remains untouched until contract-v1 canaries pass.
     if not _contract_v1:
+        c = _conn()
+        _row_exists = c.execute(
+            'SELECT pi_label FROM chalk_cache WHERE feature_id=? AND pi_label=?',
+            (feature_id, pi_label)).fetchone()
+        c.close()
         chalk = load_chalk_as_object(feature_id, pi_label)
         if chalk and chalk.scenarios:
             log('[PIPELINE] Chalk DB hit (%s): %d scenarios' % (pi_label, len(chalk.scenarios)))
             return {'chalk': chalk, 'source': 'DB cache (%s)' % pi_label}
+        if _row_exists and not chalk:
+            # Row was in the DB for this exact PI but rejected by the cache-poisoning guard.
+            # Fall through is LOUD — wrong TCs are worse than no TCs.
+            log('[PIPELINE] *** CHALK POISONED: %s/%s row exists in DB but was rejected '
+                '(feature id absent from raw_text — row holds a different feature\'s content). '
+                'Proceeding Jira-only will produce INCORRECT test cases. '
+                'Fix: re-crawl %s from its correct PI page. ***' % (feature_id, pi_label, feature_id))
+            return {'chalk': None, 'source': 'POISONED (%s) — Jira-only; TCs may be wrong' % pi_label,
+                    'poisoned': True}
         c = _conn()
         row = c.execute(
             'SELECT pi_label FROM chalk_cache WHERE feature_id=? '
@@ -476,6 +490,12 @@ def block_chalk_db(feature_id, pi_label, log=print):
                 log('[PIPELINE] Chalk DB hit (%s): %d scenarios' %
                     (row['pi_label'], len(chalk.scenarios)))
                 return {'chalk': chalk, 'source': 'DB cache (%s)' % row['pi_label']}
+            if not chalk:
+                log('[PIPELINE] *** CHALK POISONED (fallback PI %s): %s row also rejected. '
+                    'Re-crawl %s from its correct PI page. ***'
+                    % (row['pi_label'], feature_id, feature_id))
+                return {'chalk': None, 'source': 'POISONED (fallback %s) — Jira-only' % row['pi_label'],
+                        'poisoned': True}
         log('[PIPELINE] Chalk DB miss for %s' % feature_id)
         return {'chalk': None, 'source': 'not in DB'}
 
