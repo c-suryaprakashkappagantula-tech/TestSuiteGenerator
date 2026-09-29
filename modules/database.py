@@ -462,31 +462,64 @@ def is_jira_stale(feature_id: str) -> bool:
 # ================================================================
 
 def _chalk_row_is_poison(feature_id, chalk_data):
-    """Would this crawled row be rejected by the read-side poison guard?
+    """Would this crawled row be rejected as holding a different feature's content?
 
-    The guard in load_chalk_normalized() catches a poisoned row only on READ, after it
-    is already persisted - which is how an earlier bad crawl wrote 3641/3632/3677 content
-    under MWTGPROV-4167/PI-46. Mirror that check on the WRITE side so poison never lands
-    in the cache. Same conservative rule: fire only when the feature's own id is absent
-    AND the text was not truncated (so absence is real) AND other feature headers are
-    present (so it is demonstrably someone else's page).
+    The read-side guard in load_chalk_normalized() catches poison only AFTER it is
+    persisted - which is how an earlier bad crawl wrote 3641/3632/3677 content under
+    MWTGPROV-4167/PI-46. This mirrors it on the WRITE side.
+
+    Two signals, because whole-page raw_text is truncated at 50k on big multi-feature PI
+    pages (so an id-in-raw_text test silently abstains on exactly the pages most likely
+    to be mis-scoped):
+
+      1. WHOLE-PAGE: if raw_text is short enough to be complete and the feature's own id
+         never appears while other ids do, it is poison. (Original rule.)
+      2. FEATURE-SCOPED: the parser (_parse_feature_from_lines) already narrows to this
+         feature's section, so feature_title + scenario titles/validations are small and
+         never truncated. If that scoped content names OTHER features but never this one,
+         the crawl grabbed the wrong section - poison, regardless of raw_text length.
+
+    Conservative on both: fire only when other feature ids are present AND this feature's
+    is absent. A thin/genuinely-empty row (no other ids) is never flagged.
 
     Returns (is_poison: bool, other_ids: list).
     """
-    parts = [getattr(chalk_data, 'raw_text', '') or '',
-             getattr(chalk_data, 'scope', '') or '',
-             getattr(chalk_data, 'rules', '') or '']
+    fid_up = feature_id.upper()
+
+    def _ids_minus_self(text):
+        return [k for k in dict.fromkeys(re.findall(r'\b([A-Z][A-Z0-9]{2,}-\d+)\b',
+                (text or '').upper())) if k != fid_up][:3]
+
+    # ── Signal 2: scenario_id family (truncation-proof, and precise) ──
+    # The parser stamps each scenario with a TS_<FAMILY>_N id, where FAMILY is the feature
+    # the scenario table belongs to. A truncated whole-page raw_text hides poison, but the
+    # scenario ids are small and always present. If EVERY scenario is stamped with the SAME
+    # OTHER MWTGPROV feature (as 3982/4481/PI-59 were, all TS_MWTGPROV-4538_*), the crawl
+    # grabbed another feature's table - poison. Restricted to clean MWTGPROV-<N> families so
+    # a differing id scheme (TS_NSLNM770_, Chalk sub-ids) or a malformed/mashed id
+    # (TS_MWTGPROV-45714565_) is NOT mistaken for another feature.
+    _fam_re = re.compile(r'^TS[_\s]?(MWTGPROV-\d{3,5})(?:[_\s]|$)', re.IGNORECASE)
+    fams = set()
+    n_scn = 0
     for s in (getattr(chalk_data, 'scenarios', None) or []):
-        parts.append((getattr(s, 'title', '') or '') + ' ' + (getattr(s, 'validation', '') or ''))
-    blob = ' '.join(parts)
-    if not blob or len(blob) >= 50000:
-        return (False, [])
-    up = blob.upper()
-    if feature_id.upper() in up:
-        return (False, [])
-    others = [k for k in dict.fromkeys(re.findall(r'\b([A-Z][A-Z0-9]{2,}-\d+)\b', up))
-              if k != feature_id.upper()][:3]
-    return (bool(others), others)
+        n_scn += 1
+        m = _fam_re.match((getattr(s, 'scenario_id', '') or '').strip())
+        if m:
+            fams.add(m.group(1).upper())
+    # Poison only when the scenarios speak with ONE clean voice and it isn't ours.
+    if n_scn >= 3 and len(fams) == 1:
+        only = next(iter(fams))
+        if only != fid_up:
+            return (True, [only])
+
+    # ── Signal 1: whole-page raw_text (only trustworthy when NOT truncated) ──
+    raw = getattr(chalk_data, 'raw_text', '') or ''
+    if raw and len(raw) < 50000 and fid_up not in raw.upper():
+        others = _ids_minus_self(raw)
+        if others:
+            return (True, others)
+
+    return (False, [])
 
 
 def save_chalk(feature_id: str, pi_label: str, chalk_data):
@@ -1178,7 +1211,23 @@ def load_chalk_as_object(feature_id: str, pi_label: str):
     except Exception as _sc_err:
         print('[CHALK-CACHE] %s/%s: scenario parse failed: %s'
               % (feature_id, pi_label, str(_sc_err)[:120]))
-    # This key loaded, so any earlier rejection for it no longer holds.
+
+    # Second poison check, now that scenarios are parsed. The early raw_text check above
+    # abstains when raw_text is truncated (50k) - which is exactly the case on big
+    # multi-feature PI pages. _chalk_row_is_poison also inspects the scenario_id family,
+    # so a truncated row whose scenarios all belong to ONE other MWTGPROV feature (e.g.
+    # 3982/4481/4560 on PI-59, all carrying another feature's TS_ ids) is caught here.
+    _poison2, _others2 = _chalk_row_is_poison(feature_id, data)
+    if _poison2:
+        print('[CHALK-CACHE] POISONED ROW REJECTED: %s/%s scenarios belong to %s '
+              '(scenario_id family mismatch). Re-crawl %s from its correct PI page.'
+              % (feature_id, pi_label, ', '.join(_others2), feature_id))
+        record_chalk_rejection(
+            feature_id, pi_label,
+            'scenarios belong to %s (id-family mismatch)' % ', '.join(_others2))
+        return None
+
+    # This key loaded clean, so any earlier rejection for it no longer holds.
     clear_chalk_rejection(feature_id, pi_label)
     return data
 
