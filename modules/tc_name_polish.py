@@ -68,6 +68,57 @@ def strip_implementation_detail(title: str) -> str:
     return t
 
 
+# ── Rule 3: a summary NAME is short and punctuation-free ─────────────────────
+# A test-case name must read as a label, not a sentence: no parentheticals, no
+# quotes/brackets/operators, no trailing detail. The full sentence stays in the
+# Description column (built separately in tc_builder as "To validate: <full text>"),
+# so nothing is lost - this only cleans the NAME. Runs on the word-joined form
+# (underscores between words) produced by the builders.
+#
+#   Verify_a_TMO_activation_with_an_11-50_char_device_make_(e.g._'Samsung_Korea')
+#     -> Verify_a_TMO_activation_with_an_11-50_char_device_make
+_PARENTHETICAL_RE = re.compile(r'_?\([^)]*\)?')        # (...) incl. unterminated
+_EG_CLAUSE_RE = re.compile(r'_(?:e\.?g\.?|i\.?e\.?|eg|ie|such_as)\b.*$', re.IGNORECASE)
+# Punctuation that must never appear in a name. Underscore, hyphen and the id's own
+# characters are kept; everything else is dropped. (Kept: A-Z a-z 0-9 _ -)
+_FORBIDDEN_NAME_CHARS = list("()[]{}<>+!\"'`,:;/\\|=&%@#$?*~^")
+_NAME_PUNCT_RE = re.compile('[' + re.escape(''.join(_FORBIDDEN_NAME_CHARS)) + ']')
+
+
+def clean_summary_name(summary: str, max_words: int = 12) -> str:
+    """Return a short, punctuation-free TC name. Keeps the 'MWTGPROV-XXXX_' /
+    'TCnn_' prefix untouched and cleans only the descriptive tail."""
+    s = summary or ''
+    if not s:
+        return s
+    # Split off any leading TCnn_ and FEATUREID_ prefix so we never mangle them.
+    m = re.match(r'^((?:TC\d+_)?[A-Z][A-Z0-9]+-\d+_)(.*)$', s)
+    prefix, tail = (m.group(1), m.group(2)) if m else ('', s)
+    # Drop an "e.g./i.e./such as" clause and any parenthetical first (they carry the
+    # detail that belongs in the Description).
+    tail = _EG_CLAUSE_RE.sub('', tail)
+    tail = _PARENTHETICAL_RE.sub('', tail)
+    # Strip forbidden punctuation, collapse resulting repeated/edge underscores.
+    tail = _NAME_PUNCT_RE.sub('', tail)
+    tail = re.sub(r'_-+_', '_', tail)          # arrow/dash remnants between words
+    tail = re.sub(r'_{2,}', '_', tail).strip('_-. ')
+    # Cut trailing dangling connective words left by the trims.
+    for _ in range(3):
+        b = tail
+        tail = _DANGLING_TAIL_RE.sub('', tail).strip('_-. ')
+        if tail == b:
+            break
+    # Keep the name short: cap the descriptive tail at max_words words.
+    words = [w for w in tail.split('_') if w]
+    if len(words) > max_words:
+        words = words[:max_words]
+        # re-trim a dangling connective exposed by the cut
+        while words and _DANGLING_TAIL_RE.match('_' + words[-1]):
+            words.pop()
+    tail = '_'.join(words)
+    return (prefix + tail).rstrip('_-. ') if tail else s
+
+
 # ── Rule 2: subject prefix ───────────────────────────────────────────────────
 
 # The "TC01_" ordinal is prepended later by excel_generator, so it is optional here.
@@ -181,6 +232,10 @@ def polish_suite_names(suite, chalk=None, log: Callable = print) -> object:
                     continue
                 stripped = strip_implementation_detail(original)
                 if stripped and stripped != original:
+                    n_strip += 1
+                _pre_clean = stripped
+                stripped = clean_summary_name(stripped)
+                if stripped != _pre_clean:
                     n_strip += 1
                 final = apply_subject_prefix(stripped, subject) if subject else stripped
                 if final != stripped:
