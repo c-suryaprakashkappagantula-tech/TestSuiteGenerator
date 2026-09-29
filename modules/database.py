@@ -461,8 +461,53 @@ def is_jira_stale(feature_id: str) -> bool:
 # CHALK CACHE
 # ================================================================
 
+def _chalk_row_is_poison(feature_id, chalk_data):
+    """Would this crawled row be rejected by the read-side poison guard?
+
+    The guard in load_chalk_normalized() catches a poisoned row only on READ, after it
+    is already persisted - which is how an earlier bad crawl wrote 3641/3632/3677 content
+    under MWTGPROV-4167/PI-46. Mirror that check on the WRITE side so poison never lands
+    in the cache. Same conservative rule: fire only when the feature's own id is absent
+    AND the text was not truncated (so absence is real) AND other feature headers are
+    present (so it is demonstrably someone else's page).
+
+    Returns (is_poison: bool, other_ids: list).
+    """
+    parts = [getattr(chalk_data, 'raw_text', '') or '',
+             getattr(chalk_data, 'scope', '') or '',
+             getattr(chalk_data, 'rules', '') or '']
+    for s in (getattr(chalk_data, 'scenarios', None) or []):
+        parts.append((getattr(s, 'title', '') or '') + ' ' + (getattr(s, 'validation', '') or ''))
+    blob = ' '.join(parts)
+    if not blob or len(blob) >= 50000:
+        return (False, [])
+    up = blob.upper()
+    if feature_id.upper() in up:
+        return (False, [])
+    others = [k for k in dict.fromkeys(re.findall(r'\b([A-Z][A-Z0-9]{2,}-\d+)\b', up))
+              if k != feature_id.upper()][:3]
+    return (bool(others), others)
+
+
 def save_chalk(feature_id: str, pi_label: str, chalk_data):
-    """Cache ChalkData for a feature+PI combination."""
+    """Cache ChalkData for a feature+PI combination.
+
+    Write-side poison guard: refuse to persist a crawled row whose content is about a
+    different feature. Without this, a mis-targeted crawl silently poisons the cache and
+    the damage only surfaces on a later read. Returns True on write, False on refusal.
+    """
+    _poison, _others = _chalk_row_is_poison(feature_id, chalk_data)
+    if _poison:
+        print('[CHALK-SAVE] REFUSED to cache %s/%s: crawled content is about %s, not %s '
+              '(its own id never appears). Not writing - re-crawl from the correct PI page.'
+              % (feature_id, pi_label, ', '.join(_others), feature_id))
+        try:
+            record_chalk_rejection(
+                feature_id, pi_label,
+                'live crawl produced content for %s; refused at save' % ', '.join(_others))
+        except Exception:
+            pass
+        return False
     c = _conn()
     c.execute('''INSERT OR REPLACE INTO chalk_cache
         (feature_id, pi_label, scope, rules, scenarios_json, open_items_json,
@@ -481,6 +526,12 @@ def save_chalk(feature_id: str, pi_label: str, chalk_data):
         datetime.now().isoformat(),
     ))
     c.commit(); c.close()
+    # A fresh good write for this key clears any earlier rejection.
+    try:
+        clear_chalk_rejection(feature_id, pi_label)
+    except Exception:
+        pass
+    return True
 
 
 def load_chalk(feature_id: str, pi_label: str) -> Optional[Dict]:
