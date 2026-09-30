@@ -1139,7 +1139,9 @@ def _finalize_priorities(suite, feature_priority='', log: Callable = print, prob
     elif any(k in _fp for k in ('low', 'minor', 'trivial')):
         _p1_cap, _overflow = 2, 'P3'
     else:
-        _p1_cap, _overflow = 4, 'P3'
+        # Default (Medium/Major) features: non-P1 functional tests are still 'should-run'
+        # (P2); only low-value checks drop to P3 (see _LOWVAL_RE below).
+        _p1_cap, _overflow = 4, 'P2'
 
     # Category correction. Chalk pages often list every scenario under one section, so
     # 'Happy Path' arrives as a default even for regression and boundary checks (4503:
@@ -1211,17 +1213,68 @@ def _finalize_priorities(suite, feature_priority='', log: Callable = print, prob
                                  ' '.join([getattr(suite, 'feature_title', '') or '',
                                            (problem_text or '')[:300]]), _re_cat.I))
 
+    # Negative / E2E correction for DEFAULT Happy Path TCs, title-only. Runs AFTER P1
+    # selection so the P1 set is unchanged: a re-labelled TC that was already P1 stays P1.
+    #  - Negative: the title names a failure outcome (reject/error/fail, negation-aware -
+    #    'no longer fails' is NOT negative), or describes the input itself as bad
+    #    (non-numeric / over-length / malformed ...) without asserting it is accepted.
+    #  - E2E: the title verifies the end-to-end / downstream view ('E2E', 'end-to-end',
+    #    'usage appears in NBOP', 'displayed in the portal').
+    try:
+        from .step_templates import _is_negative as _neg_title
+    except Exception:
+        _neg_title = None
+    _BADVAL_RE = _re_cat.compile(
+        r'\b(?:non[\s-]?numeric|non[\s-]?integer|over[\s-]?length|too[\s-]long|malformed|'
+        r'out[\s-]of[\s-]range|corrupt(?:ed)?)\b', _re_cat.I)
+    _ACCEPTED_RE = _re_cat.compile(
+        r'\b(?:is|are|be|gets?)\s+(?:accepted|ingested|stored|processed|allowed|saved)\b|'
+        r'\bsuccessfully\b', _re_cat.I)
+    _E2E_WORD_RE = _re_cat.compile(r'\b(?:e2e|end[\s-]to[\s-]end)\b', _re_cat.I)
+    # downstream view: '<verb> in/on <SYSTEM ACRONYM | ui | portal | dashboard | downstream>'.
+    # Case-sensitive on purpose so only an upper-case system name (NBOP, RSSX ...) counts.
+    _E2E_VIEW_RE = _re_cat.compile(
+        r'\b(?:[Aa]ppears?|[Aa]ppearing|[Dd]isplay(?:s|ed)?|[Rr]eflected|[Vv]isible|[Ss]hown)\s+'
+        r'(?:up\s+)?(?:in|on)\s+(?:the\s+)?'
+        r'(?:[A-Z][A-Z0-9]{2,}\b|(?:[Uu][Ii]|[Pp]ortal|[Dd]ashboard|[Dd]ownstream)\b)')
+    n_neg = n_e2e = 0
+    for tc in suite.test_cases:
+        if (getattr(tc, 'category', '') or '').lower() != 'happy path':
+            continue
+        _t = (getattr(tc, 'summary', '') or '').replace('_', ' ')
+        _tl = _t.lower()
+        if _E2E_WORD_RE.search(_t) or _E2E_VIEW_RE.search(_t):
+            tc.category = 'E2E'; n_e2e += 1
+        elif ((_neg_title is not None and _neg_title(_tl)) or
+              (_BADVAL_RE.search(_tl) and not _ACCEPTED_RE.search(_tl))):
+            tc.category = 'Negative'; n_neg += 1
+    if n_neg or n_e2e:
+        log('[V8-ENGINE]   Re-labelled default Happy Path TC(s): %d Negative, %d E2E' % (n_neg, n_e2e))
+
+    # Low-value checks (pass-through / unused / cosmetic / informational) are P3; every
+    # other non-P1 functional test keeps the overflow tier (P2 unless a low-criticality feature).
+    _LOWVAL_RE = _re_cat.compile(
+        r'\b(?:pass(?:ed|es|ing)?[\s-]+through|as[\s-]is|unused|cosmetic|informational|'
+        r'tooltips?|display[\s-]only)\b', _re_cat.I)
+    def _overflow_for(tc):
+        return 'P3' if _LOWVAL_RE.search((getattr(tc, 'summary', '') or '').replace('_', ' ')) else _overflow
+
     happy = 0
     counts = {'P1': 0, 'P2': 0, 'P3': 0}
     for tc in suite.test_cases:
         cat = (getattr(tc, 'category', '') or '').lower()
+        if id(tc) in _p1_ids and cat in ('negative', 'e2e'):
+            # re-labelled above from a P1 Happy Path - keep the P1 set unchanged
+            tc.priority = 'P1'
+            counts['P1'] += 1
+            continue
         if cat == 'regression':
             tc.priority = 'P1' if _is_cr else 'P2'
             counts[tc.priority] = counts.get(tc.priority, 0) + 1
             continue
         if cat == 'happy path':
             happy += 1
-            tc.priority = 'P1' if id(tc) in _p1_ids else _overflow
+            tc.priority = 'P1' if id(tc) in _p1_ids else _overflow_for(tc)
             counts[tc.priority] = counts.get(tc.priority, 0) + 1
             continue
         if cat == 'negative':
@@ -1229,7 +1282,7 @@ def _finalize_priorities(suite, feature_priority='', log: Callable = print, prob
         elif cat == 'regression':
             tc.priority = 'P2'
         elif cat == 'edge case':
-            tc.priority = 'P3'
+            tc.priority = _overflow_for(tc)
         elif cat in ('e2e', 'end-to-end'):
             tc.priority = 'P1'
         elif cat == 'happy path':

@@ -87,7 +87,7 @@ def get_step_chain(sc_title, sc_validation, feature_context, feature_type=''):
                 ('Verify no invalid data is written to NSL DB (subscriber records unchanged)',
                  'NSL DB records for test subscriber remain unaffected; no corrupted data persists'),
             ]
-        return [
+        steps = [
             ('Prepare a valid PRR/batch file with test subscriber data matching the scenario: %s'
              % _trim_title(sc_title, 70),
              'PRR/batch file is correctly formatted, field types/lengths within spec, '
@@ -99,6 +99,13 @@ def get_step_chain(sc_title, sc_validation, feature_context, feature_type=''):
             ('Verify NSL DB / downstream system reflects the updated subscriber data from the file',
              sc_validation or 'Subscriber data updated correctly — field values match PRR file input'),
         ]
+        # Regression-style scenario ('... remains unchanged') on a feature whose context
+        # names NBOP as the usage view: also confirm the downstream NBOP view is unchanged.
+        if 'nbop' in ctx and re.search(
+                r'\b(?:unchanged|unaffected|no\s+regression|regression|remains?\s+the\s+same)\b', t):
+            steps.append(('Open NBOP usage details for the test line',
+                          'Usage displays exactly as before the change'))
+        return steps
 
     # Check negative/error FIRST — but Sync Key Info negatives get their own handler
     if _is_negative(t):

@@ -1298,6 +1298,12 @@ def _build_scenario_tc(
                 'prr file', 'prr usage', 'batch file', 'sftp', 'file ingestion',
                 'batch ingest', 'usage file', 'mediation file')):
             _ft = 'batch_file'
+        if _ft == 'batch_file' and jira and 'nbop' not in _ctx and 'nbop' in (
+                '%s %s %s' % (_full_summary, getattr(jira, 'description', '') or '',
+                              getattr(jira, 'acceptance_criteria', '') or '')).lower():
+            # The batch template returns before any other ctx check; this marker only lets
+            # it add the downstream NBOP usage check when the feature itself names NBOP.
+            _ctx += ' nbop'
         _chain = _get_chain(scenario.title, scenario.validation, _ctx, feature_type=_ft)
         steps = [TestStep(step_num=i, summary=s, expected=e, data_reference=scenario.source.source_id)
                  for i, (s, e) in enumerate(_chain, 1)]
