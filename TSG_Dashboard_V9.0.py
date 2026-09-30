@@ -898,6 +898,13 @@ with right:
                     data=Path(ss['result_path']).read_bytes(),
                     file_name=Path(ss['result_path']).name,
                     use_container_width=True, key='dl_main')
+                # Test Suite Demo document for the same run (only when it matches this suite).
+                _demo = ss.get('demo_doc_path') or ''
+                if _demo and Path(_demo).exists() and ss.get('last_feature_id', '') in Path(_demo).name:
+                    st.download_button('📄 Test Suite Demo (Word)',
+                        data=Path(_demo).read_bytes(), file_name=Path(_demo).name,
+                        mime='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                        use_container_width=True, key='dl_demo_doc')
             with _dl_c2:
                 if ss.get('logs'):
                     _cli_text = '\n'.join(ss['logs'])
@@ -2025,6 +2032,7 @@ if run_btn:
                         grounding_badge_val = ''
 
                     ss['result_path'] = str(out_path)
+                    ss['demo_doc_path'] = str(output['demo_doc_path']) if output.get('demo_doc_path') else ''
                     ss['suite_info'] = {
                         'tc_count': output['tc_count'],
                         'step_count': output['total_steps'],

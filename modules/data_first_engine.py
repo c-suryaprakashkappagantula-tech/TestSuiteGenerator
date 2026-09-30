@@ -1168,15 +1168,25 @@ def _finalize_priorities(suite, feature_priority='', log: Callable = print, prob
     if n_recat:
         log('[V8-ENGINE]   Re-labelled %d default Happy Path TC(s) as Regression/Edge Case' % n_recat)
 
-    # P1 goes to the Happy Path TCs that test the ticket's actual problem, not simply to
-    # the first N in list order (4503: 'usage appears in NBOP' - the production symptom -
-    # was P3 purely because it came 9th). Rank by overlap with the Jira problem text;
-    # ties keep list order. For a CR/defect-driven ticket a regression of the existing
-    # flow is release-critical, so Regression is P1 there (P2 otherwise).
+    # P1 selection (Happy Path), three sources, in this order:
+    #  1. The first N Happy Path TCs in list order - Chalk lists a feature's core-fix
+    #     scenarios first, so these are the checks that the fix itself works (4503:
+    #     TC01-TC04). N is the per-feature-priority cap, as before.
+    #  2. The ONE Happy Path TC that best matches the Jira problem text - the test of the
+    #     production symptom (4503: 'usage appears in NBOP'), even when it is listed late.
+    #  3. Up to 3 Jira-AC TCs: each directly proves an acceptance criterion.
+    # Everything else keeps the overflow priority. Regression on a CR is P1 (below).
     _STOPW = {'with', 'that', 'this', 'from', 'when', 'then', 'into', 'their', 'there',
               'which', 'should', 'would', 'could', 'verify', 'validate', 'ensure', 'data',
               'file', 'files', 'record', 'records', 'field', 'fields', 'value', 'values'}
-    _prob_words = {w for w in _re_cat.findall(r'[a-z0-9]{4,}', (problem_text or '')[:600].lower())
+    # Score against the FIRST sentence that states the SYMPTOM ('... is not appearing in
+    # NBOP'), not the whole description - the rest describes the fix and matches every TC.
+    _ptxt = (problem_text or '')[:1200]
+    _sym = [x for x in _re_cat.split(r'(?<=[.!?])\s+|\n+', _ptxt)
+            if _re_cat.search(r"\b(?:not|missing|unable|cannot|can't|fails?|failing|dropp?ed|"
+                              r"lost|incorrect|wrong|error)\b", x, _re_cat.I)
+            and not _re_cat.search(r'\bCR\b|prod\s+defects?\s*-', x)]
+    _prob_words = {w for w in _re_cat.findall(r'[a-z0-9]{4,}', (_sym[0] if _sym else _ptxt[:600]).lower())   # the headline symptom sentence
                    if w not in _STOPW}
     def _stem(w):
         return _re_cat.sub(r'(?:ing|ed|es|s)$', '', w)
@@ -1184,10 +1194,19 @@ def _finalize_priorities(suite, feature_priority='', log: Callable = print, prob
     def _score(tc):
         words = _re_cat.findall(r'[a-z0-9]{4,}', (getattr(tc, 'summary', '') or '').replace('_', ' ').lower())
         return sum(1 for w in set(words) if w not in _STOPW and _stem(w) in _prob_stems)
+    def _is_jira_ac(tc):
+        tr = getattr(tc, 'traceability', None)
+        return ((getattr(tr, 'source_type', '') or '').strip().lower() in ('jira ac', 'jira')) if tr else False
     _happy_all = [tc for tc in suite.test_cases
                   if (getattr(tc, 'category', '') or '').lower() == 'happy path']
-    _ranked = sorted(range(len(_happy_all)), key=lambda i: (-_score(_happy_all[i]), i))
-    _p1_ids = {id(_happy_all[i]) for i in _ranked[:_p1_cap]}
+    _happy_core = [tc for tc in _happy_all if not _is_jira_ac(tc)]
+    _p1_ids = {id(tc) for tc in _happy_core[:_p1_cap]}
+    if _prob_stems and _happy_core:
+        _best = max(_happy_core, key=_score)
+        if _score(_best) >= 2:
+            _p1_ids.add(id(_best))
+    for tc in [t for t in _happy_all if _is_jira_ac(t)][:3]:
+        _p1_ids.add(id(tc))
     _is_cr = bool(_re_cat.search(r'\bCR\b|change\s+request|prod(?:uction)?\s+defect',
                                  ' '.join([getattr(suite, 'feature_title', '') or '',
                                            (problem_text or '')[:300]]), _re_cat.I))

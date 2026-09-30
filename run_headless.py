@@ -174,6 +174,13 @@ def run_headless(feature_id: str, pi_label: str, custom_instructions: str = '',
     OUTPUTS.mkdir(parents=True, exist_ok=True)
     out_path = generate_excel(suite, log=log)
     log('[OUTPUT] Saved: %s' % out_path)
+    try:
+        from modules.demo_doc_generator import generate_demo_doc
+        _demo = generate_demo_doc(suite, jira, chalk, log=log)
+        if _demo:
+            log('[OUTPUT] Demo doc: %s' % _demo)
+    except Exception as _dd:
+        log('[OUTPUT] Demo doc skipped: %s' % str(_dd)[:100])
 
     return suite
 

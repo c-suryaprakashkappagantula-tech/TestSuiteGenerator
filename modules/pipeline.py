@@ -850,6 +850,14 @@ def block_generate_output(suite, feature_id, pi, strategy, jira=None, chalk=None
         log('[PIPELINE] Feature doc warning: %s' % str(e)[:60])
         _record_degraded('Feature Summary document', e)
 
+    # Test Suite Demo document - same content as the workbook, written for a walkthrough.
+    demo_doc_path = None
+    try:
+        from .demo_doc_generator import generate_demo_doc
+        demo_doc_path = generate_demo_doc(suite, jira, chalk, log=log)
+    except Exception as e:
+        log('[PIPELINE] Demo doc warning: %s' % str(e)[:60])
+
     suite_id = 0
     try:
         suite_id = save_test_suite(suite, file_path=str(out_path))
@@ -868,7 +876,8 @@ def block_generate_output(suite, feature_id, pi, strategy, jira=None, chalk=None
     from .degraded_tracker import pass_names as _degraded_names
 
     return {
-        'out_path': out_path, 'doc_path': doc_path, 'suite_id': suite_id,
+        'out_path': out_path, 'doc_path': doc_path, 'demo_doc_path': demo_doc_path,
+        'suite_id': suite_id,
         'tc_count': len(suite.test_cases), 'total_steps': total_steps,
         'diff_report': diff_report,
         'scorecard': scorecard,

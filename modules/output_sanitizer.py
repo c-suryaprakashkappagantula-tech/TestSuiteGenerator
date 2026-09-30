@@ -137,28 +137,38 @@ def sanitize_suite(suite, log: Callable = print) -> dict:
     """Apply every output rule to every TC. Returns counts per rule for the log."""
     counts = {'text': 0, 'names': 0, 'context_steps': 0}
     for tc in (getattr(suite, 'test_cases', None) or []):
-        # 1. context lines written as steps -> Description
-        steps = list(getattr(tc, 'steps', None) or [])
-        kept, moved = [], []
-        for st in steps:
+        # 1. 'Old behaviour: X' written as a step. A tester cannot re-run pre-fix
+        #    behaviour, but they CAN check it no longer happens - so the step becomes an
+        #    executable log check that names the old failure (reviewer's rewrite on 4503).
+        for st in (getattr(tc, 'steps', None) or []):
             summ = getattr(st, 'summary', '') or ''
-            if _CONTEXT_STEP_RE.match(summ) and len(steps) > 1:
-                moved.append(_CONTEXT_STEP_RE.sub('', summ).rstrip(' .'))
+            if not _CONTEXT_STEP_RE.match(summ):
+                continue
+            old = _CONTEXT_STEP_RE.sub('', summ).strip().rstrip(' .')
+            if not old:
+                continue
+            low = (old + ' ' + (getattr(tc, 'description', '') or '') + ' ' +
+                   (getattr(tc, 'summary', '') or '')).lower()
+            where = ('ingestion' if re.search(r'ingest|prr|batch|file|record', low) else 'processing')
+            o = old.lower()
+            if 'overflow' in o:
+                err = 'parse/overflow error'
+            elif 'numberformat' in o or 'number format' in o:
+                err = 'parse/NumberFormat error'
+            elif 'parse' in o:
+                err = 'parse error'
             else:
-                kept.append(st)
-        if moved and kept:
-            for i, st in enumerate(kept, 1):
-                try:
-                    st.step_num = i
-                except Exception:
-                    pass
-            tc.steps = kept
-            desc = (getattr(tc, 'description', '') or '').rstrip()
-            if desc and desc[-1] not in '.!?':
-                desc += '.'
-            ctx = 'Context (pre-fix behaviour): %s.' % '; '.join(moved)
-            tc.description = ('%s %s' % (desc, ctx)).strip() if desc else ctx
-            counts['context_steps'] += len(moved)
+                err = 'error'
+            obj = 'record' if 'record' in low else 'transaction'
+            first = old.split(' ', 1)[0]
+            if re.fullmatch(r'[A-Z][a-z]+', first):      # 'The ...' -> 'the ...'; keep NumberFormat/NUMERIC
+                old = old[0].lower() + old[1:]
+            st.summary = 'Check the NSL %s log for the %s (pre-fix, %s).' % (where, obj, old)
+            if 'drop' in o:
+                st.expected = 'No %s logged; the %s is not dropped.' % (err, obj)
+            else:
+                st.expected = 'No %s logged; the pre-fix failure does not occur.' % err
+            counts['context_steps'] += 1
         # 2. body text
         for attr in ('description', 'preconditions'):
             v = getattr(tc, attr, None)
