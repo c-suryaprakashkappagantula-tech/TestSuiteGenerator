@@ -178,7 +178,9 @@ class TestNoUngroundedNegativesOn4166:
 
     def test_4166_keeps_its_real_coverage(self, build_suite):
         suite = build_suite('MWTGPROV-4166')
-        titles = ' '.join((getattr(tc, 'summary', '') or '').lower()
+        # Names are underscore-joined once the suite has been through the Excel output
+        # pass (output_sanitizer.clean_name); compare separator-agnostically.
+        titles = ' '.join((getattr(tc, 'summary', '') or '').lower().replace('_', ' ')
                           for tc in suite.test_cases)
         assert 'cr fix applies' in titles, 'the defect-fix test case must survive'
         assert 'no longer occurs' in titles, 'the old-error check must survive'

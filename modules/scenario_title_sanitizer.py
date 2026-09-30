@@ -35,9 +35,20 @@ def _strip_confluence_artifacts(text: str) -> str:
     """Remove Confluence macro markup that leaks from Jira AC fields."""
     if not text:
         return text
-    t = _CONFLUENCE_PARAM_RE.sub('', text)
-    t = _CONFLUENCE_MACRO_RE.sub('', t)
-    return ' '.join(t.split()).strip()
+    try:
+        from .output_sanitizer import clean_text
+        t = clean_text(text) or ''
+        # TITLE-only: a Jira wiki table row ('|2|Update Subscriber|[https://host:8499/..]')
+        # is not a scenario name. Drop URLs, link brackets, cell pipes and the leading row
+        # number so it collapses onto the real scenario and near-dup pruning can see it.
+        t = re.sub(r'\[?https?://[^\s\]|]+\]?', ' ', t)
+        t = re.sub(r'(?:^|\|)\s*\d{1,3}\s*\|', ' ', t)   # numbered first cell '|2|'
+        t = t.replace('|', ' ').replace('[', ' ').replace(']', ' ')
+        return ' '.join(t.split()).strip()
+    except Exception:
+        t = _CONFLUENCE_PARAM_RE.sub('', text)
+        t = _CONFLUENCE_MACRO_RE.sub('', t)
+        return ' '.join(t.split()).strip()
 
 
 # Source types that ARE ground truth. Left completely alone.

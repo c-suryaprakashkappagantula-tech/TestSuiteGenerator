@@ -41,12 +41,20 @@ _TCB_PARAM_RE = re.compile(
 
 
 def _scrub_body_artifacts(text):
-    """Strip Confluence macro markup from step/description body text."""
+    """Strip Confluence macro markup from step/description body text.
+
+    Delegates to output_sanitizer.clean_text, which keeps the text inside {{field}}
+    (the old regex deleted it - 'where {{data_volume_ctr}} contains' became 'where
+    contains') and removes {panel}-style macros together with their macro word."""
     if not text:
         return text
-    t = _TCB_PARAM_RE.sub('', str(text))
-    t = _TCB_MACRO_RE.sub('', t)
-    return re.sub(r'\s{2,}', ' ', t).strip()
+    try:
+        from .output_sanitizer import clean_text
+        return clean_text(str(text))
+    except Exception:
+        t = _TCB_PARAM_RE.sub('', str(text))
+        t = _TCB_MACRO_RE.sub('', t)
+        return re.sub(r'\s{2,}', ' ', t).strip()
 
 
 # ================================================================
@@ -1280,7 +1288,17 @@ def _build_scenario_tc(
         # scenario's actual subject matter.
         from .step_templates import get_step_chain as _get_chain
         _ctx = (feature_name + ' ' + (scenario.validation or '')).lower()
-        _chain = _get_chain(scenario.title, scenario.validation, _ctx, feature_type=feature_type)
+        # feature_name is truncated to ~50 chars ('Handle Non-Numeric Data Types i...'),
+        # which cut 'PRR Usage Files' off 4503 and sent its Jira-AC TCs to the API
+        # template (Trigger API / Century Report / NE Portal). Decide file-ingestion from
+        # the FULL Jira summary; only this routing flag changes, ctx stays as before.
+        _ft = feature_type
+        _full_summary = ((getattr(jira, 'summary', '') or '') if jira else '').lower()
+        if _ft != 'ui' and any(kw in _full_summary for kw in (
+                'prr file', 'prr usage', 'batch file', 'sftp', 'file ingestion',
+                'batch ingest', 'usage file', 'mediation file')):
+            _ft = 'batch_file'
+        _chain = _get_chain(scenario.title, scenario.validation, _ctx, feature_type=_ft)
         steps = [TestStep(step_num=i, summary=s, expected=e, data_reference=scenario.source.source_id)
                  for i, (s, e) in enumerate(_chain, 1)]
 
@@ -1346,7 +1364,7 @@ def _build_scenario_tc(
     clean_title = re.sub(r'\s{2,}', ' ', clean_title).strip()
     # Strip Confluence macro artifacts that leak from Jira AC text
     # e.g. "}}",  "}" trailing from {{code}} blocks, "{{...}}" macros
-    clean_title = re.sub(r'\{\{[^}]{0,40}\}\}', '', clean_title)
+    clean_title = re.sub(r'\{\{([^}]{0,40})\}\}', r'\1', clean_title)  # keep {{field}} text
     clean_title = re.sub(r'\}\}+', '', clean_title)
     clean_title = re.sub(r'(?<!\{)\}(?!\})', '', clean_title)
     # Confluence single-brace macro remnants: {panel}, {panel:title=..}, {color}, {code:..

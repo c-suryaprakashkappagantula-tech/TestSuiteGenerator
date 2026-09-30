@@ -194,10 +194,49 @@ def get_step_chain(sc_title, sc_validation, feature_context, feature_type=''):
 
 # ── Detection helpers ──
 
+# Negated error words describe a SUCCESS ("processed without rejection", "no longer
+# fails", "record is not dropped"). Remove them before the keyword test so a positive
+# scenario is not handed the invalid-data/error-response step template.
+_NEGATED_ERROR_RE = re.compile(
+    r"\b(?:without|with\s+no|no\s+longer|never|zero|no|prevents?|preventing|avoids?|avoiding)\s+"
+    r"(?:(?:any|the|an?|activation|parse|validation|unhandled)\s+){0,2}"
+    r"(?:errors?|rejections?|rejected|rejecting|failures?|fail(?:s|ed|ing)?|mismatch(?:es)?|null|empty|blank)\b"
+    # 'is blank/null', 'never contains blank/null' - an expected output STATE, not an error
+    r"|\b(?:is|are|be|remains?|contains?|shows?|displays?|returns?)\s+(?:an?\s+)?(?:blank\s*/\s*)?null\b"
+    r"|\bblank\s*/\s*null\b"
+    r"|\b(?:does|do|did|should|must|will|shall|would)\s+not\s+(?:be\s+)?"
+    r"(?:fail(?:s|ed)?|reject(?:ed)?|error|throw|drop(?:ped)?)\b"
+    r"|\berror[-\s]free\b"
+    # 'no longer throws an unhandled parse failure', 'is not silently rejected' - up to 4
+    # filler words, but never across 'returns/with/and/but' (a real error follows those).
+    r"|\b(?:no\s+longer|(?:is|are|was|were|be|being|gets?)\s+not)\s+"
+    r"(?:(?!returns?\b|returned\b|with\b|and\b|but\b|then\b)\w+\s+){0,4}?"
+    r"(?:errors?|rejections?|rejected|rejects?|failures?|fail(?:s|ed|ing)?|dropped)\b",
+    re.IGNORECASE)
+
+
+# A list after 'no' negates every item: 'no blank, null, or empty values', 'no other
+# values, lowercase variants, or invalid data'.
+_NEGATED_LIST_RE = re.compile(
+    r"\bno\s+(?:[\w'-]+,?\s+){0,6}?(?:or|and|nor)\s+(?:invalid|null|empty|blank)\b"
+    r"|\bno\s+(?:blank|null|empty)(?=\s*,|\s+or\b)", re.IGNORECASE)
+# 'null' alone is not a failure signal - it is often an example value ('e.g. "COX",
+# null') or an expected state. It counts only when a null is SUPPLIED as input.
+_NULL_INPUT_RE = re.compile(
+    r"\b(?:null|empty|blank)\s+(?:value\s+(?:for|in)\s+)?(?:mdn|imei|iccid|eid|line\s*id|account|"
+    r"field|parameter|param|input|request|payload|attribute)s?\b"
+    r"|\b(?:with|send|sends|sent|submit|submits|pass|passes|passing|provide|provides|providing)\s+"
+    r"(?:an?\s+|the\s+)?(?:null|empty|blank)\b", re.IGNORECASE)
+
+
 def _is_negative(t):
-    return any(kw in t for kw in ['fail', 'invalid', 'reject', 'error', 'unauthorized',
-                                   'mismatch', 'null', 'not in active', 'not exist',
-                                   'expires', 'schema validation'])
+    t = _NEGATED_ERROR_RE.sub(' ', t or '')
+    t = _NEGATED_LIST_RE.sub(' ', t)
+    if any(kw in t for kw in ['fail', 'invalid', 'reject', 'error', 'unauthorized',
+                              'mismatch', 'not in active', 'not exist',
+                              'expires', 'schema validation']):
+        return True
+    return bool(_NULL_INPUT_RE.search(t))
 
 def _is_rollback(t):
     return any(kw in t for kw in ['rollback', 'restore original', 'revert'])
