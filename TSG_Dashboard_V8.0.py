@@ -268,6 +268,7 @@ if _pi_mode and ss['input_mode'] != 'pi_scope':
     ss['input_mode'] = 'pi_scope'
     ss['logs'] = []
     ss['result_path'] = None
+    ss['demo_doc_path'] = ''
     ss['exit_report'] = None
     ss['suite_info'] = None
     st.rerun()
@@ -275,6 +276,7 @@ if _manual_mode and ss['input_mode'] != 'manual_links':
     ss['input_mode'] = 'manual_links'
     ss['logs'] = []
     ss['result_path'] = None
+    ss['demo_doc_path'] = ''
     ss['exit_report'] = None
     ss['suite_info'] = None
     st.rerun()
@@ -422,6 +424,7 @@ with left:
                         ss['pi_features'] = ss.get('all_pi_features', {}).get(label, [])
                     ss['logs'] = []
                     ss['result_path'] = None
+                    ss['demo_doc_path'] = ''
                     ss['exit_report'] = None
                     ss['suite_info'] = None
                     ss['_batch_default'] = []
@@ -687,6 +690,7 @@ with left:
                     ss['_last_feature'] = feature_id
                     ss['logs'] = []
                     ss['result_path'] = None
+                    ss['demo_doc_path'] = ''
                     ss['exit_report'] = None
                     ss['suite_info'] = None
                     ss['cp_path'] = None
@@ -921,6 +925,13 @@ with right:
                     data=Path(ss['result_path']).read_bytes(),
                     file_name=Path(ss['result_path']).name,
                     use_container_width=True, key='dl_main')
+                # Test Suite Demo document for the same run (only when it matches this suite).
+                _demo = ss.get('demo_doc_path') or ''
+                if _demo and Path(_demo).exists() and ss.get('last_feature_id', '') in Path(_demo).name:
+                    st.download_button('📄 Test Suite Demo (Word)',
+                        data=Path(_demo).read_bytes(), file_name=Path(_demo).name,
+                        mime='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                        use_container_width=True, key='dl_demo_doc')
             with _dl_c2:
                 if ss.get('logs'):
                     _cli_text = '\n'.join(ss['logs'])
@@ -1397,6 +1408,7 @@ if ss.get('_sync_running'):
     ss['_sync_running'] = False
     ss['logs'] = []
     ss['result_path'] = None
+    ss['demo_doc_path'] = ''
     ss['exit_report'] = None
 
     _sync_scope = ss.get('_sync_scope', 'All Iterations')
@@ -1612,6 +1624,7 @@ if ss.get('_jira_sync_running'):
     ss['logs'] = []
     _jsync_t0 = time.time()
     ss['result_path'] = None
+    ss['demo_doc_path'] = ''
     ss['exit_report'] = None
 
     _jira_features = ss.get('_jira_sync_features', [])
@@ -1797,6 +1810,7 @@ if run_btn:
         feature_id = _features_to_run[0]
         ss['logs'] = []
         ss['result_path'] = None
+        ss['demo_doc_path'] = ''
         ss['cp_path'] = None
         ss['exit_report'] = None
         ss['batch_results'] = []
@@ -2065,6 +2079,7 @@ if run_btn:
                         grounding_badge_val = ''
 
                     ss['result_path'] = str(out_path)
+                    ss['demo_doc_path'] = str(output['demo_doc_path']) if output.get('demo_doc_path') else ''
                     ss['suite_info'] = {
                         'tc_count': output['tc_count'],
                         'step_count': output['total_steps'],
