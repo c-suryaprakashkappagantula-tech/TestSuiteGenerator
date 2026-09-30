@@ -595,7 +595,8 @@ def build_test_suite_v8(
 
     # ── Final criticality-aware priority pass over the complete TC list ──
     try:
-        _finalize_priorities(suite, feature_priority=getattr(jira, 'priority', '') or '', log=log)
+        _finalize_priorities(suite, feature_priority=getattr(jira, 'priority', '') or '', log=log,
+                             problem_text=(getattr(jira, 'description', '') or '') if jira else '')
     except Exception as _pri_err:
         log('[V8-ENGINE]   WARNING: priority finalization failed: %s — continuing' % str(_pri_err)[:100])
         _record_degraded('priority finalization', _pri_err)
@@ -1119,7 +1120,7 @@ def _prune_degenerate_tcs(suite, feature_id, log: Callable = print):
         log('[V8-ENGINE]   Pruned %d degenerate/junk TC(s)' % dropped)
 
 
-def _finalize_priorities(suite, feature_priority='', log: Callable = print):
+def _finalize_priorities(suite, feature_priority='', log: Callable = print, problem_text=''):
     """Final criticality-aware priority pass over the COMPLETE TC list.
 
     Priorities are first set in build_test_cases (Step 3), but TCs added later
@@ -1140,10 +1141,70 @@ def _finalize_priorities(suite, feature_priority='', log: Callable = print):
     else:
         _p1_cap, _overflow = 4, 'P3'
 
+    # Category correction. Chalk pages often list every scenario under one section, so
+    # 'Happy Path' arrives as a default even for regression and boundary checks (4503:
+    # all 14 were Happy Path). Only a DEFAULT Happy Path is re-labelled, and only on a
+    # clear signal in the title; explicit Negative/Edge/E2E categories are left alone.
+    import re as _re_cat
+    _REG_RE = _re_cat.compile(
+        r'\b(?:unchanged|no\s+regression|regression|unaffected|not\s+(?:be\s+)?impacted|'
+        r'remains?\s+(?:unchanged|the\s+same|as\s+is)|continues?\s+to\s+(?:work|parse|process|function))\b',
+        _re_cat.I)
+    _EDGE_RE = _re_cat.compile(
+        r'\b(?:boundary|boundaries|at\s+exactly|exact\s+(?:old|new|max|min)\w*|'
+        r'maximum|minimum|max(?:imum)?[\s_-]+length|min(?:imum)?[\s_-]+length)\b', _re_cat.I)
+    n_recat = 0
+    for tc in suite.test_cases:
+        if (getattr(tc, 'category', '') or '').lower() != 'happy path':
+            continue
+        # title plus the description's first sentence: names are word-capped, so the
+        # signal ('remains unchanged') can be cut off the name but survives in the description
+        title = ((getattr(tc, 'summary', '') or '').replace('_', ' ') + ' ' +
+                 _re_cat.split(r'(?<=[.;])\s', (getattr(tc, 'description', '') or ''), maxsplit=1)[0])
+        if _REG_RE.search(title):
+            tc.category = 'Regression'; n_recat += 1
+        elif _EDGE_RE.search(title):
+            tc.category = 'Edge Case'; n_recat += 1
+    if n_recat:
+        log('[V8-ENGINE]   Re-labelled %d default Happy Path TC(s) as Regression/Edge Case' % n_recat)
+
+    # P1 goes to the Happy Path TCs that test the ticket's actual problem, not simply to
+    # the first N in list order (4503: 'usage appears in NBOP' - the production symptom -
+    # was P3 purely because it came 9th). Rank by overlap with the Jira problem text;
+    # ties keep list order. For a CR/defect-driven ticket a regression of the existing
+    # flow is release-critical, so Regression is P1 there (P2 otherwise).
+    _STOPW = {'with', 'that', 'this', 'from', 'when', 'then', 'into', 'their', 'there',
+              'which', 'should', 'would', 'could', 'verify', 'validate', 'ensure', 'data',
+              'file', 'files', 'record', 'records', 'field', 'fields', 'value', 'values'}
+    _prob_words = {w for w in _re_cat.findall(r'[a-z0-9]{4,}', (problem_text or '')[:600].lower())
+                   if w not in _STOPW}
+    def _stem(w):
+        return _re_cat.sub(r'(?:ing|ed|es|s)$', '', w)
+    _prob_stems = {_stem(w) for w in _prob_words}
+    def _score(tc):
+        words = _re_cat.findall(r'[a-z0-9]{4,}', (getattr(tc, 'summary', '') or '').replace('_', ' ').lower())
+        return sum(1 for w in set(words) if w not in _STOPW and _stem(w) in _prob_stems)
+    _happy_all = [tc for tc in suite.test_cases
+                  if (getattr(tc, 'category', '') or '').lower() == 'happy path']
+    _ranked = sorted(range(len(_happy_all)), key=lambda i: (-_score(_happy_all[i]), i))
+    _p1_ids = {id(_happy_all[i]) for i in _ranked[:_p1_cap]}
+    _is_cr = bool(_re_cat.search(r'\bCR\b|change\s+request|prod(?:uction)?\s+defect',
+                                 ' '.join([getattr(suite, 'feature_title', '') or '',
+                                           (problem_text or '')[:300]]), _re_cat.I))
+
     happy = 0
     counts = {'P1': 0, 'P2': 0, 'P3': 0}
     for tc in suite.test_cases:
         cat = (getattr(tc, 'category', '') or '').lower()
+        if cat == 'regression':
+            tc.priority = 'P1' if _is_cr else 'P2'
+            counts[tc.priority] = counts.get(tc.priority, 0) + 1
+            continue
+        if cat == 'happy path':
+            happy += 1
+            tc.priority = 'P1' if id(tc) in _p1_ids else _overflow
+            counts[tc.priority] = counts.get(tc.priority, 0) + 1
+            continue
         if cat == 'negative':
             tc.priority = 'P2'
         elif cat == 'regression':
