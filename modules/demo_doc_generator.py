@@ -28,6 +28,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 from .config import OUTPUTS
+from .text_utils import as_text  # MCP may hand back {'text': ...} dicts for long fields
 
 NAVY = '0B2A4A'
 TEAL = '0E9AA7'
@@ -56,7 +57,7 @@ def _clean(t: str) -> str:
 def _panels(text: str) -> "OrderedDict[str, List[str]]":
     """{panel:title=NSL} * a * b {panel} -> {'NSL': ['a', 'b']}"""
     out: "OrderedDict[str, List[str]]" = OrderedDict()
-    for m in re.finditer(r'\{panel:[^}]*?title=([^|}]+)[^}]*\}(.*?)\{panel\}', text or '', re.S | re.I):
+    for m in re.finditer(r'\{panel:[^}]*?title=([^|}]+)[^}]*\}(.*?)\{panel\}', as_text(text), re.S | re.I):
         title = m.group(1).strip()
         items = _bullets(m.group(2))
         if items:
@@ -66,7 +67,7 @@ def _panels(text: str) -> "OrderedDict[str, List[str]]":
 
 def _bullets(text: str) -> List[str]:
     items = []
-    for ln in re.split(r'\r?\n', text or ''):
+    for ln in re.split(r'\r?\n', as_text(text)):
         s = ln.strip()
         if not s:
             continue
@@ -78,7 +79,7 @@ def _bullets(text: str) -> List[str]:
 
 
 def _strip_panels(text: str) -> str:
-    return re.sub(r'\{panel[^}]*\}.*?\{panel\}', ' ', text or '', flags=re.S | re.I)
+    return re.sub(r'\{panel[^}]*\}.*?\{panel\}', ' ', as_text(text), flags=re.S | re.I)
 
 
 def _problem_paragraphs(description: str, limit: int = 2) -> List[str]:
@@ -92,7 +93,7 @@ def _problem_paragraphs(description: str, limit: int = 2) -> List[str]:
 def _wiki_tables(text: str) -> List[List[List[str]]]:
     """Jira wiki tables: '||h1||h2||' header then '|a|b|' rows."""
     tables, cur = [], None
-    for ln in re.split(r'\r?\n', text or ''):
+    for ln in re.split(r'\r?\n', as_text(text)):
         s = ln.strip()
         if s.startswith('||'):
             cur = [[_clean(c) for c in s.strip('|').split('||')]]
@@ -245,7 +246,7 @@ def _build(suite, jira, chalk, log, out_dir):
     tcs = list(getattr(suite, 'test_cases', None) or [])
     n_steps = sum(len(getattr(t, 'steps', None) or []) for t in tcs)
     labels = [_tc_label(t, fid) for t in tcs]
-    desc = (getattr(jira, 'description', '') or '') if jira else ''
+    desc = as_text(getattr(jira, 'description', '')) if jira else ''
 
     doc = Document()
     sec = doc.sections[0]
@@ -319,7 +320,7 @@ def _build(suite, jira, chalk, log, out_dir):
             _heading(doc, 'What Chalk says', 2)
             doc.add_paragraph(' '.join(keep)[:900])
     tables = []
-    for src in [desc] + [s.get('description', '') or '' for s in (getattr(jira, 'subtasks', None) or [])] if jira else []:
+    for src in [desc] + [as_text(s.get('description', '')) for s in (getattr(jira, 'subtasks', None) or [])] if jira else []:
         tables += _wiki_tables(src)
     if tables:
         best = sorted(tables, key=lambda t: (0 if any('field' in h.lower() for h in t[0]) else 1, -len(t)))[0]

@@ -90,7 +90,9 @@ def _clean_filename(text, max_len=80):
     """Clean text for use in filename — strips Chalk/Jira metadata for a crisp name.
     Removes [TAG, TAG] prefix, 'New MVNO -', and all non-alphanumeric punctuation."""
     import re
-    t = text.strip()
+    from .text_utils import ascii_slug_text
+    # Repair mojibake (e.g. 'â\x80\x94'), map en/em dashes to '-', fold to ASCII.
+    t = ascii_slug_text(text).strip()
     # Strip leading dashes/spaces
     t = t.lstrip(' -')
     # Strip [NSLNM, NBOP, INTG] style tag prefixes
@@ -109,6 +111,8 @@ def _clean_filename(text, max_len=80):
         t = t[:max_len].rsplit(' ', 1)[0]
     # Replace spaces with underscores for filename
     t = t.replace(' ', '_')
+    t = re.sub(r'_{2,}', '_', t)
+    t = re.sub(r'-{2,}', '-', t)
     return t.rstrip('_.-')
 
 def output_path(fid, pi='', title=''):

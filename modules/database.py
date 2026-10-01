@@ -461,6 +461,39 @@ def is_jira_stale(feature_id: str) -> bool:
 # CHALK CACHE
 # ================================================================
 
+_SCN_KEY_RE = re.compile(r'^TS[_\s]?MWTGPROV-(\d+)(?:[_\s]|$)', re.IGNORECASE)
+
+
+def _scenario_id_embedded_key(scenario_id):
+    """'TS_MWTGPROV-4538_3' -> 'MWTGPROV-4538'; None when no key is embedded."""
+    m = _SCN_KEY_RE.match((scenario_id or '').strip())
+    return ('MWTGPROV-%s' % m.group(1)) if m else None
+
+
+def _scenario_id_owned(feature_id, scenario_id):
+    """Does the scenario id's embedded MWTGPROV key say it belongs to feature_id?
+
+    Returns None when the id embeds no MWTGPROV key (caller keeps existing behaviour),
+    True when the embedded digits name this feature, False when they name another one.
+    Combined ids from a shared Chalk section (TS_MWTGPROV-45714565_n) are read as a
+    concatenation of 4-digit keys, so they are owned by every key they contain.
+    """
+    m = _SCN_KEY_RE.match((scenario_id or '').strip())
+    if not m:
+        return None
+    digits = m.group(1)
+    fm = re.search(r'(\d+)\s*$', feature_id or '')
+    if not fm:
+        return None
+    num = fm.group(1)
+    if digits == num or num in digits:
+        return True
+    if len(digits) > 4 and len(digits) % 4 == 0:
+        if num in [digits[i:i + 4] for i in range(0, len(digits), 4)]:
+            return True
+    return False
+
+
 def _chalk_row_is_poison(feature_id, chalk_data):
     """Would this crawled row be rejected as holding a different feature's content?
 
@@ -498,42 +531,22 @@ def _chalk_row_is_poison(feature_id, chalk_data):
     # grabbed another feature's table - poison. Restricted to clean MWTGPROV-<N> families so
     # a differing id scheme (TS_NSLNM770_, Chalk sub-ids) or a malformed/mashed id
     # (TS_MWTGPROV-45714565_) is NOT mistaken for another feature.
-    _fam_re = re.compile(r'^TS[_\s]?(MWTGPROV-\d{3,5})(?:[_\s]|$)', re.IGNORECASE)
-    fams = set()
-    n_scn = 0
-    for s in (getattr(chalk_data, 'scenarios', None) or []):
-        n_scn += 1
-        m = _fam_re.match((getattr(s, 'scenario_id', '') or '').strip())
-        if m:
-            fams.add(m.group(1).upper())
-    # Poison only when the scenarios speak with ONE clean voice and it isn't ours.
-    if n_scn >= 3 and len(fams) == 1:
-        only = next(iter(fams))
-        if only != fid_up:
-            # Exemption: an Epic Split legitimately shares ONE scenario set across sibling
-            # tickets. On PI-59, MWTGPROV-3982/4481/4538 are one feature in three parts
-            # ("## Epic Split (3 parts) - Part 1 MWTGPROV-3982 ... Part 3 MWTGPROV-4538"),
-            # all scenarios stamped TS_MWTGPROV-4538_*. That is shared ownership, not
-            # contamination. Treat the family owner as a sibling - not poison - only when
-            # the row's own text declares the split AND names BOTH this feature and the
-            # owner. A row that merely mentions the owner in passing (e.g. 4560, which only
-            # cross-references 'until MWTGPROV-4560' inside 4535's text) is NOT exempted.
-            blob = ' '.join([
-                getattr(chalk_data, 'raw_text', '') or '',
-                getattr(chalk_data, 'scope', '') or '',
-                getattr(chalk_data, 'rules', '') or '',
-            ]).upper()
-            # Precise: collect ids DECLARED as parts ('Part N - MWTGPROV-XXXX'). Exempt only
-            # when BOTH this feature and the family owner are declared parts of the SAME split.
-            # 4560's row carries the Manage-Promotions split text (parts 3982/4481/4538) but
-            # 4560 is not itself a declared part, so it stays flagged as poison.
-            _declared = set(re.findall(
-                r'PART\s*\d+\s*[-–—:]\s*(MWTGPROV-\d+)', blob))
-            if fid_up in _declared and only in _declared:
-                # Sibling row of a declared epic split - shared scenarios are legitimate.
-                pass
-            else:
-                return (True, [only])
+    # Per-scenario ownership by embedded key (see _scenario_id_owned). The scenario id
+    # names its owning feature explicitly, so it outranks any title/split heuristics: a
+    # row whose scenarios are ALL stamped with another feature's key is poison. (The old
+    # "declared Epic Split" exemption let 3982/4481 inherit 4538's TS_MWTGPROV-4538_*
+    # scenarios; removed.) Combined ids (TS_MWTGPROV-45714565_*) are owned by each key.
+    scs = list(getattr(chalk_data, 'scenarios', None) or [])
+    if scs:
+        verdicts = [_scenario_id_owned(feature_id, getattr(s, 'scenario_id', ''))
+                    for s in scs]
+        if all(v is False for v in verdicts):
+            foreign = []
+            for s in scs:
+                k = _scenario_id_embedded_key(getattr(s, 'scenario_id', ''))
+                if k and k not in foreign:
+                    foreign.append(k)
+            return (True, foreign[:3])
 
     # ── Signal 1: whole-page raw_text (only trustworthy when NOT truncated) ──
     raw = getattr(chalk_data, 'raw_text', '') or ''
@@ -1241,6 +1254,15 @@ def load_chalk_as_object(feature_id: str, pi_label: str):
     # so a truncated row whose scenarios all belong to ONE other MWTGPROV feature (e.g.
     # 3982/4481/4560 on PI-59, all carrying another feature's TS_ ids) is caught here.
     _poison2, _others2 = _chalk_row_is_poison(feature_id, data)
+    if not _poison2 and data.scenarios:
+        # Mixed row: drop individual scenarios whose id embeds another feature's key.
+        _kept = [s for s in data.scenarios
+                 if _scenario_id_owned(feature_id, getattr(s, 'scenario_id', '')) is not False]
+        if len(_kept) < len(data.scenarios):
+            print('[CHALK-CACHE] %s/%s: dropped %d scenario(s) owned by another feature '
+                  '(id-family mismatch); %d owned remain'
+                  % (feature_id, pi_label, len(data.scenarios) - len(_kept), len(_kept)))
+            data.scenarios = _kept
     if _poison2:
         print('[CHALK-CACHE] POISONED ROW REJECTED: %s/%s scenarios belong to %s '
               '(scenario_id family mismatch). Re-crawl %s from its correct PI page.'

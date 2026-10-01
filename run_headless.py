@@ -77,6 +77,9 @@ def run_headless(feature_id: str, pi_label: str, custom_instructions: str = '',
         pi=jira_raw.get('pi', '') or pi_label,
         channel=jira_raw.get('channel', '') or '',
     )
+    # MCP gateway may return long text fields as {'text', 'truncated', ...} dicts.
+    from modules.text_utils import normalize_jira_issue
+    normalize_jira_issue(jira, log=log)
     log('[JIRA]   AC=%d chars | subtasks=%d | links=%d'
         % (len(jira.acceptance_criteria or ''), len(jira.subtasks), len(jira.linked_issues)))
     log('[JIRA] Loaded from cache: %s — %s' % (jira.key, jira.summary[:80]))
@@ -155,9 +158,14 @@ def run_headless(feature_id: str, pi_label: str, custom_instructions: str = '',
         log=log,
     )
     suite = build_result.get('suite')
-    if not suite or not suite.test_cases:
+    if not suite:
         log('[ERROR] No test cases generated')
         return None
+    if not suite.test_cases:
+        from modules.pipeline import empty_suite_reason
+        log('[OUTPUT] SKIPPED %s: 0 test cases generated (%s) — no files written'
+            % (feature_id, empty_suite_reason(suite)))
+        return suite
 
     log('\n[RESULT] %d TCs generated (%d steps total)' % (
         len(suite.test_cases),
@@ -211,7 +219,9 @@ if __name__ == '__main__':
     ci = _pos[2] if len(_pos) > 2 else ''
 
     suite = run_headless(fid, pi, ci, deep_mine=_deep, doc_paths=_docs or None)
-    if suite:
+    if suite and not suite.test_cases:
+        print('\nSkipped — 0 test cases, no files written')
+    elif suite:
         print('\nDone — %d test cases' % len(suite.test_cases))
     else:
         print('\nFailed — check errors above')

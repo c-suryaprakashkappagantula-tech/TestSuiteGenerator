@@ -205,6 +205,8 @@ def block_jira_fetch(page, feature_id, log=print):
     """
     from .jira_fetcher import fetch_jira_issue, validate_jira_issue, download_attachments, JiraIssue, JiraAttachment
     from .database import save_jira, load_jira, is_jira_stale
+    # MCP gateway may return long text fields as {'text', 'truncated', ...} dicts.
+    from .text_utils import normalize_jira_issue as _normalize_jira_issue
     import json
 
     # ── V7: Try DB cache first ──
@@ -235,7 +237,7 @@ def block_jira_fetch(page, feature_id, log=print):
                 channel=cached.get('channel', ''),
                 raw_json=json.loads(cached.get('raw_json', '{}')) if cached.get('raw_json') else {},
             )
-            warnings = validate_jira_issue(jira, log=log)
+            warnings = validate_jira_issue(_normalize_jira_issue(jira, log=log), log=log)
             log('[PIPELINE]   %s | %s | %d subtasks | %d comments | AC=%s' % (
                 jira.key, jira.summary[:50], len(jira.subtasks), len(jira.comments), bool(jira.acceptance_criteria)))
 
@@ -291,7 +293,7 @@ def block_jira_fetch(page, feature_id, log=print):
 
     if jira and jira.summary:
         log('[PIPELINE] ✅ Jira fetched via REST for %s' % feature_id)
-        warnings = validate_jira_issue(jira, log=log)
+        warnings = validate_jira_issue(_normalize_jira_issue(jira, log=log), log=log)
         try:
             save_jira(jira)
             log('[PIPELINE] Jira data saved to DB for %s' % feature_id)
@@ -369,7 +371,7 @@ def block_jira_fetch(page, feature_id, log=print):
                 pi=stale_cached.get('pi', ''),
                 channel=stale_cached.get('channel', ''),
             )
-            warnings = validate_jira_issue(jira, log=log)
+            warnings = validate_jira_issue(_normalize_jira_issue(jira, log=log), log=log)
             # Apply post-fetch enrichment even on stale cache (AC-from-description, etc.)
             from .jira_fetcher import enrich_issue_post_fetch
             enrich_issue_post_fetch(jira, log=log)
@@ -386,7 +388,7 @@ def block_jira_fetch(page, feature_id, log=print):
                 'Run "Sync from Jira" to refresh the cache.' % (feature_id, str(_browser_err)[:80])
             )
     jira = fetch_jira_issue(page, feature_id, log=log)
-    warnings = validate_jira_issue(jira, log=log)
+    warnings = validate_jira_issue(_normalize_jira_issue(jira, log=log), log=log)
 
     # Save to DB for caching
     try:
@@ -766,6 +768,15 @@ def block_build_suite_v8(jira, chalk, parsed_docs, options, deep_mine_result=Non
     return {'suite': suite, 'total_steps': total_steps, 'duration': _duration}
 
 
+def empty_suite_reason(suite):
+    """Best-effort, generic reason for a 0-TC suite, taken from the suite's own warnings."""
+    for w in (getattr(suite, 'warnings', None) or []):
+        lw = str(w).lower()
+        if 'poison' in lw or 'reject' in lw:
+            return 'Chalk rejected as poisoned' if 'poison' in lw else str(w)[:100]
+    return 'no testable items from Jira/Chalk'
+
+
 def block_generate_output(suite, feature_id, pi, strategy, jira=None, chalk=None, log=print):
     """Block 6: Generate Excel + Feature Doc, save to DB, log transaction."""
     from .excel_generator import generate_excel
@@ -773,6 +784,18 @@ def block_generate_output(suite, feature_id, pi, strategy, jira=None, chalk=None
     from .database import save_test_suite, log_generation_db, load_latest_suite, get_suite_history
     from .transaction_log import log_generation
     from .coverage_obligations import assert_suite_complete
+
+    # Empty suite: write nothing (no empty Excel / Feature Summary / demo doc).
+    if not getattr(suite, 'test_cases', None):
+        reason = empty_suite_reason(suite)
+        log('[OUTPUT] SKIPPED %s: 0 test cases generated (%s) — no files written' % (feature_id, reason))
+        return {
+            'skipped': True, 'reason': reason,
+            'out_path': None, 'doc_path': None, 'demo_doc_path': None,
+            'suite_id': 0, 'tc_count': 0, 'total_steps': 0,
+            'diff_report': None, 'scorecard': None,
+            'degraded_count': 0, 'degraded_passes': [], 'degraded_details': [],
+        }
 
     # Fail closed before diffing, workbook creation, DB persistence, or success logs.
     assert_suite_complete(suite, context='Pipeline output for %s' % feature_id, log=log)

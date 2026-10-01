@@ -2066,6 +2066,18 @@ if run_btn:
                     output = pipe.run('Output_%s' % feature_id,
                         lambda: block_generate_output(suite, feature_id, ss.get('selected_pi') or 'Manual', 'Data-First', jira=jira, chalk=chalk, log=logger))
 
+                    if output.get('skipped') or not output.get('out_path'):
+                        # 0 TCs: block_generate_output wrote no files — report, don't offer downloads.
+                        _skip_msg = '%s: 0 test cases generated (%s) — no files written' % (
+                            feature_id, output.get('reason') or 'no testable items')
+                        st.warning(_skip_msg)
+                        ss['result_path'] = ''
+                        ss['demo_doc_path'] = ''
+                        _batch_skipped.append((feature_id, _skip_msg))
+                        exit_items.append('%s%s: ⚠️ SKIPPED — 0 TCs (%s)' % (
+                            _bp, feature_id, output.get('reason') or 'no testable items'))
+                        continue
+
                     out_path = output['out_path']
                     _data_source_count = len(suite.data_inventory.sources) if suite.data_inventory else 0
 
