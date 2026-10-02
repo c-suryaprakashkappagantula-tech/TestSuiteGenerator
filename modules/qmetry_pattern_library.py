@@ -148,7 +148,14 @@ def db_table_validation_step(operation: str = '') -> Tuple[str, str]:
     """NBOP_MIG_* DB-table validation step for the given operation family."""
     tables = canonical_db_tables(operation)
     table_block = '\n'.join(tables)
-    label = (operation.strip() or 'the').strip()
+    label = (operation or '').strip()
+    # A caller may pass the whole feature title as the 'operation' (provisioning_closer
+    # falls back to feature_context). Rendered verbatim that gave 'for [NBOP, NSL, INTG]:
+    # NBOP History ... MWTGPROV-4526 transaction:'. Reduce anything that is not already a
+    # short operation name to its known operation family, else the generic wording.
+    if len(label) > 30 or re.search(r'[\[\]:]|MWTGPROV-\d', label):
+        label = operation_label(label) or ''
+    label = label or 'the'
     return (
         'Verify the transaction update in the following NSL DB tables happen '
         'successfully:\n' + table_block,

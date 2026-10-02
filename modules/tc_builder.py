@@ -1277,7 +1277,7 @@ def _build_scenario_tc(
                          expected='Success response confirms: %s' % _trim_title(scenario_title, 50),
                          data_reference='Response validation'),
                 TestStep(step_num=4,
-                         summary='Verify: %s' % _trim_title(scenario_title, 70),
+                         summary='Verify: %s' % _trim_title(scenario_title, 140),
                          expected=scenario.validation or 'Scenario condition verified successfully',
                          data_reference=scenario.source.source_id),
             ]
@@ -1312,7 +1312,7 @@ def _build_scenario_tc(
     if not steps:
         _one_summary = scenario.title
         if _is_degenerate_title(scenario.title) and (scenario.validation or '').strip():
-            _one_summary = 'Verify: %s' % _trim_title(scenario.validation.strip(), 80)
+            _one_summary = 'Verify: %s' % _trim_title(scenario.validation.strip(), 160)
         steps = [TestStep(step_num=1, summary=_one_summary,
                  expected=scenario.validation, data_reference=scenario.source.source_id)]
 
@@ -1400,10 +1400,10 @@ def _build_scenario_tc(
     # Description — use full validation text (untruncated) for complete context
     _desc_val = re.sub(r'[\r\n\t]+', ' ', (scenario.validation or scenario.title or '')).strip()
     _desc_val = re.sub(r'\s{2,}', ' ', _desc_val)
-    if len(_desc_val) > 500:
-        # Truncate at last space before 500
-        _cut = _desc_val.rfind(' ', 0, 500)
-        _desc_val = _desc_val[:_cut] if _cut > 200 else _desc_val[:500]
+    if len(_desc_val) > 800:
+        # Sentence/clause-boundary trim (a last-space cut at 500 ended descriptions on
+        # 'a line-level reconnect' / '(migrated 50001967 / net-new').)
+        _desc_val = _trim_title(_desc_val, 800)
     # Ensure ends with punctuation
     if _desc_val and not _desc_val[-1] in '.!?)':
         _desc_val = _desc_val.rstrip(',;: ') + '.'
@@ -2159,7 +2159,7 @@ _STEP_VERB_RESULT = {
     'ingest': 'ingested', 'submit': 'submitted', 'send': 'sent', 'post': 'posted',
     'activate': 'activated', 'deactivate': 'deactivated', 'trigger': 'triggered',
     'monitor': 'monitored', 'observe': 'observed', 'confirm': 'confirmed',
-    'run': 'run', 'execute': 'executed', 'apply': 'applied', 'process': 'processed',
+    'run': 'completed', 'execute': 'executed', 'apply': 'applied', 'process': 'processed',
     'load': 'loaded', 'create': 'created', 'update': 'updated', 'add': 'added',
     'remove': 'removed', 'delete': 'deleted', 'set': 'set', 'place': 'placed',
     'upload': 'uploaded', 'download': 'downloaded', 'capture': 'captured',
@@ -2989,7 +2989,7 @@ def _build_ui_scenario_tc(
         if validation:
             steps.append(TestStep(
                 step_num=step_num,
-                summary='Verify: %s' % _trim_title(validation, 80),
+                summary='Verify: %s' % _trim_title(validation, 160),
                 expected=validation or '%s UI state matches the scenario requirement' % feature_name,
                 data_reference='Scenario validation: %s' % title[:40],
             ))
@@ -3194,14 +3194,14 @@ def _validate_step_quality(
             if subtask_ac_text:
                 enriched_steps.append(TestStep(
                     step_num=step.step_num,
-                    summary='Verify: %s' % _trim_title(subtask_ac_text, 80),
+                    summary='Verify: %s' % _trim_title(subtask_ac_text, 160),
                     expected=subtask_ac_text,
                     data_reference=step.data_reference,
                 ))
             else:
                 enriched_steps.append(TestStep(
                     step_num=step.step_num,
-                    summary='Verify: %s' % _trim_title(scenario_title, 80),
+                    summary='Verify: %s' % _trim_title(scenario_title, 160),
                     expected=scenario_title,
                     data_reference=step.data_reference,
                 ))

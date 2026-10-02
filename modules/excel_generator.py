@@ -102,8 +102,9 @@ def generate_excel(suite: TestSuite, log=print) -> Path:
     # TCs exist or which steps they have (bar moving 'Old behaviour:' context lines into
     # the Description). Then make every TC name unique. See modules/output_sanitizer.py.
     try:
-        from .output_sanitizer import sanitize_suite, dedupe_names
+        from .output_sanitizer import sanitize_suite, dedupe_names, polish_suite
         sanitize_suite(suite, log)
+        polish_suite(suite, log)
         dedupe_names(suite, log)
     except Exception as _san_err:
         log('[EXCEL] output sanitize skipped: %s' % str(_san_err)[:100])

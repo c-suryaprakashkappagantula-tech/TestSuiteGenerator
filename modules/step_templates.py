@@ -1597,7 +1597,7 @@ def _api_flow_steps(title, validation):
     _action = _re_api.sub(r'New\s+MVNO\s*[-:—]\s*', '', _action, flags=_re_api.IGNORECASE).strip()
     _action = strip_dangling_tail(truncate_at_word(_action, 80)) if _action else 'the API operation'
     return [
-        ('Trigger API: %s with valid parameters' % truncate_at_word(_action, 70),
+        ('Trigger API: %s with valid parameters' % truncate_at_word(_action, 140),
          'NSL receives the request and begins processing'),
         ('Validate NSL sends outbound call to downstream system',
          'Downstream system receives request and responds'),
@@ -1745,13 +1745,13 @@ def _default_workflow_steps(title, validation):
     return [
         ('Step 1: Obtain OAuth Token',
          'OAuth token generated successfully'),
-        ('Step 2: Trigger API: %s' % truncate_at_word(_action, 70),
+        ('Step 2: Trigger API: %s' % truncate_at_word(_action, 140),
          'NSL processes request with 200 OK. Transaction ID generated'),
         ('Step 3: Download Century Report (Service Grouping)',
          'SERVICE_GROUPING HTML downloaded'),
         ('Step 3b: Verify NE Portal transactions',
          'NE Portal shows transaction completed'),
-        ('Step 4: Validate Service Grouping for: %s' % truncate_at_word(_action, 60),
+        ('Step 4: Validate Service Grouping for: %s' % truncate_at_word(_action, 140),
          val),
         ('Check audit logs (TRANSACTION_HISTORY & LINE_HISTORY)',
          'Transaction recorded correctly'),
@@ -1876,10 +1876,42 @@ def truncate_at_word(text, limit):
     if len(text) <= limit:
         return text
     window = text[:limit]
-    cut = max(window.rfind(' '), window.rfind('_'))
+    floor = int(limit * 0.5)
+    # Prefer a sentence/clause boundary so the kept text reads as a complete thought
+    # ('... first. MHS tracked' -> '... first'), else the last word boundary.
+    cut = -1
+    for sep in ('. ', '; ', ' \u2014 ', ' - ', ', '):
+        i = window.rfind(sep)
+        if i >= floor:
+            cut = i
+            break
+    if cut < 0:
+        cut = max(window.rfind(' '), window.rfind('_'))
     # No boundary to cut on (one genuinely long token): fall back to the hard slice.
-    out = window[:cut].rstrip() if cut >= int(limit * 0.5) else window
-    return strip_dangling_tail(out)
+    out = window[:cut].rstrip() if cut >= floor else window
+    return _tidy_cut_tail(out)
+
+
+_CUT_CONNECTOR_RE = re.compile(
+    r'[\s_]+(?:the|of|and|or|to|with|for|a|an|in|by|only|not|that)$', re.IGNORECASE)
+
+
+def _tidy_cut_tail(out):
+    """Clean the end of a cut string: drop an unclosed '(' / '[' clause, trailing
+    connector words and trailing punctuation, until stable."""
+    for _ in range(8):
+        prev = out
+        # An opening bracket whose close was cut off: drop from the bracket onward.
+        for op, cl in (('(', ')'), ('[', ']')):
+            i = out.rfind(op)
+            if i >= 0 and out.find(cl, i) < 0 and i > 0:
+                out = out[:i].rstrip()
+        out = _CUT_CONNECTOR_RE.sub('', out)
+        out = strip_dangling_tail(out)
+        out = re.sub(r'[\s,:;(\-/_\u2014]+$', '', out)
+        if out == prev:
+            break
+    return out
 
 
 def sanitize_tc_titles(test_cases, log=print):

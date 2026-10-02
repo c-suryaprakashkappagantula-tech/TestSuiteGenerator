@@ -23,6 +23,15 @@ from .data_models_v8 import (
 from .nmno_api_lookup import NMNOLookupResult, NMNOBusinessRule, NMNOAPISpec
 
 
+def _trim_ac(text, limit=160):
+    """Word/clause-boundary trim for AC text spliced into a step (a raw [:80] slice
+    cut steps mid-word: '... MHS tracked', '(Plan'). Lazy import: step_templates
+    imports from this package at module load."""
+    from .step_templates import truncate_at_word
+    return truncate_at_word(text or '', limit)
+
+
+
 # ─── Known dimension value patterns ────────────────────────────────
 
 KNOWN_PRODUCTS = ['Phone', 'Tablet', 'Smartwatch', 'Wearable', 'Hotspot', 'IoT']
@@ -1008,21 +1017,21 @@ def _derive_steps_hint_from_ac(ac_text: str, ac_lower: str) -> list:
                 'Trigger BCD reset — Mediation emits OFF/MHS_PFO_OFF notification to NSL',
                 'Verify NSL removes NC_DEPRIOR via change-feature API',
                 'Verify throttle flag flipped Y → N',
-                'Verify: %s' % ac_text[:80],
+                'Verify: %s' % _trim_ac(ac_text),
             ]
         elif 'plan' in ac_lower or 'upgrade' in ac_lower:
             return [
                 'Verify subscriber is in de-prioritized state (NC_DEPRIOR active)',
                 'Subscriber upgrades to plan with sufficient PDL — Mediation emits OFF notification',
                 'Verify NSL removes NC_DEPRIOR via change-feature API',
-                'Verify: %s' % ac_text[:80],
+                'Verify: %s' % _trim_ac(ac_text),
             ]
         # Generic OFF notification
         return [
             'Verify subscriber is in de-prioritized state (NC_DEPRIOR provisioned)',
             'Trigger condition that causes Mediation to send OFF notification to NSL',
             'Verify NSL processes OFF notification and removes NC_DEPRIOR',
-            'Verify: %s' % ac_text[:80],
+            'Verify: %s' % _trim_ac(ac_text),
         ]
 
     # De-prioritization: ON notification / 100% bucket trigger
@@ -1038,7 +1047,7 @@ def _derive_steps_hint_from_ac(ac_text: str, ac_lower: str) -> list:
             'Set up TMO subscriber with active line in SIT',
             'Trigger 100%% usage consumption — Mediation sends ON/MHS_PFO_ON notification to NSL',
             'Verify NSL dual-bucket gate: NC_DEPRIOR provisioned only when BOTH buckets at 100%% in same BCD',
-            'Verify: %s' % ac_text[:80],
+            'Verify: %s' % _trim_ac(ac_text),
         ]
 
     # Notification format/content ACs (TC18/19/20/21 type).
@@ -1063,7 +1072,7 @@ def _derive_steps_hint_from_ac(ac_text: str, ac_lower: str) -> list:
             steps.append('Verify Promo/CBRS-related fields are set to 0 until available')
         if 'pass-through' in ac_lower or 'pass through' in ac_lower:
             steps.append('Verify both pass-through and Mediation-generated notifications carry the updated format')
-        steps.append('Verify: %s' % ac_text[:80])
+        steps.append('Verify: %s' % _trim_ac(ac_text))
         return steps
 
     # No domain match — return empty (will go through step_templates router)
