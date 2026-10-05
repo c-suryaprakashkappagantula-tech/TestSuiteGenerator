@@ -377,6 +377,11 @@ _POL_VERBS = {
     'query': 'completed', 'call': 'completed', 'invoke': 'invoked', 'perform': 'performed',
     'repeat': 'repeated', 'retry': 'retried', 'refresh': 'refreshed', 'save': 'saved',
     'cancel': 'cancelled', 'edit': 'edited', 'type': 'entered', 'use': 'used',
+    'locate': 'located', 'switch': 'completed', 'return': 'completed', 'review': 'reviewed',
+    'reopen': 'reopened', 'go': 'completed', 'scroll': 'completed', 'expand': 'expanded',
+    'sort': 'sorted', 'filter': 'filtered', 'clear': 'cleared', 'reset': 'reset',
+    'provide': 'provided', 'pass': 'passed', 'choose': 'selected', 'fill': 'filled',
+    'access': 'accessed', 'login': 'completed', 'insert': 'inserted', 'modify': 'modified',
 }
 _POL_VERDICT_RE = re.compile(r'^(.{3,120}?)\s*:\s*(accepted|rejected|allowed|blocked|denied|'
                              r'succeeds?|fails?|returned|displayed|hidden)\s*\.?$', re.I)
@@ -409,6 +414,8 @@ def _expected_for_step(step, negative=False):
         if verb == 'attempt':
             return ('%s is blocked with the documented error.' % _ucfirst(re.sub(r'^to\s+', '', obj))
                     if negative else '%s attempted.' % _ucfirst(re.sub(r'^to\s+', '', obj)))
+        if negative:
+            return '%s %s.' % (_ucfirst(obj), _POL_VERBS[verb])
         return '%s %s successfully.' % (_ucfirst(obj), _POL_VERBS[verb])
     # Declarative statement ('NBOP compares ... and detects a mismatch'): it IS the outcome.
     if re.match(r'^[A-Za-z]', s) and len(s.split()) >= 3:
@@ -458,6 +465,60 @@ def _generic_expected(step, exp, negative, desc):
     return None
 
 
+_POL_WEAK_EXP = re.compile(r'^(Test environment configured and ready|Data displayed correctly matches '
+                          r'expected values|Request submitted to API endpoint|Portal/screen loads '
+                          r'successfully and is ready for input|Step completed successfully|'
+                          r'Element is (?:NOT )?visible on the page)\.?$', re.I)
+_POL_TITLE_TAIL = {'and', 'or', 'the', 'a', 'an', 'to', 'of', 'with', 'for', 'in', 'on', 'is',
+                   'are', 'by', 'from', 'that', 'when', 'if', 'as', 'via', 'at', 'not', 'no',
+                   'its', 'only', 'than', 'be', 'but', 'does', 'do', 'which', 'while'}
+
+
+def _is_imperative(s):
+    m = re.match(r'^([A-Za-z]+)\b', s or '')
+    return bool(m and m.group(1).lower() in _POL_VERBS)
+
+
+def _fix_title(n, desc):
+    """Name fixes: embedded engine TC number, doubled tokens, connector-cut tail."""
+    if not n:
+        return n
+    n = re.sub(r'^((?:TC\d+_)?[A-Z][A-Z0-9]+-\d+_)TC\d+_', r'\1', n)      # 4526_TC07_ -> 4526_
+    n = re.sub(r'(?<=_)([A-Za-z0-9]+)_\1(?=_|$)', r'\1', n)                # SSPP_SSPP -> SSPP
+    toks = n.split('_')
+    if toks and toks[-1].lower() in _POL_TITLE_TAIL:
+        # Cut at the 80-char name limit mid-phrase ('..._does_not'). Finish the phrase from
+        # the description (full text), at most 5 words, until a content word.
+        dw = re.findall(r"[A-Za-z0-9][A-Za-z0-9'\-]*", desc or '')
+        low = [w.lower() for w in dw]
+        tail = [w.lower() for w in toks[-3:]]
+        ext = []
+        for i in range(len(low) - len(tail) + 1):
+            if low[i:i + len(tail)] == tail:
+                for w in dw[i + len(tail):i + len(tail) + 5]:
+                    ext.append(w.replace("'", ''))
+                    if w.lower() not in _POL_TITLE_TAIL:
+                        break
+                break
+        if ext and ext[-1].lower() not in _POL_TITLE_TAIL:
+            toks += ext
+        else:
+            while len(toks) > 4 and toks[-1].lower() in _POL_TITLE_TAIL:
+                toks.pop()
+    return '_'.join(toks)
+
+
+def _fix_short_expected(e):
+    x = (e or '').strip().rstrip('.')
+    m = re.fullmatch(r'(?:Expect(?:ed)?\s*:?\s*)?(?:HTTP\s*)?([1-5]\d\d)', x, re.I)
+    if m:
+        return 'NSL returns HTTP %s.' % m.group(1)
+    m = re.fullmatch(r'([A-Z]{2,5}\d{2,4})', x)
+    if m:
+        return 'NSL returns error code %s.' % m.group(1)
+    return e
+
+
 def polish_suite(suite, log: Callable = print) -> dict:
     """Reviewer-polish pass over every TC. Returns counts per rule for the log."""
     c = dict.fromkeys(('chars', 'prefix', 'echo', 'title_exp', 'dup_exp', 'dup_step',
@@ -465,7 +526,7 @@ def polish_suite(suite, log: Callable = print) -> dict:
     for tc in (getattr(suite, 'test_cases', None) or []):
         # title
         n = getattr(tc, 'summary', '') or ''
-        nn = _fix_chars(n, title=True)
+        nn = _fix_title(_fix_chars(n, title=True), getattr(tc, 'description', '') or '')
         if nn != n:
             tc.summary = nn; c['chars'] += 1
         # description / preconditions
@@ -509,6 +570,25 @@ def polish_suite(suite, log: Callable = print) -> dict:
                     c['echo'] += 1
             if _POL_VERIFY_EXP_RE.match(e) and len(e) > 20:
                 e = _ucfirst(_POL_VERIFY_EXP_RE.sub('', e)); c['title_exp'] += 1
+            if s and (_norm(e) == _norm(s) or _POL_WEAK_EXP.match(e.strip())):
+                if _POL_CHECK_VERB_RE.match(s):
+                    x = _expected_for_step(s, neg)
+                    if _norm(x) != _norm(s) and not _POL_WEAK_EXP.match(x):
+                        e = x; c['generic'] += 1
+                elif _is_imperative(s):
+                    x = _expected_for_step(s, neg)
+                    if _norm(x) != _norm(s) and not _POL_WEAK_EXP.match(x):
+                        e = x; c['generic'] += 1
+                elif re.match(r'^[A-Za-z]', s) and len(s.split()) >= 3:
+                    # Declarative outcome written as the step ('NSL rejects ... ERR333'):
+                    # it is the expected result; the step becomes the check.
+                    e = _ucfirst(s.rstrip(' .')) + '.'
+                    if not _POL_CHECK_VERB_RE.match(s):
+                        _first = s.split(' ', 1)[0]
+                        _s = s if re.fullmatch(r'[A-Z][a-z]+', _first) is None else s[0].lower() + s[1:]
+                        s = 'Verify that ' + _s.rstrip(' .') + '.'
+                    c['generic'] += 1
+            e = _fix_short_expected(e)
             g = _generic_expected(s, e, neg, getattr(tc, 'description', '') or '')
             if g and g != e:
                 e = g
@@ -551,9 +631,33 @@ def polish_suite(suite, log: Callable = print) -> dict:
                 x = _expected_for_step(summ, neg)
                 if _norm(x) in used and '->' in summ:      # same outcome as a sibling
                     x = _expected_for_step(summ.split('->', 1)[0], neg)
-                st.expected = x
+                if _norm(x) == _norm(summ) and not _is_imperative(summ) \
+                        and re.match(r'^[A-Za-z]', summ) and not _POL_CHECK_VERB_RE.match(summ):
+                    _f = summ.split(' ', 1)[0]
+                    _s = summ if re.fullmatch(r'[A-Z][a-z]+', _f) is None else summ[0].lower() + summ[1:]
+                    st.summary = 'Verify that ' + _s.rstrip(' .') + '.'
+                st.expected = _fix_short_expected(x)
                 used.add(_norm(x))
                 c['dup_exp'] += 1
+        for st in keep:
+            summ = getattr(st, 'summary', '') or ''
+            e = getattr(st, 'expected', '') or ''
+            if summ and _norm(e) == _norm(summ):
+                if _POL_CHECK_VERB_RE.match(summ):
+                    x = _expected_for_step(summ, neg)
+                    if _norm(x) != _norm(summ):
+                        st.expected = x; c['generic'] += 1
+                elif _is_imperative(summ):
+                    x = _expected_for_step(summ, neg)
+                    if _norm(x) != _norm(summ):
+                        st.expected = x; c['generic'] += 1
+                elif re.match(r'^[A-Za-z]', summ) and not _POL_CHECK_VERB_RE.match(summ):
+                    _f = summ.split(' ', 1)[0]
+                    _s = summ if re.fullmatch(r'[A-Z][a-z]+', _f) is None else summ[0].lower() + summ[1:]
+                    st.summary = 'Verify that ' + _s.rstrip(' .') + '.'
+                    st.expected = _ucfirst(summ.rstrip(' .')) + '.'
+                    c['generic'] += 1
+            st.expected = _fix_short_expected(getattr(st, 'expected', '') or '')
         if len(keep) != len(steps):
             for i, st in enumerate(keep, 1):
                 st.step_num = i
