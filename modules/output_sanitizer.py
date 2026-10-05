@@ -303,7 +303,13 @@ def _norm(s):
 
 
 def _ucfirst(s):
-    return (s[0].upper() + s[1:]) if s else s
+    # Leave identifiers alone: 'eSIM', 'whl-activate-subscriber', 'contextId==NO'.
+    if not s:
+        return s
+    first = re.split(r'[\s(]', s, 1)[0]
+    if not re.fullmatch(r'[a-z]+', first):
+        return s
+    return s[0].upper() + s[1:]
 
 
 def _fix_chars(t, title=False):
@@ -359,23 +365,103 @@ def _trim_long(t, limit):
     return out.rstrip() + ('' if out.rstrip().endswith(('.', ')')) else '.')
 
 
-def _expected_for_step(step):
-    """A step-specific expected result for a step whose own expected was a duplicate."""
+_POL_VERBS = {
+    'enter': 'entered', 'search': 'completed', 'inspect': 'reviewed', 'select': 'selected',
+    'open': 'opened', 'click': 'clicked', 'navigate': 'completed', 'set': 'applied',
+    'submit': 'submitted', 'trigger': 'triggered', 'run': 'completed', 'execute': 'executed',
+    'monitor': 'observed', 'observe': 'observed', 'attempt': 'attempted', 'apply': 'applied',
+    'wait': 'completed', 'export': 'exported', 'send': 'sent', 'place': 'placed',
+    'ingest': 'ingested', 'upload': 'uploaded', 'download': 'downloaded', 'create': 'created',
+    'update': 'updated', 'add': 'added', 'remove': 'removed', 'delete': 'deleted',
+    'change': 'changed', 'configure': 'configured', 'launch': 'launched', 'log': 'completed',
+    'query': 'completed', 'call': 'completed', 'invoke': 'invoked', 'perform': 'performed',
+    'repeat': 'repeated', 'retry': 'retried', 'refresh': 'refreshed', 'save': 'saved',
+    'cancel': 'cancelled', 'edit': 'edited', 'type': 'entered', 'use': 'used',
+}
+_POL_VERDICT_RE = re.compile(r'^(.{3,120}?)\s*:\s*(accepted|rejected|allowed|blocked|denied|'
+                             r'succeeds?|fails?|returned|displayed|hidden)\s*\.?$', re.I)
+
+
+def _expected_for_step(step, negative=False):
+    """A step-specific expected result derived from the step's own text."""
     s = re.sub(r'\s+', ' ', step or '').strip().rstrip(' .')
+    s = re.sub(r'\s*\[(?:GET|POST|PUT|PATCH|DELETE)\s+/[^\]]*\]', '', s).strip()
+    if not s:
+        return 'Step completes without error.'
+    v = _POL_VERDICT_RE.match(s)
+    if v:                                   # 'make >50: rejected' -> 'make >50 is rejected.'
+        return '%s is %s.' % (_ucfirst(v.group(1).strip()), v.group(2).lower())
+    if '->' in s:                           # 'Run 4 -> retry=max, Marked Failed' -> outcome
+        left, out = s.split('->', 1)
+        out = _POL_CHECK_VERB_RE.sub('', out.strip(' ,;')).strip()
+        if len(out) > 3 and re.match(r'[A-Za-z]', out):
+            return _ucfirst(out) + '.'
+        s = left.strip(' ,;') or s
     if _POL_CHECK_VERB_RE.match(s):
         rest = _POL_CHECK_VERB_RE.sub('', s).strip()
         if len(rest) > 8:
             return _ucfirst(rest) + '.'
     m = re.match(r'^([A-Za-z]+)\s+(.*)$', s)
-    if m and m.group(1).lower() in _POL_IMPERATIVE and len(m.group(2)) > 3:
-        return '%s %s successfully.' % (_ucfirst(m.group(2)), _POL_IMPERATIVE[m.group(1).lower()])
+    if m and m.group(1).lower() in _POL_VERBS and len(m.group(2)) > 3:
+        verb, obj = m.group(1).lower(), m.group(2)
+        if verb == 'log' and obj.lower().startswith('in'):
+            return 'User is logged in successfully.'
+        if verb == 'attempt':
+            return ('%s is blocked with the documented error.' % _ucfirst(re.sub(r'^to\s+', '', obj))
+                    if negative else '%s attempted.' % _ucfirst(re.sub(r'^to\s+', '', obj)))
+        return '%s %s successfully.' % (_ucfirst(obj), _POL_VERBS[verb])
+    # Declarative statement ('NBOP compares ... and detects a mismatch'): it IS the outcome.
+    if re.match(r'^[A-Za-z]', s) and len(s.split()) >= 3:
+        return _ucfirst(s) + '.'
     return 'Step completes without error.'
+
+
+_POL_ENDPOINT_RE = re.compile(r'\[(GET|POST|PUT|PATCH|DELETE)\s+(/[^\]\s]+)\]')
+_POL_NEG_TRIGGER = re.compile(r'200 OK|accepts the request|responds successfully|'
+                              r'returns HTTP 200', re.I)
+
+
+def _generic_expected(step, exp, negative, desc):
+    """Replace a constant expected result with one tied to this step / TC."""
+    e = (exp or '').strip()
+    low = e.lower()
+    if negative:
+        if _POL_NEG_TRIGGER.search(e):
+            return ('Request is received; NSL returns the documented validation error and '
+                    'does not process it.')
+        if low.startswith('transaction recorded correctly'):
+            return ('The rejected request is logged with its error code; no line, plan or '
+                    'feature change is recorded.')
+        if low.startswith('operation completed. all systems updated'):
+            return 'No downstream system is updated for the rejected request.'
+        if low.startswith('ne portal shows transaction completed'):
+            return 'NE Portal shows no completed transaction for the rejected request.'
+        return None
+    if e == _POL_GENERIC_ACCEPT:
+        m = _POL_ENDPOINT_RE.search(step or '')
+        if m:
+            api = m.group(2).rstrip('/').rsplit('/', 1)[-1]
+            return '%s request is accepted; NSL returns a success response with a transaction ID.' % api
+        return 'Request is accepted; NSL returns a success response with a transaction ID.'
+    if low.startswith('transaction recorded correctly'):
+        return ('TRANSACTION_HISTORY and LINE_HISTORY show the transaction with the correct '
+                'type and a completed status.')
+    if low.startswith('operation completed. all systems updated'):
+        d = re.sub(r'^\s*(?:To validate|UI verification|Validate)\s*:\s*', '', desc or '', flags=re.I)
+        d = re.split(r'(?<=[.;])\s', d.strip(), 1)[0].strip().rstrip(' .;')
+        if 12 < len(d) < 260:
+            return _ucfirst(d) + '.'
+        return 'Service Grouping shows every expected outbound call completed successfully.'
+    if e == 'Step completes without error.':
+        x = _expected_for_step(step)
+        return x if x != e else None
+    return None
 
 
 def polish_suite(suite, log: Callable = print) -> dict:
     """Reviewer-polish pass over every TC. Returns counts per rule for the log."""
     c = dict.fromkeys(('chars', 'prefix', 'echo', 'title_exp', 'dup_exp', 'dup_step',
-                       'fragment', 'none_pre', 'long', 'neg_accept', 'body'), 0)
+                       'fragment', 'none_pre', 'long', 'neg_accept', 'generic', 'body'), 0)
     for tc in (getattr(suite, 'test_cases', None) or []):
         # title
         n = getattr(tc, 'summary', '') or ''
@@ -406,7 +492,11 @@ def polish_suite(suite, log: Callable = print) -> dict:
                 if stmt and _norm(stmt) == _norm(s):
                     # Declarative Chalk line written as both step and '<same> - confirmed'.
                     # Make the step the check and the statement its expected result.
-                    if _POL_CHECK_VERB_RE.match(s):
+                    _v = _POL_VERDICT_RE.match(s.rstrip(' .'))
+                    if _v:                     # "make 'X' (17 chars): accepted"
+                        s = 'Verify %s is %s.' % (_v.group(1).strip(), _v.group(2).lower())
+                        stmt = '%s is %s' % (_ucfirst(_v.group(1).strip()), _v.group(2).lower())
+                    elif _POL_CHECK_VERB_RE.match(s):
                         pass
                     elif re.search(r'[=<>]|->', s) or not re.match(r'^[A-Za-z]', s):
                         s = 'Verify: ' + s.rstrip(' .') + '.'          # technical assertion
@@ -419,9 +509,10 @@ def polish_suite(suite, log: Callable = print) -> dict:
                     c['echo'] += 1
             if _POL_VERIFY_EXP_RE.match(e) and len(e) > 20:
                 e = _ucfirst(_POL_VERIFY_EXP_RE.sub('', e)); c['title_exp'] += 1
-            if neg and e.strip() == _POL_GENERIC_ACCEPT:
-                e = 'Request is received; NSL returns the documented validation error and does not process it.'
-                c['neg_accept'] += 1
+            g = _generic_expected(s, e, neg, getattr(tc, 'description', '') or '')
+            if g and g != e:
+                e = g
+                c['neg_accept' if neg else 'generic'] += 1
             s2, e2 = _trim_long(s, 500), _trim_long(e, 600)
             if (s2, e2) != (s, e):
                 c['long'] += 1
@@ -452,10 +543,16 @@ def polish_suite(suite, log: Callable = print) -> dict:
             e = getattr(st, 'expected', '') or ''
             if len(e) > 30:
                 last[_norm(e)] = i
+        used = {_norm(getattr(st, 'expected', '') or '') for st in keep}
         for i, st in enumerate(keep):
             e = getattr(st, 'expected', '') or ''
             if len(e) > 30 and last.get(_norm(e)) != i:
-                st.expected = _expected_for_step(getattr(st, 'summary', ''))
+                summ = getattr(st, 'summary', '') or ''
+                x = _expected_for_step(summ, neg)
+                if _norm(x) in used and '->' in summ:      # same outcome as a sibling
+                    x = _expected_for_step(summ.split('->', 1)[0], neg)
+                st.expected = x
+                used.add(_norm(x))
                 c['dup_exp'] += 1
         if len(keep) != len(steps):
             for i, st in enumerate(keep, 1):

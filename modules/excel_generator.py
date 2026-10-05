@@ -182,6 +182,16 @@ def generate_excel(suite: TestSuite, log=print) -> Path:
     return out
 
 
+def _tc_label(suite, tc):
+    """TC label by position in the suite - the same number the Test Cases sheet shows.
+    tc.sno keeps the pre-pruning number (near-dup pruning removes TCs after numbering),
+    so labelling the Summary by sno showed TC06..TC12 next to a TC01..TC07 sheet."""
+    for i, x in enumerate(getattr(suite, 'test_cases', None) or [], 1):
+        if x is tc:
+            return 'TC%02d' % i
+    return 'TC%s' % str(getattr(tc, 'sno', '') or '').zfill(2)
+
+
 def _build_summary_sheet(wb, suite: TestSuite):
     """Build the Summary sheet with feature info, AC, coverage, sources."""
     ws = wb.active
@@ -393,7 +403,7 @@ def _build_summary_sheet(wb, suite: TestSuite):
             import re as _re3
             short_name = _re3.sub(r'^TC\d+[_\s-]+' + _re3.escape(suite.feature_id) + r'[_\s-]*', '', tc.summary)
             cat_color = CAT_COLORS.get(tc.category, 'FFFFFF')
-            ws.cell(row=r, column=1, value=f'TC{tc.sno.zfill(2)}').font = _nf
+            ws.cell(row=r, column=1, value=_tc_label(suite, tc)).font = _nf
             ws.cell(row=r, column=1).alignment = _center; ws.cell(row=r, column=1).border = _bdr
             ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=3)
             ws.cell(row=r, column=2, value=short_name[:80]).font = _nf
@@ -419,7 +429,7 @@ def _build_summary_sheet(wb, suite: TestSuite):
     r += 1
     cats = {}
     for tc in suite.test_cases:
-        cats.setdefault(tc.category, []).append(f'TC{tc.sno.zfill(2)}')
+        cats.setdefault(tc.category, []).append(_tc_label(suite, tc))
     for ci, h in enumerate(['Category', 'Count', 'Test Cases'], 1):
         c = ws.cell(row=r, column=ci, value=h)
         c.font = _hf; c.fill = _hfill; c.alignment = _center; c.border = _bdr
@@ -441,7 +451,7 @@ def _build_summary_sheet(wb, suite: TestSuite):
     pris = {}
     for tc in suite.test_cases:
         pri = getattr(tc, 'priority', None) or getattr(tc, '_priority', 'P3')
-        pris.setdefault(pri, []).append(f'TC{tc.sno.zfill(2)}')
+        pris.setdefault(pri, []).append(_tc_label(suite, tc))
     if pris:
         ws.merge_cells(f'A{r}:F{r}')
         ws.cell(row=r, column=1, value='PRIORITY DISTRIBUTION').font = _bf
