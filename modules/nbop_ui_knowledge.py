@@ -14,6 +14,8 @@ Knowledge: TestSuiteGenerator/nbop_knowledge_base.json
 
 import json
 import logging
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from .step_templates import strip_dangling_tail, truncate_at_word  # word-boundary truncation, not raw slicing
@@ -44,6 +46,46 @@ def _load_ui_map() -> dict:
         'Place nbop_ui_map.json at one of: %s',
         ', '.join(str(p) for p in _UI_MAP_PATHS))
     return _UI_MAP
+
+
+@dataclass(frozen=True)
+class CrawlMapInfo:
+    """Read-only snapshot of the NBOP crawl map, with load diagnostics."""
+    data: dict                          # {} when unavailable
+    path: str                           # resolved path or ''
+    error: str                          # '' | 'missing' | 'unparseable: <msg>'
+    discovered_at: Optional[datetime]   # parsed top-level 'discovered_at', or None
+
+
+def _parse_discovered_at(value) -> Optional[datetime]:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def get_crawl_map_info() -> CrawlMapInfo:
+    """Load the crawl map without caching and without raising.
+
+    Iterates ``_UI_MAP_PATHS`` and uses the first existing file. The file is
+    opened read-only; nothing is ever written to it. ``_load_ui_map()`` is
+    deliberately left untouched for existing callers.
+    """
+    for p in _UI_MAP_PATHS:
+        p = Path(p)
+        if not p.exists():
+            continue
+        try:
+            with open(p, 'r', encoding='utf-8') as f:
+                raw = json.load(f)
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
+            return CrawlMapInfo({}, str(p), f'unparseable: {e}', None)
+        if not isinstance(raw, dict) or not isinstance(raw.get('pages'), dict):
+            return CrawlMapInfo({}, str(p), 'unparseable: pages not a dict', None)
+        return CrawlMapInfo(raw, str(p), '', _parse_discovered_at(raw.get('discovered_at')))
+    return CrawlMapInfo({}, '', 'missing', None)
 
 
 # ── Load the knowledge base (externalized constants) ──

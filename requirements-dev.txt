@@ -1,0 +1,10 @@
+# ── TSG Dev / Test Dependencies ──────────────────────────────────────────────
+# Install with: pip install -r requirements-dev.txt
+
+-r requirements.txt
+
+# Test runner
+pytest==8.2.0
+
+# Property-based testing
+hypothesis==6.112.2

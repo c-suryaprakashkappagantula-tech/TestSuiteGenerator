@@ -109,6 +109,16 @@ def generate_excel(suite: TestSuite, log=print) -> Path:
     except Exception as _san_err:
         log('[EXCEL] output sanitize skipped: %s' % str(_san_err)[:100])
 
+    # Output-stage crawl-grounding pass. UI_Features only: rewrites filler/UI step
+    # text to crawl-grounded wording and attaches StepGrounding records. Non-UI
+    # suites return immediately and are left untouched. Never changes TC count or
+    # titles. Failures are non-fatal — the workbook is written regardless.
+    try:
+        from .crawl_grounding import apply_crawl_grounding
+        apply_crawl_grounding(suite, log)
+    except Exception as exc:
+        log('[CRAWL-GROUND] skipped: %s' % str(exc)[:120])
+
     wb = openpyxl.Workbook()
 
     # ── Sheet 1: Summary ──
@@ -158,6 +168,29 @@ def generate_excel(suite: TestSuite, log=print) -> Path:
     except Exception as _contract_err:
         # Non-blocking by design during shadow rollout: legacy output remains available.
         log('[EXCEL] Contract-v1 shadow export skipped: %s' % str(_contract_err)[:120])
+
+    # ── Grounding Report (design §10): UI_Features only ──
+    # Built after the contract sheets so typed_rows/total_rows are populated.
+    # Non-UI suites have no _grounding_result → no sheet and no [CRAWL-GROUND]
+    # summary line (Req 6.1, 6.5, 8.1, 8.2).
+    _gr = getattr(suite, '_grounding_result', None)
+    if _gr is not None:
+        try:
+            _build_grounding_report_sheet(wb, _gr)
+            log('[CRAWL-GROUND] %s: ui_steps=%d grounded=%d unmatched=%d filler=%d '
+                'typed=%d total=%d grounded_share=%s typed_share=%s closers_removed=%d' % (
+                    getattr(_gr, 'feature_id', ''),
+                    int(getattr(_gr, 'ui_steps', 0) or 0),
+                    int(getattr(_gr, 'grounded_steps', 0) or 0),
+                    int(getattr(_gr, 'unmatched_steps', 0) or 0),
+                    int(getattr(_gr, 'filler_steps', 0) or 0),
+                    int(getattr(_gr, 'typed_rows', 0) or 0),
+                    int(getattr(_gr, 'total_rows', 0) or 0),
+                    _pct(getattr(_gr, 'grounded_steps', 0), getattr(_gr, 'ui_steps', 0)),
+                    _pct(getattr(_gr, 'typed_rows', 0), getattr(_gr, 'total_rows', 0)),
+                    int(getattr(_gr, 'closers_removed', 0) or 0)))
+        except Exception as _gr_err:
+            log('[EXCEL] Grounding Report sheet skipped: %s' % str(_gr_err)[:120])
 
     # Remove default empty sheet if exists
     if 'Sheet' in wb.sheetnames:
@@ -904,8 +937,12 @@ def _build_execution_contract_sheets(wb, suite, log=print):
     """
     from .contract_bridge import (
         CONTRACT_HEADERS, CONTRACT_SHEET, PROVENANCE_HEADERS, PROVENANCE_SHEET,
-        StepContract, infer_step_contract, stable_step_uid, stable_tc_uid,
+        StepContract, build_ui_action_contract, infer_step_contract,
+        stable_step_uid, stable_tc_uid,
     )
+
+    grounding_result = getattr(suite, '_grounding_result', None)
+    ui_typed_rows = ui_total_rows = 0
 
     for name in (CONTRACT_SHEET, PROVENANCE_SHEET):
         if name in wb.sheetnames:
@@ -935,9 +972,39 @@ def _build_execution_contract_sheets(wb, suite, log=print):
             inferred = infer_step_contract(
                 getattr(step, 'summary', ''), getattr(step, 'expected', '') or
                 getattr(step, 'expected_result', ''), getattr(tc, 'summary', ''))
+
+            # Crawl-grounding branch (design §9): when the output-stage grounding
+            # pass attached a StepGrounding to a UI step that infer_step_contract did
+            # not already type, build the row from the UI action contract instead.
+            # Non-UI steps and any step without ``_crawl_grounding`` fall through the
+            # generic path untouched (Req 8.2: non-UI output stays byte-identical).
+            g = getattr(step, '_crawl_grounding', None)
+            step_source_type = source_type
+            step_locator = locator
+            step_grounding = grounding
+            if g is not None and inferred.get('mode') != 'typed':
+                ui = build_ui_action_contract(g)
+                inferred = ui
+                # grounding_percent: 100 (typed) / 0 (unmatched) / None (grounded but
+                # unregistered). ``None`` means "keep the TC score" (design §9), so we
+                # only overwrite when the builder returns a concrete value.
+                ui_pct = ui.get('grounding_percent')
+                if ui_pct is not None:
+                    step_grounding = ui_pct
+                # source_type/source_locator are None for unmatched rows ("existing" in
+                # design §9) — keep the generic provenance in that case; otherwise use
+                # the crawl provenance.
+                if ui.get('source_type') is not None:
+                    step_source_type = ui['source_type']
+                if ui.get('source_locator') is not None:
+                    step_locator = ui['source_locator']
+
             mode = inferred.get('mode', 'legacy')
             typed += int(mode == 'typed')
             legacy += int(mode != 'typed')
+            if g is not None:
+                ui_total_rows += 1
+                ui_typed_rows += int(mode == 'typed')
             row = StepContract(
                 tc_uid=tc_uid, step_uid=stable_step_uid(tc_uid, step_num),
                 tc_number=tc_number, step_number=step_num, mode=mode,
@@ -948,11 +1015,18 @@ def _build_execution_contract_sheets(wb, suite, log=print):
                 parameters=inferred.get('parameters', {}),
                 requires=inferred.get('requires', {}),
                 owner_feature_id=owner, owner_pi=owner_pi,
-                source_type=source_type, source_locator=locator,
-                relationship=relationship, grounding_percent=grounding,
+                source_type=step_source_type, source_locator=step_locator,
+                relationship=relationship, grounding_percent=step_grounding,
                 obligation_ids=obligations,
             )
             contract_ws.append(row.to_excel_row())
+
+    # Feed the contract-writer counts back to the grounding result so the
+    # Grounding Report (design §10) can show typed/total rows. Only UI steps that
+    # carried a ``_crawl_grounding`` record are counted (design §9).
+    if grounding_result is not None:
+        grounding_result.typed_rows = ui_typed_rows
+        grounding_result.total_rows = ui_total_rows
 
     # Standard readable formatting; no formulas/macros/hidden behavior.
     for ws in (contract_ws, provenance_ws):
@@ -983,3 +1057,103 @@ def _build_execution_contract_sheets(wb, suite, log=print):
             % (supporting, ', '.join(audit_rows[:10])))
     log('[EXCEL] Contract-v1 audit: %d typed step(s), %d legacy step(s), '
         '%d supporting-only TC(s)' % (typed, legacy, supporting))
+
+
+GROUNDING_REPORT_SHEET = 'Grounding Report'
+_GROUNDING_ISSUE_HEADERS = [
+    'TC Number', 'Step Number', 'Step UID', 'Step Text', 'Reason', 'Candidate Pages',
+]
+
+
+def _pct(numerator, denominator) -> str:
+    """Integer-percentage string ('0%' when the denominator is 0)."""
+    try:
+        n = float(numerator or 0)
+        d = float(denominator or 0)
+    except (TypeError, ValueError):
+        return '0%'
+    if d <= 0:
+        return '0%'
+    return '%d%%' % round(100.0 * n / d)
+
+
+def _join_candidates(candidates) -> str:
+    """Comma-join a candidate-page list/tuple; pass through a plain string."""
+    if candidates is None:
+        return ''
+    if isinstance(candidates, (list, tuple)):
+        return ', '.join(str(c) for c in candidates)
+    return str(candidates)
+
+
+def _build_grounding_report_sheet(wb, result):
+    """Write the 'Grounding Report' sheet from a ``GroundingResult`` (design §10).
+
+    A metrics block (label | value) is followed by a blank row and an issue
+    table: one row per ``GroundingIssue`` in ``result.issues``. Called only
+    for UI_Features (``suite._grounding_result is not None``); non-UI suites
+    produce no sheet (Req 6.1, 6.5). Formatting mirrors the contract sheets.
+    """
+    if GROUNDING_REPORT_SHEET in wb.sheetnames:
+        del wb[GROUNDING_REPORT_SHEET]
+    ws = wb.create_sheet(GROUNDING_REPORT_SHEET)
+
+    ui_steps = int(getattr(result, 'ui_steps', 0) or 0)
+    grounded = int(getattr(result, 'grounded_steps', 0) or 0)
+    unmatched = int(getattr(result, 'unmatched_steps', 0) or 0)
+    filler = int(getattr(result, 'filler_steps', 0) or 0)
+    closers_removed = int(getattr(result, 'closers_removed', 0) or 0)
+    typed_rows = int(getattr(result, 'typed_rows', 0) or 0)
+    total_rows = int(getattr(result, 'total_rows', 0) or 0)
+    grounded_share = _pct(grounded, ui_steps)
+    typed_share = _pct(typed_rows, total_rows)
+
+    age_days = getattr(result, 'age_days', None)
+    metrics = [
+        ('Feature', getattr(result, 'feature_id', '')),
+        ('Crawl Map', getattr(result, 'crawl_path', '')),
+        ('Crawl discovered_at', getattr(result, 'discovered_at', '')),
+        ('Crawl age (days)', '' if age_days is None else int(age_days)),
+        ('Staleness warning', getattr(result, 'stale_warning', '') or ''),
+        ('UI_Steps', ui_steps),
+        ('Grounded_Steps', grounded),
+        ('Unmatched_Steps', unmatched),
+        ('Filler_Steps', filler),
+        ('Closer_Steps removed', closers_removed),
+        ('Typed rows', typed_rows),
+        ('Total rows', total_rows),
+        ('Grounded share %', grounded_share),
+        ('Typed share %', typed_share),
+    ]
+    for label, value in metrics:
+        ws.append([label, value])
+        cell = ws.cell(row=ws.max_row, column=1)
+        cell.font = _bf
+
+    # Blank separator row, then the issue table.
+    ws.append([])
+    header_row_idx = ws.max_row + 1
+    ws.append(list(_GROUNDING_ISSUE_HEADERS))
+    for cell in ws[header_row_idx]:
+        cell.font = _hf
+        cell.fill = _hfill
+        cell.alignment = _center
+
+    for issue in list(getattr(result, 'issues', []) or []):
+        ws.append([
+            getattr(issue, 'tc_number', ''),
+            getattr(issue, 'step_number', ''),
+            getattr(issue, 'step_uid', ''),
+            getattr(issue, 'step_text', ''),
+            getattr(issue, 'reason', ''),
+            _join_candidates(getattr(issue, 'candidates', ())),
+        ])
+
+    # Standard readable formatting; no formulas/macros/hidden behavior.
+    ws.freeze_panes = 'A%d' % (header_row_idx + 1)
+    for col in ws.columns:
+        letter = col[0].column_letter
+        width = min(60, max(12, max(len(str(c.value or '')) for c in col[:200]) + 2))
+        ws.column_dimensions[letter].width = width
+
+    return ws
