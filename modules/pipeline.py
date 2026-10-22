@@ -46,55 +46,10 @@ def _attach_degraded(suite, log=print) -> int:
     except Exception:
         return 0
 
-# ── Shared auto-spawned browser instance (reused across blocks in same run) ──
-_auto_browser_context = {
-    'pw': None,
-    'browser': None,
-    'page': None,
-}
-
-
-def _auto_spawn_browser(log=print):
-    """Auto-spawn a headless Playwright browser as a last-resort fallback.
-
-    Reuses the same browser instance across multiple blocks in the same
-    pipeline run (Jira + Chalk). Cleaned up by _cleanup_auto_browser().
-    """
-    if _auto_browser_context['page'] is not None:
-        return _auto_browser_context['page']
-
-    from playwright.sync_api import sync_playwright
-    from .config import get_browser_channel
-
-    log('[PIPELINE] 🚀 Auto-spawning headless browser (self-healing fallback)...')
-    pw = sync_playwright().start()
-    browser = pw.chromium.launch(headless=True, channel=get_browser_channel())
-    ctx = browser.new_context(viewport={'width': 1920, 'height': 1080})
-    page = ctx.new_page()
-
-    _auto_browser_context['pw'] = pw
-    _auto_browser_context['browser'] = browser
-    _auto_browser_context['page'] = page
-
-    log('[PIPELINE] ✅ Headless browser ready')
-    return page
-
-
-def cleanup_auto_browser():
-    """Close the auto-spawned browser if one was created. Call after pipeline completes."""
-    if _auto_browser_context['browser']:
-        try:
-            _auto_browser_context['browser'].close()
-        except Exception:
-            pass
-    if _auto_browser_context['pw']:
-        try:
-            _auto_browser_context['pw'].stop()
-        except Exception:
-            pass
-    _auto_browser_context['pw'] = None
-    _auto_browser_context['browser'] = None
-    _auto_browser_context['page'] = None
+# ── MCP-only hardening (FEAT-002): the Chalk/Jira auto-spawn browser fallback
+# (_auto_spawn_browser / cleanup_auto_browser) has been removed. Chalk and Jira are
+# MCP-only; when REST(MCP) is unavailable and no usable cache exists, the pipeline
+# hard-fails via mcp_unavailable_alert / McpUnavailable instead of launching a browser.
 
 
 @dataclass
@@ -343,108 +298,43 @@ def block_jira_fetch(page, feature_id, log=print):
 
         return {'jira': jira, 'warnings': warnings, 'att_paths': att_paths}
 
-    # ── Path C/D/E: REST fails — stale cache, browser fallback, or error ──
-    log('[PIPELINE] REST failed for %s — fetching via browser' % feature_id)
-    if page is None:
-        # Path C: REST fails + no browser → attempt stale cache
-        # Browser not available (REST-only mode was selected at startup)
-        # Fall back to returning cached data if any exists, even if stale
-        log('[PIPELINE] Browser not available (page=None) — attempting stale cache load for %s' % feature_id)
-        stale_cached = load_jira(feature_id)
-        if stale_cached and stale_cached.get('summary'):
-            import json as _json
-            log('[PIPELINE] ⚡ Using stale cache for %s (REST unavailable, no browser)' % feature_id)
-            jira = JiraIssue(
-                key=stale_cached.get('feature_id', feature_id),
-                summary=stale_cached.get('summary', ''),
-                description=stale_cached.get('description', ''),
-                status=stale_cached.get('status', ''),
-                priority=stale_cached.get('priority', ''),
-                assignee=stale_cached.get('assignee', ''),
-                reporter=stale_cached.get('reporter', ''),
-                labels=_json.loads(stale_cached.get('labels_json', '[]')),
-                acceptance_criteria=stale_cached.get('ac_text', ''),
-                attachments=[],
-                linked_issues=_json.loads(stale_cached.get('links_json', '[]')),
-                subtasks=_json.loads(stale_cached.get('subtasks_json', '[]')),
-                comments=_json.loads(stale_cached.get('comments_json', '[]')),
-                pi=stale_cached.get('pi', ''),
-                channel=stale_cached.get('channel', ''),
-            )
-            warnings = validate_jira_issue(_normalize_jira_issue(jira, log=log), log=log)
-            # Apply post-fetch enrichment even on stale cache (AC-from-description, etc.)
-            from .jira_fetcher import enrich_issue_post_fetch
-            enrich_issue_post_fetch(jira, log=log)
-            return {'jira': jira, 'warnings': warnings + ['⚠️ Using stale Jira cache — run Sync from Jira to refresh'], 'att_paths': []}
+    # ── Path C: REST fails — try stale local DB cache (local-only read, no network) ──
+    log('[PIPELINE] REST(MCP) failed for %s — attempting stale cache load' % feature_id)
+    stale_cached = load_jira(feature_id)
+    if stale_cached and stale_cached.get('summary'):
+        import json as _json
+        log('[PIPELINE] ⚡ Using stale cache for %s (REST/MCP unavailable)' % feature_id)
+        jira = JiraIssue(
+            key=stale_cached.get('feature_id', feature_id),
+            summary=stale_cached.get('summary', ''),
+            description=stale_cached.get('description', ''),
+            status=stale_cached.get('status', ''),
+            priority=stale_cached.get('priority', ''),
+            assignee=stale_cached.get('assignee', ''),
+            reporter=stale_cached.get('reporter', ''),
+            labels=_json.loads(stale_cached.get('labels_json', '[]')),
+            acceptance_criteria=stale_cached.get('ac_text', ''),
+            attachments=[],
+            linked_issues=_json.loads(stale_cached.get('links_json', '[]')),
+            subtasks=_json.loads(stale_cached.get('subtasks_json', '[]')),
+            comments=_json.loads(stale_cached.get('comments_json', '[]')),
+            pi=stale_cached.get('pi', ''),
+            channel=stale_cached.get('channel', ''),
+        )
+        warnings = validate_jira_issue(_normalize_jira_issue(jira, log=log), log=log)
+        # Apply post-fetch enrichment even on stale cache (AC-from-description, etc.)
+        from .jira_fetcher import enrich_issue_post_fetch
+        enrich_issue_post_fetch(jira, log=log)
+        return {'jira': jira, 'warnings': warnings + ['⚠️ Using stale Jira cache — run Sync from Jira to refresh'], 'att_paths': []}
 
-        # ── Path D: REST fails + no cache + browser available → spawn and fetch ──
-        # ── Path E: REST fails + no cache + no browser → error ──
-        log('[PIPELINE] No cache available — auto-launching headless browser for %s...' % feature_id)
-        try:
-            page = _auto_spawn_browser(log)
-        except Exception as _browser_err:
-            raise RuntimeError(
-                'Jira data unavailable for %s: REST failed and browser launch failed (%s). '
-                'Run "Sync from Jira" to refresh the cache.' % (feature_id, str(_browser_err)[:80])
-            )
-    jira = fetch_jira_issue(page, feature_id, log=log)
-    warnings = validate_jira_issue(_normalize_jira_issue(jira, log=log), log=log)
-
-    # Save to DB for caching
-    try:
-        save_jira(jira)
-        log('[PIPELINE] Jira data saved to DB for %s' % feature_id)
-    except Exception as e:
-        log('[PIPELINE] Jira DB save warning: %s' % str(e)[:60])
-
-    # Download attachments (parent epic)
-    att_paths = []
-    if jira.attachments:
-        att_paths = download_attachments(page, jira, log=log)
-        log('[PIPELINE] Downloaded %d attachments' % len(att_paths))
-
-    # Download subtask attachments (evidence docs, unit testing docs, test results)
-    if jira.subtasks:
-        from .config import ATTACHMENTS
-        from pathlib import Path
-        subtask_att_count = 0
-        for st in jira.subtasks:
-            st_attachments = st.get('attachments', [])
-            if not st_attachments:
-                continue
-            st_key = st.get('key', 'unknown')
-            for att in st_attachments:
-                fname = att.get('filename', '')
-                url = att.get('url', '')
-                if not fname or not url:
-                    continue
-                # Skip large files (>10MB) and non-document types
-                size = att.get('size', 0)
-                if size > 10 * 1024 * 1024:
-                    continue
-                ext = Path(fname).suffix.lower()
-                if ext not in ('.docx', '.xlsx', '.pdf', '.txt', '.html', '.zip', '.csv'):
-                    continue
-                save_path = ATTACHMENTS / ('%s_%s' % (st_key, fname))
-                if save_path.exists():
-                    att_paths.append(save_path)
-                    subtask_att_count += 1
-                    continue
-                try:
-                    if page is None:
-                        continue  # Can't download — no browser
-                    response = page.request.get(url)
-                    if response.ok:
-                        save_path.write_bytes(response.body())
-                        att_paths.append(save_path)
-                        subtask_att_count += 1
-                        log('[PIPELINE]   Subtask %s: downloaded %s' % (st_key, fname))
-                except Exception as e:
-                    log('[PIPELINE]   Subtask %s: failed to download %s — %s' % (st_key, fname, str(e)[:50]))
-        if subtask_att_count:
-            log('[PIPELINE] Downloaded %d subtask attachments' % subtask_att_count)
-
-    return {'jira': jira, 'warnings': warnings, 'att_paths': att_paths}
+    # ── MCP-only hard-fail: REST(MCP) down and no usable cache. Jira is MCP-only;
+    # there is NO browser/Playwright fallback. Alert loudly and raise. ──
+    from shared.mcp_gateway.alerts import mcp_unavailable_alert, McpUnavailable
+    mcp_unavailable_alert('Jira', log=log)
+    raise McpUnavailable(
+        'Jira data unavailable for %s: MCP gateway is down and no cache exists. '
+        'Jira access is MCP-only — check `python -m shared.mcp_gateway status` and retry.' % feature_id
+    )
 
 
 def block_chalk_db(feature_id, pi_label, log=print):
@@ -631,35 +521,16 @@ def block_chalk_live(page, feature_id, pi_url, pi_label, pi_list, log=print):
             except:
                 pass
 
-    # ── BROWSER FALLBACK ──
-    if not page:
-        # Auto-spawn headless browser when page=None and REST failed
-        log('[PIPELINE] Chalk REST miss — auto-launching headless browser for %s...' % feature_id)
-        try:
-            page = _auto_spawn_browser(log)
-        except Exception as _browser_err:
-            log('[PIPELINE] Browser launch failed: %s — Chalk unavailable' % str(_browser_err)[:60])
-            return {'chalk': ChalkData(feature_id=feature_id), 'source': 'not found (no browser)'}
-
-    if page:
-        log('[PIPELINE] Fetching Chalk via browser...')
-        chalk = fetch_feature_from_pi(page, pi_url, feature_id, log=log)
-        if chalk and chalk.scenarios:
-            return _persist_and_normalize(feature_id, pi_label, chalk, 'live', log)
-
-        # Scan all PIs via browser
-        for sl, su in pi_list:
-            if sl == pi_label:
-                continue
-            try:
-                sc = fetch_feature_from_pi(page, su, feature_id, log=lambda m: None)
-                if sc and sc.scenarios:
-                    return _persist_and_normalize(feature_id, sl, sc, 'scanned', log)
-            except:
-                pass
-
-    log('[PIPELINE] Chalk not found on any PI for %s' % feature_id)
-    return {'chalk': ChalkData(feature_id=feature_id), 'source': 'not found'}
+    # ── MCP-only hard-fail: REST(MCP) could not find the feature on the selected PI
+    # or any scanned PI. Chalk is MCP-only — there is NO browser/Playwright fallback.
+    # Alert loudly and raise rather than returning a soft 'not found'. ──
+    from shared.mcp_gateway.alerts import mcp_unavailable_alert, McpUnavailable
+    mcp_unavailable_alert('Chalk', log=log)
+    raise McpUnavailable(
+        'Chalk data unavailable for %s: MCP gateway REST returned nothing on the selected '
+        'PI or any scanned PI. Chalk access is MCP-only — check '
+        '`python -m shared.mcp_gateway status` and retry.' % feature_id
+    )
 
 
 def block_parse_docs(att_paths, uploaded_files, inputs_dir, log=print):

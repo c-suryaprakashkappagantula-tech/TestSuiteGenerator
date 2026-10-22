@@ -82,7 +82,7 @@ def discover_pi_links_rest(log=print, pi_range=range(46, 60)) -> Optional[List[P
         # Every other Chalk entry point already does this; this one was the odd one out, so an
         # expired cookie sent discovery to the browser path with no attempt to re-authenticate.
         if not client.health_check_with_refresh():
-            log('[CHALK-REST] Health check failed (refresh attempted) — will use browser')
+            log('[CHALK-REST] Health check failed (refresh attempted) — MCP unavailable — Chalk is MCP-only')
             return None
 
         pi_pages = client.discover_pi_pages(pi_range)
@@ -91,7 +91,7 @@ def discover_pi_links_rest(log=print, pi_range=range(46, 60)) -> Optional[List[P
 
         return [PILink(label=p.label, url=p.url, number=p.number) for p in pi_pages]
     except Exception as e:
-        log(f'[CHALK-REST] PI discovery failed: {e} — will use browser')
+        log(f'[CHALK-REST] PI discovery failed: {e} — MCP unavailable — Chalk is MCP-only')
         return None
 
 
@@ -111,7 +111,7 @@ def discover_features_rest(page_id: str, log=print) -> Optional[List[Tuple[str, 
         features = client.discover_features_on_pi(page_id)
         return features if features else None
     except Exception as e:
-        log(f'[CHALK-REST] Feature discovery failed: {e} — will use browser')
+        log(f'[CHALK-REST] Feature discovery failed: {e} — MCP unavailable — Chalk is MCP-only')
         return None
 
 
@@ -163,7 +163,7 @@ def fetch_feature_rest(page_id: str, feature_id: str, log=print) -> Optional[Cha
             return data
         return None
     except Exception as e:
-        log(f'[CHALK-REST] Feature fetch failed: {e} — will use browser')
+        log(f'[CHALK-REST] Feature fetch failed: {e} — MCP unavailable — Chalk is MCP-only')
         return None
 
 
@@ -246,6 +246,8 @@ def _parse_feature_from_lines(lines: List[str], data: ChalkData, feature_id: str
 
 def discover_pi_links(page, log=print, pi_range=range(46, 60)) -> List[PILink]:
     """Navigate to TMO Testing Scope page and collect all PI links from sidebar."""
+    from rest_clients._legacy_guard import require_legacy
+    require_legacy('TSG browser Chalk PI discovery')
     log('[CHALK] Navigating to TMO Testing Scope page...')
     page.goto(TMO_TESTING_SCOPE_URL, wait_until='domcontentloaded', timeout=PAGE_LOAD_TIMEOUT_MS)
     _wait(page)
@@ -366,6 +368,8 @@ EXTRACT_TABLES_JS = """() => {
 def discover_features_on_pi(page, pi_url: str, log=print) -> List[Tuple[str, str]]:
     """Navigate to a PI page and extract all MWTGPROV-XXXX feature IDs with titles.
     Improved: expands all tabs/sections, scans tables too, handles 3-5 digit IDs."""
+    from rest_clients._legacy_guard import require_legacy
+    require_legacy('TSG browser Chalk feature discovery')
     log('[CHALK] Navigating to PI page...')
     page.goto(pi_url, timeout=PAGE_LOAD_TIMEOUT_MS, wait_until='commit')
     try: page.wait_for_load_state('domcontentloaded', timeout=15000)
@@ -456,6 +460,8 @@ def discover_features_on_pi(page, pi_url: str, log=print) -> List[Tuple[str, str
 
 def fetch_feature_from_pi(page, pi_url: str, feature_id: str, log=print) -> ChalkData:
     """Navigate to a PI page and extract content for a specific feature ID."""
+    from rest_clients._legacy_guard import require_legacy
+    require_legacy('TSG browser Chalk fetch (%s)' % feature_id)
     data = ChalkData(feature_id=feature_id)
 
     # Point 6: Retry logic for Chalk page loads (Chalk pages are heavy)

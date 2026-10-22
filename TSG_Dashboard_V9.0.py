@@ -1,5 +1,6 @@
 """
 TSG_Dashboard_V9.0.py -- Test Suite Generator Dashboard V9.0 (Data-First Engine)
+V9.0 = V8.0 + Sunset Ember theme (theme_v3) + MCP gateway health check.
 STANDALONE dashboard — no V7 toggle, no shared engine logic with V7.
 Uses ONLY the V8.0 Data-First Engine for test suite generation.
 
@@ -9,9 +10,20 @@ V8.0 = Data-First approach:
   - TC Building with full traceability
   - Zero-Generic Validation
 
-Usage:  streamlit run TSG_Dashboard_V9.0.py
+Usage:  streamlit run TSG_Dashboard_V9.0.py --server.port 8512
 """
 import sys, os, time, traceback, shutil, io
+_RUN_T0 = time.perf_counter()
+def _sect(_tag,_t):
+    try: open("_servertime.log","a",encoding="utf-8").write("    [sect] %-22s %8.1f ms\n"%(_tag,(time.perf_counter()-_t)*1000))
+    except Exception: pass
+import atexit as _atexit
+def _run_done():
+    try:
+        _ms = (time.perf_counter() - _RUN_T0) * 1000
+        open("_servertime.log","a",encoding="utf-8").write("%.1f ms server rerun\n" % _ms)
+    except Exception:
+        pass
 from pathlib import Path
 from datetime import datetime
 from html import escape
@@ -27,7 +39,8 @@ for _cache_dir in Path(__file__).parent.rglob('__pycache__'):
         pass
 
 import streamlit as st
-from playwright.sync_api import sync_playwright
+# MCP-only hardening (FEAT-002): Chalk/Jira no longer have a Playwright browser fallback.
+# The `from playwright.sync_api import sync_playwright` import was removed with the browser paths.
 
 from modules.config import (ROOT, OUTPUTS, CHECKPOINTS, ATTACHMENTS, INPUTS,
                              BROWSER_CHANNEL, BROWSER_HEADLESS, ts_short,
@@ -37,7 +50,11 @@ from modules.chalk_parser import discover_pi_links, fetch_feature_from_pi, disco
 from modules.doc_parser import parse_file
 from modules.data_first_engine import build_test_suite_v8
 from modules.excel_generator import generate_excel
-from modules.theme_v3 import CSS
+import modules.theme_v2 as _theme2
+import modules.theme_v3 as _theme3
+import modules.theme_v4 as _theme4
+# Live-switchable themes (sidebar picker). Order = display order.
+_TSG_THEMES = {'Gold Command+': _theme4, 'Aurora': _theme3, 'Classic Violet': _theme2}
 from modules.transaction_log import log_generation, get_history
 from modules.pipeline import (Pipeline, PipelineError, block_jira_fetch, block_chalk_db,
                                block_chalk_live, block_parse_docs, block_build_suite_v8,
@@ -49,6 +66,13 @@ from modules.database import (init_db, save_pi_pages, load_pi_pages, save_featur
                                log_generation_db, get_history_db, get_db_stats, is_data_stale,
                                save_test_suite, load_latest_suite,
                                get_all_suite_history, save_artifact_hash, check_staleness)
+
+# MCP-only hardening (FEAT-002): loud hard-fail helper. Chalk/Jira are MCP-only; when the
+# MCP gateway is unavailable there is NO browser/REST fallback — we alert and fail loudly.
+_repo_root = str(Path(__file__).parent.parent)
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
+from shared.mcp_gateway.alerts import mcp_unavailable_alert, McpUnavailable
 
 # ================================================================
 # WINDOWS PLATFORM FIXES
@@ -93,33 +117,56 @@ except Exception:
 # PAGE CONFIG
 # ================================================================
 st.set_page_config(
-    page_title='TSG V8.0 - Data-First Test Suite Generator',
+    page_title='TSG V9.0 - Data-First Test Suite Generator',
     page_icon='https://em-content.zobj.net/source/twitter/408/test-tube_1f9ea.png',
     layout='wide',
-    initial_sidebar_state='collapsed',
+    initial_sidebar_state='expanded',
 )
-st.markdown(CSS, unsafe_allow_html=True)
+# -- Theme selection (live switch via the sidebar picker) --
+_theme_name = st.session_state.get('tsg_theme', 'Gold Command+')
+_theme_mod = _TSG_THEMES.get(_theme_name, _theme4)
+st.markdown(_theme_mod.CSS, unsafe_allow_html=True)
 
-# Force sidebar warm theme to match Sunset Ember main dashboard
+# Sidebar tint per theme: (bg, text, muted, expander-bg, expander-border)
+_SIDEBAR_TINT = {
+    'Gold Command+':  ('#0a0806', '#f5e9c8', '#c9a84a', 'rgba(22,16,7,0.6)',  'rgba(212,175,55,0.2)'),
+    'Aurora':         ('#0b1120', '#E5EDF7', '#94A3B8', 'rgba(15,23,42,0.6)', 'rgba(0,229,255,0.16)'),
+    'Classic Violet': ('#0a0a0f', '#e2e8f0', '#94a3b8', 'rgba(30,41,59,0.5)', 'rgba(99,102,241,0.2)'),
+}
+_sb = _SIDEBAR_TINT.get(_theme_name, _SIDEBAR_TINT['Gold Command+'])
 st.markdown("""<style>
-[data-testid="stSidebar"] {
-    background-color: #150a03 !important;
-}
-[data-testid="stSidebar"] * {
-    color: #fef3c7 !important;
-}
-[data-testid="stSidebar"] .stMarkdown p, [data-testid="stSidebar"] .stMarkdown span {
-    color: #b45309 !important;
-}
-[data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 {
-    color: #fed7aa !important;
-}
-[data-testid="stSidebar"] [data-testid="stExpander"] {
-    background-color: rgba(40, 18, 6, 0.6) !important;
-    border: 1px solid rgba(249, 115, 22, 0.22) !important;
-    border-radius: 8px !important;
-}
-</style>""", unsafe_allow_html=True)
+[data-testid="stSidebar"] {{ background-color: {0} !important; }}
+[data-testid="stSidebar"] * {{ color: {1} !important; }}
+[data-testid="stSidebar"] .stMarkdown p, [data-testid="stSidebar"] .stMarkdown span {{ color: {2} !important; }}
+[data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 {{ color: {1} !important; }}
+[data-testid="stSidebar"] [data-testid="stExpander"] {{ background-color: {3} !important; border: 1px solid {4} !important; border-radius: 8px !important; }}
+/* Keep the sidebar collapse/expand control visible+clickable even though the theme hides the top header */
+[data-testid="stSidebarCollapsedControl"] {{ display: flex !important; visibility: visible !important; opacity: 1 !important; z-index: 1000000 !important; }}
+[data-testid="stSidebarCollapsedControl"] button {{ background: rgba(20,20,28,0.75) !important; border: 1px solid {4} !important; border-radius: 10px !important; color: {1} !important; }}
+[data-testid="stSidebarCollapseButton"], [data-testid="stSidebarCollapseButton"] button {{ display: inline-flex !important; visibility: visible !important; opacity: 0.9 !important; }}
+[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"] * {{ color: {1} !important; }}
+</style>""".format(*_sb), unsafe_allow_html=True)
+
+# Ambient chrome (drifting particles + floating status widget) -- only for themes that provide it
+if hasattr(_theme_mod, 'PARTICLES_HTML'):
+    st.markdown(_theme_mod.PARTICLES_HTML, unsafe_allow_html=True)
+if hasattr(_theme_mod, 'floating_status_html'):
+    st.markdown(_theme_mod.floating_status_html(), unsafe_allow_html=True)
+
+# ================================================================
+# MCP GATEWAY HEALTH CHECK (one-time, shown once per session)
+# ================================================================
+if not st.session_state.get('_mcp_check_done'):
+    st.session_state['_mcp_check_done'] = True
+    _mcp_cfg = Path.home() / '.kiro' / 'settings' / 'mcp.json'
+    if not _mcp_cfg.exists():
+        st.warning(
+            '⚠️ **MCP gateway not configured** — Jira/Chalk access is **MCP-only**. There is no '
+            'browser/REST fallback, so Sync and generation will fail until MCP is reachable.  \n'
+            'Run `python -m shared.mcp_gateway setup` once to configure your personal PAT and LiteLLM key, '
+            'then check `python -m shared.mcp_gateway status`.  \n'
+            'Config file expected at: `%s`' % _mcp_cfg
+        )
 
 # ================================================================
 # DEFAULT PI LIST
@@ -127,7 +174,30 @@ st.markdown("""<style>
 CHALK_PI_BASE = 'https://chalk.charter.com/spaces/MDA/pages'
 
 def _load_pi_pages():
-    """Load PI pages from config/chalk_pi_pages.json (editable without code changes)."""
+    """Load PI pages. Precedence: shared canonical registry (shared/pi_registry.db,
+    written by any dashboard's Sync-from-Chalk) -> config/chalk_pi_pages.json ->
+    hardcoded. So a PI added anywhere shows up here automatically."""
+    # 1. Canonical registry — shared (co-located monorepo) OR vendored (standalone TSG).
+    _pr = None
+    try:
+        import sys as _sys
+        _shared_parent = str(Path(__file__).parent.parent)
+        if _shared_parent not in _sys.path:
+            _sys.path.insert(0, _shared_parent)
+        from shared import pi_registry as _pr  # co-located install
+    except Exception:
+        try:
+            from modules import pi_registry_local as _pr  # vendored standalone fallback
+        except Exception:
+            _pr = None
+    if _pr is not None:
+        try:
+            _pairs = _pr.get_pi_pages()
+            if _pairs:
+                return _pairs
+        except Exception:
+            pass
+    # 2. Local JSON config.
     config_path = Path(__file__).parent / 'config' / 'chalk_pi_pages.json'
     try:
         import json
@@ -201,11 +271,11 @@ _chalk_cached = _cached_chalk_count()
 _db_badge = 'DB: %d features | %d cached' % (_db_stats['feature_count'], _chalk_cached) if _db_stats['feature_count'] > 0 else 'DB: empty'
 st.markdown("""<div class='banner'>
   <div>
-    <div class='title'>TSG V8.0 &mdash; Data-First Test Suite Generator</div>
+    <div class='title'>TSG V9.0 &mdash; Data-First Test Suite Generator</div>
     <div class='sub'>Data-Driven &bull; Full Traceability &bull; Zero-Generic Validation</div>
   </div>
   <div style='display:flex; gap:8px; align-items:center; flex-wrap:wrap;'>
-    <div class='badge'>V8.0</div>
+    <div class='badge'>V9.0</div>
     <div class='badge'>Data-First</div>
     <div class='badge'>Traceability</div>
     <div class='badge'>Batch Mode</div>
@@ -245,6 +315,7 @@ if _pi_mode and ss['input_mode'] != 'pi_scope':
     ss['input_mode'] = 'pi_scope'
     ss['logs'] = []
     ss['result_path'] = None
+    ss['demo_doc_path'] = ''
     ss['exit_report'] = None
     ss['suite_info'] = None
     st.rerun()
@@ -252,6 +323,7 @@ if _manual_mode and ss['input_mode'] != 'manual_links':
     ss['input_mode'] = 'manual_links'
     ss['logs'] = []
     ss['result_path'] = None
+    ss['demo_doc_path'] = ''
     ss['exit_report'] = None
     ss['suite_info'] = None
     st.rerun()
@@ -399,6 +471,7 @@ with left:
                         ss['pi_features'] = ss.get('all_pi_features', {}).get(label, [])
                     ss['logs'] = []
                     ss['result_path'] = None
+                    ss['demo_doc_path'] = ''
                     ss['exit_report'] = None
                     ss['suite_info'] = None
                     ss['_batch_default'] = []
@@ -512,8 +585,11 @@ with left:
             st.markdown("<div class='sec-title'><span class='icon'>&#128269;</span> Step 2: Feature ID</div>", unsafe_allow_html=True)
 
         # Load features: DB first (instant), Chalk scrape as fallback
+        _t_fl = time.perf_counter()
         if not ss.get('all_pi_features'):
+            open("_servertime.log","a",encoding="utf-8").write("    [sect] feature-load-branch ENTERED (all_pi_features empty)\n")
             db_features = _cached_load_all_features()
+            open("_servertime.log","a",encoding="utf-8").write("    [sect] db_features len=%d count=%d\n" % (len(db_features or {}), get_features_count()))
             if db_features and get_features_count() > 0:
                 ss['all_pi_features'] = db_features
                 if ss['selected_pi']:
@@ -567,23 +643,8 @@ with left:
                                     except:
                                         pass
                         else:
-                            # Browser fallback
-                            _pw = sync_playwright().start()
-                            _br = _pw.chromium.launch(headless=True, channel=get_browser_channel())
-                            _cx = _br.new_context(viewport={'width': 1920, 'height': 1080})
-                            _pg = _cx.new_page()
-                            for _pi_label, _pi_url in ss['pi_list']:
-                                _feats = discover_features_on_pi(_pg, _pi_url, log=lambda m: None)
-                                _all[_pi_label] = _feats
-                                save_features(_pi_label, _feats)
-                                for _fid, _ftitle in _feats:
-                                    try:
-                                        _chalk = fetch_feature_from_pi(_pg, _pi_url, _fid, log=lambda m: None)
-                                        if _chalk and _chalk.scenarios:
-                                            save_chalk(_fid, _pi_label, _chalk)
-                                    except:
-                                        pass
-                            _cx.close(); _br.close(); _pw.stop()
+                            # MCP-only: no browser/REST fallback. Alert loudly, fetch nothing.
+                            mcp_unavailable_alert('Chalk', log=lambda m: None)
 
                         ss['all_pi_features'] = _all
                         if ss['selected_pi']:
@@ -591,9 +652,6 @@ with left:
                         st.rerun()
                     except Exception as _e:
                         st.error('Feature fetch failed: %s. Use Manual mode or run preload_db.py first.' % _e)
-                        for _obj in ('_cx', '_br', '_pw'):
-                            try: locals()[_obj].close() if _obj != '_pw' else locals()[_obj].stop()
-                            except: pass
 
         # When PI is selected, pull features from cache instantly
         if ss['selected_pi'] and not ss['pi_features']:
@@ -664,6 +722,7 @@ with left:
                     ss['_last_feature'] = feature_id
                     ss['logs'] = []
                     ss['result_path'] = None
+                    ss['demo_doc_path'] = ''
                     ss['exit_report'] = None
                     ss['suite_info'] = None
                     ss['cp_path'] = None
@@ -727,25 +786,25 @@ with left:
         inc_e2e = st.checkbox('E2E scenarios', value=True)
         inc_edge = st.checkbox('Edge Cases', value=True)
         headed = st.checkbox('Show Browser (debug only)', value=False, help='Keep unchecked for headless mode')
-    # ── Matrix expansion: cross Happy-Path TCs across subscriber-state / device /
-    #    channel / carrier axes to match hand-written matrix suites (e.g. 4482). ──
+    # Matrix expansion: cross Happy-Path TCs across subscriber-state / device /
+    # channel / carrier axes to match hand-written matrix suites (e.g. 4482).
     expand_matrix = st.checkbox(
-        'Full matrix expansion (state × device × channel)', value=False,
-        help='Cross eligible Happy-Path TCs across the subscriber-state (YL/YD/YP/PY), '
-             'device, channel and carrier axes so the suite matches the breadth of '
-             'hand-written matrix suites. Off = additive (one TC per scenario, default).')
-    # ── Plan matrix: fan out real TCs across device × network × SIM × rate plan,
-    #    sharing the "Max TCs when expanding" budget with the axes above. ──
+        'Full matrix expansion (state x device x channel)', value=False,
+        help='Cross eligible Happy-Path TCs across subscriber-state (YL/YD/YP/PY), '
+             'device, channel and carrier axes so the suite matches hand-written '
+             'matrix suites. Off = additive (one TC per scenario, default).')
+    # Plan matrix: fan out real TCs across device x network x SIM x rate plan,
+    # sharing the "Max TCs when expanding" budget with the axes above.
     plan_matrix = st.checkbox(
-        'Plan matrix (device × network × SIM × rate plan)', value=False,
+        'Plan matrix (device x network x SIM x rate plan)', value=False,
         help='Fan out real TCs across Phone/Tablet/Watch with the resolved retail and '
              'wholesale plan per combination, plus an ERR07 wrong-family negative per '
              'plan family. Shares the "Max TCs when expanding" budget.')
     max_expanded = st.slider('Max TCs when expanding', 30, 200, 60, step=10,
-                             help='Upper bound; axes are dropped (carrier→channel→device) '
-                                  'to stay within this cap, keeping subscriber-state last. '
-                                  '~60 ≈ manual count (state coverage); 80+ adds the device '
-                                  'axis for fuller state×device coverage (more TCs).') \
+                             help='Upper bound; axes are dropped '
+                                  '(carrier->channel->device) to stay within this cap, '
+                                  'keeping subscriber-state last. ~60 = state coverage; '
+                                  '80+ adds the device axis (more TCs).') \
         if (expand_matrix or plan_matrix) else 60
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -800,9 +859,9 @@ with right:
         )
         cli_header.markdown(_strip_html, unsafe_allow_html=True)
 
-        # ── Static log: newest-first (latest at top) ──
+        # ── Static log: newest-on-top (reversed), 13px/#cbd5e1 to match theme ──
         _static_lines = []
-        for _line in reversed(ss['logs'][-80:]):   # reversed = latest first
+        for _line in reversed(ss['logs'][-80:]):   # newest-on-top
             _t = _line.strip()
             if not _t:
                 continue
@@ -821,17 +880,16 @@ with right:
             elif '[EXCEL]' in _t:
                 _color = '#6ee7b7'; _icon = '📊'
             elif '[NMNO' in _t:
-                _color = '#fdba74'; _icon = '🗄️'
+                _color = '#22D3EE'; _icon = '🗄️'
             elif '═' in _t:
-                _static_lines.append('<div style="color:#4f46e5;font-size:11px;margin:4px 0;">%s</div>' % ('─' * 50))
+                _static_lines.append('<div style="color:#22D3EE;font-size:11px;margin:4px 0;">%s</div>' % ('─' * 50))
                 continue
             _static_lines.append(
                 '<div style="padding:2px 0;color:%s;font-size:13px;font-family:\'JetBrains Mono\',monospace;">%s %s</div>' % (
                     _color, _icon, escape(_t)))
-        _html = ('<div style="background:#08080f;border:1px solid rgba(99,102,241,0.18);'
+        _html = ('<div style="background:#020712;border:1px solid rgba(0,229,255,0.16);'
                  'border-radius:12px;padding:16px;max-height:450px;overflow-y:auto;">'
                  + ''.join(_static_lines)
-                 + '<div id="log-end"></div>'   # anchor — browser stays at bottom on rerun
                  + '</div>')
         cli_log.markdown(_html, unsafe_allow_html=True)
 
@@ -848,18 +906,18 @@ with right:
             _grounding_display = ('%s %g%%' % (_grounding_badge, _grounding_pct)) if _grounding_pct >= 0 else 'V8'
             _grounding_color = (
                 'linear-gradient(90deg,#22c55e,#10b981)' if _grounding_pct >= 80
-                else 'linear-gradient(90deg,#f59e0b,#f97316)' if _grounding_pct >= 60
+                else 'linear-gradient(90deg,#FFC857,#F59E0B)' if _grounding_pct >= 60
                 else 'linear-gradient(90deg,#ef4444,#dc2626)' if _grounding_pct >= 0
-                else 'linear-gradient(90deg,#f59e0b,#f97316)'
+                else 'linear-gradient(90deg,#FFC857,#F59E0B)'
             )
             st.markdown("""<div class='stats-row'>
-                <div class='stat-card' style='--accent: linear-gradient(90deg,#8b5cf6,#6366f1);'>
+                <div class='stat-card' style='--accent: linear-gradient(90deg,#00E5FF,#06B6D4);'>
                     <div class='icon'>&#128203;</div>
                     <div class='label'>Test Cases</div><div class='value'>%d</div></div>
-                <div class='stat-card' style='--accent: linear-gradient(90deg,#3b82f6,#06b6d4);'>
+                <div class='stat-card' style='--accent: linear-gradient(90deg,#8B5CF6,#6D28D9);'>
                     <div class='icon'>&#128221;</div>
                     <div class='label'>Steps</div><div class='value'>%d</div></div>
-                <div class='stat-card' style='--accent: linear-gradient(90deg,#22c55e,#10b981);'>
+                <div class='stat-card' style='--accent: linear-gradient(90deg,#22D3EE,#0EA5E9);'>
                     <div class='icon'>&#128196;</div>
                     <div class='label'>Data Sources</div><div class='value'>%d</div></div>
                 <div class='stat-card' style='--accent: %s;'>
@@ -890,6 +948,16 @@ with right:
                     st.warning('%s Coverage Risk: %s — see Coverage Scorecard sheet in Excel' % (_sc_badge, _sc_risk))
                 else:
                     st.success('%s Coverage Risk: %s' % (_sc_badge, _sc_risk))
+
+            # -- Live Analytics row (Coverage Scorecard + Category donut + Grounding dist) --
+            # Rendered by the active theme when it provides analytics_panels_html (Gold Command+).
+            if hasattr(_theme_mod, 'analytics_panels_html'):
+                try:
+                    _an_html = _theme_mod.analytics_panels_html(ss.get('_suite_obj'), ss.get('_scorecard'))
+                    if _an_html:
+                        st.markdown(_an_html, unsafe_allow_html=True)
+                except Exception:
+                    pass
 
             _dl_c1, _dl_c2 = st.columns([2, 1])
             with _dl_c1:
@@ -1198,7 +1266,7 @@ with right:
         st.markdown("<div class='%s'>" % cls +
             "<h4>%s</h4>" % escape(rpt.get('title', 'Completed')) +
             "<ul>" + ''.join("<li>%s</li>" % escape(item) for item in rpt.get('items', [])) + "</ul>" +
-            "<p style='color:#a78bfa;font-size:11px;margin-top:8px;'>%s</p>" % escape(rpt.get('footer', '')) +
+            "<p style='color:#67E8F9;font-size:11px;margin-top:8px;'>%s</p>" % escape(rpt.get('footer', '')) +
             "</div>", unsafe_allow_html=True)
 
 # ================================================================
@@ -1238,10 +1306,10 @@ class LiveLog:
 
     def set(self, text):
         self.header.markdown(
-            "<div style='padding:8px 16px;border-radius:8px;background:rgba(99,102,241,0.15);"
-            "border:1px solid rgba(99,102,241,0.3);margin-bottom:8px;'>"
-            "<span style='color:#a5b4fc;font-weight:700;'>▶</span> "
-            "<span style='color:#e2e8f0;font-weight:600;font-size:13px;'>%s</span></div>" % escape(text),
+            "<div style='padding:8px 16px;border-radius:8px;background:rgba(0,229,255,0.10);"
+            "border:1px solid rgba(0,229,255,0.26);margin-bottom:8px;'>"
+            "<span style='color:#67E8F9;font-weight:700;'>▶</span> "
+            "<span style='color:#E5EDF7;font-weight:600;font-size:13px;'>%s</span></div>" % escape(text),
             unsafe_allow_html=True)
 
     def _should_show(self, text):
@@ -1267,7 +1335,7 @@ class LiveLog:
         color = '#cbd5e1'  # base raised from #94a3b8 for readability
 
         if '═' in t:
-            return '<div style="color:#4f46e5;font-size:11px;margin:4px 0;">%s</div>' % ('─' * 50)
+            return '<div style="color:#22D3EE;font-size:11px;margin:4px 0;">%s</div>' % ('─' * 50)
 
         for prefix, ic in self._ICONS.items():
             if prefix in t:
@@ -1282,7 +1350,7 @@ class LiveLog:
         elif 'WARNING' in t or '⚠️' in t:
             color = '#fde68a'  # amber-200
         elif 'Block' in t and 'attempt' in t:
-            color = '#a5b4fc'  # indigo-300
+            color = '#67E8F9'  # cyan-300
         elif '[V8-ENGINE]' in t or '[V8]' in t:
             color = '#c4b5fd'  # purple-300
         elif '[PIPELINE]' in t:
@@ -1290,7 +1358,7 @@ class LiveLog:
         elif '[EXCEL]' in t:
             color = '#6ee7b7'  # emerald-300
         elif '[JIRA]' in t:
-            color = '#fdba74'  # orange-300
+            color = '#22D3EE'  # teal-300
 
         # Clean up the text - remove redundant prefixes for cleaner display
         display = t
@@ -1316,18 +1384,17 @@ class LiveLog:
 
         ss['logs'] = list(self.lines)
 
-        # Build structured HTML output — newest-first (latest at top)
+        # Build structured HTML output — newest-on-top (reversed), 13px base
         html_lines = []
-        for line in reversed(self.lines[-80:]):    # reversed = latest first
+        for line in reversed(self.lines[-80:]):    # newest-on-top
             html_lines.append(self._format_line(line))
 
         html = (
-            "<div style='background:#08080f;border:1px solid rgba(99,102,241,0.18);"
+            "<div style='background:#020712;border:1px solid rgba(0,229,255,0.16);"
             "border-radius:12px;padding:16px;max-height:450px;overflow-y:auto;"
             "font-family:\"JetBrains Mono\",\"Fira Code\",monospace;font-size:13px;'>"
             + ''.join(html_lines)
-            + "<div id='log-end'></div>"
-            "</div>"
+            + "</div>"
         )
         self.log_ph.markdown(html, unsafe_allow_html=True)
         self._ver += 1
@@ -1381,6 +1448,7 @@ if ss.get('_sync_running'):
     ss['_sync_running'] = False
     ss['logs'] = []
     ss['result_path'] = None
+    ss['demo_doc_path'] = ''
     ss['exit_report'] = None
 
     _sync_scope = ss.get('_sync_scope', 'All Iterations')
@@ -1416,18 +1484,18 @@ if ss.get('_sync_running'):
         _rest_client = ChalkRestClient(logger_fn=_sync_msg)
         if _rest_client.health_check_with_refresh():
             _rest_available = True
-            _sync_msg('✅ REST API available — using fast-path (no browser needed)')
+            _sync_msg('✅ MCP gateway available — syncing via REST(MCP)')
         else:
-            _sync_msg('⚠️ REST health check failed — falling back to browser')
+            _sync_msg('⚠️ MCP gateway health check failed — Chalk is MCP-only, no browser fallback')
     except Exception as _rest_err:
-        _sync_msg(f'⚠️ REST client unavailable ({_rest_err}) — using browser')
+        _sync_msg(f'⚠️ MCP gateway unavailable ({_rest_err}) — Chalk is MCP-only, no browser fallback')
 
     try:
         if _rest_available:
             # ── REST SYNC (no browser) ──
             # Discover PI pages via REST
             _sync_msg('Discovering PI pages via REST...')
-            _pi_pages = _rest_client.discover_pi_pages(pi_range=range(46, 60))
+            _pi_pages = _rest_client.discover_pi_pages(pi_range=range(46, 63))
             if _pi_pages:
                 _new_pi_list = [(p.label, p.url) for p in _pi_pages]
                 _old_labels = set(label for label, url in ss.get('pi_list', []))
@@ -1497,87 +1565,32 @@ if ss.get('_sync_running'):
             _sync_msg(_done_msg)
             _sync_header.markdown("<div class='cli-header'>>> Sync complete! (REST fast-path)</div>", unsafe_allow_html=True)
             ss['logs'] = _sync_lines
+            ss['_sync_completed'] = True
 
         else:
-            # ── BROWSER FALLBACK SYNC ──
-            _sync_msg('Launching browser...')
-            pw = sync_playwright().start()
-            browser = pw.chromium.launch(headless=True, channel=get_browser_channel())
-            ctx = browser.new_context(viewport={'width': 1920, 'height': 1080})
-            page = ctx.new_page()
-            _sync_msg('Browser launched')
-
-            _sync_msg('Discovering PI pages (auto-detecting new PIs)...')
-            pi_links = discover_pi_links(page, log=lambda m: None)
-            _new_pi_list = [(p.label, p.url) for p in pi_links]
-
-            _old_labels = set(label for label, url in ss.get('pi_list', []))
-            _new_labels = set(label for label, url in _new_pi_list)
-            _added_pis = _new_labels - _old_labels
-            if _added_pis:
-                _sync_msg('NEW PIs detected: %s' % ', '.join(sorted(_added_pis)))
-
-            ss['pi_list'] = _new_pi_list
-            save_pi_pages(ss['pi_list'])
-            _sync_msg('Found %d PIs%s' % (len(ss['pi_list']),
-                ' (NEW: %s)' % ', '.join(sorted(_added_pis)) if _added_pis else ''))
-
-            if _sync_scope == 'Specific Iteration(s)' and _specific_pis:
-                _pis_to_sync = [(label, url) for label, url in ss['pi_list'] if label in _specific_pis]
-                _sync_msg('Syncing %d specific PI(s): %s' % (len(_pis_to_sync), ', '.join(_specific_pis)))
-            else:
-                _pis_to_sync = ss['pi_list']
-                _sync_msg('Syncing ALL %d PIs' % len(_pis_to_sync))
-
-            _all = ss.get('all_pi_features', {})
-            _chalk_count = 0
-            _total_feats = 0
-            for _pi_idx, (_pi_label, _pi_url) in enumerate(_pis_to_sync, 1):
-                _sync_msg('[%d/%d] Scanning %s...' % (_pi_idx, len(_pis_to_sync), _pi_label))
-                _feats = discover_features_on_pi(page, _pi_url, log=lambda m: None)
-                _all[_pi_label] = _feats
-                save_features(_pi_label, _feats)
-                _total_feats += len(_feats)
-
-                _pi_chalk = 0
-                for _fi, (_fid, _ftitle) in enumerate(_feats, 1):
-                    try:
-                        _chalk = fetch_feature_from_pi(page, _pi_url, _fid, log=lambda m: None)
-                        if _chalk and _chalk.scenarios:
-                            save_chalk(_fid, _pi_label, _chalk)
-                            _chalk_count += 1
-                            _pi_chalk += 1
-                    except:
-                        pass
-                _sync_msg('[%d/%d] %s: %d features, %d with Chalk data' % (
-                    _pi_idx, len(_pis_to_sync), _pi_label, len(_feats), _pi_chalk))
-
-            ss['all_pi_features'] = _all
-            if ss['selected_pi'] and ss['selected_pi'] in _all:
-                ss['pi_features'] = _all[ss['selected_pi']]
-            else:
-                ss['selected_pi'] = None
-                ss['selected_pi_url'] = ''
-                ss['pi_features'] = []
-            ctx.close(); browser.close(); pw.stop()
-
-            _done_msg = 'DONE: %d PIs synced | %d features | %d with Chalk data' % (
-                len(_pis_to_sync), _total_feats, _chalk_count)
-            _sync_msg(_done_msg)
-            _sync_header.markdown("<div class='cli-header'>>> Sync complete!</div>", unsafe_allow_html=True)
+            # ── MCP UNAVAILABLE: hard-fail, no browser fallback ──
+            # Chalk is MCP-only. Alert loudly, do NOT launch a browser, and do NOT set
+            # ss['_sync_completed'] (that would trigger the post-block completion path).
+            _mcp_note = mcp_unavailable_alert('Chalk', log=_sync_msg)
+            _sync_header.markdown("<div class='cli-header'>>> Sync FAILED (MCP unavailable)</div>", unsafe_allow_html=True)
             ss['logs'] = _sync_lines
+            ss['exit_report'] = {
+                'status': 'FAILED',
+                'reason': 'MCP gateway unavailable — Chalk is MCP-only (no browser/REST fallback)',
+                'detail': _mcp_note,
+            }
 
     except Exception as e:
         _sync_msg('ERROR: %s' % str(e)[:200])
         _sync_header.markdown("<div class='cli-header'>>> Sync FAILED</div>", unsafe_allow_html=True)
         ss['logs'] = _sync_lines
-        for _obj_name in ('ctx', 'browser', 'pw'):
-            _obj = locals().get(_obj_name)
-            if _obj:
-                try:
-                    if _obj_name == 'pw': _obj.stop()
-                    else: _obj.close()
-                except: pass
+
+# ---- clear the Chalk 'Sync in progress' gate after completion (outside try) ----
+# The Chalk sync gate (_sync_running) is already cleared at the top of the sync block,
+# so the old st.rerun() here cleared nothing - it only discarded the finished CLI
+# output and the completion banner, dropping the user back to a blank home screen.
+# The completion summary now lives in ss['exit_report'] and renders normally.
+ss.pop('_sync_completed', False)
 
 # ================================================================
 # JIRA SYNC EXECUTION
@@ -1587,6 +1600,7 @@ if ss.get('_jira_sync_running'):
     ss['logs'] = []
     _jsync_t0 = time.time()
     ss['result_path'] = None
+    ss['demo_doc_path'] = ''
     ss['exit_report'] = None
 
     _jira_features = ss.get('_jira_sync_features', [])
@@ -1614,11 +1628,11 @@ if ss.get('_jira_sync_running'):
         _jira_rc = JiraRestClient(logger_fn=_jsync_msg)
         if _jira_rc.health_check_with_refresh():
             _jira_rest_available = True
-            _jsync_msg('✅ Jira REST API available — using fast-path (no browser needed)')
+            _jsync_msg('✅ MCP gateway available — syncing Jira via REST(MCP)')
         else:
-            _jsync_msg('⚠️ Jira REST health check failed — falling back to browser')
+            _jsync_msg('⚠️ MCP gateway health check failed — Jira is MCP-only, no browser fallback')
     except Exception as _jira_rest_err:
-        _jsync_msg(f'⚠️ Jira REST client unavailable ({_jira_rest_err}) — using browser')
+        _jsync_msg(f'⚠️ MCP gateway unavailable ({_jira_rest_err}) — Jira is MCP-only, no browser fallback')
 
     try:
         _jira_ok = 0
@@ -1642,73 +1656,36 @@ if ss.get('_jira_sync_running'):
                         _jsync_msg('[%d/%d] ✅ %s (REST)' % (_ji, _jira_total, _jfid))
                         _jira_ok += 1
                     else:
-                        _jsync_msg('[%d/%d] ⚠️ %s: REST returned empty — queued for browser' % (_ji, _jira_total, _jfid))
+                        # MCP-only: no browser fallback. Count as a failure.
+                        _jsync_msg('[%d/%d] ❌ %s: REST(MCP) returned empty — Jira is MCP-only, no browser fallback' % (_ji, _jira_total, _jfid))
                         _jira_rest_failures.append((_jfid, _jtitle))
-                except Exception as _je:
-                    _jsync_msg('[%d/%d] ⚠️ %s: REST failed — queued for browser' % (_ji, _jira_total, _jfid))
-                    _jira_rest_failures.append((_jfid, _jtitle))
-
-            # Browser fallback for REST failures
-            if _jira_rest_failures:
-                _jsync_msg(f'Launching browser for {len(_jira_rest_failures)} REST failures...')
-                pw = sync_playwright().start()
-                browser = pw.chromium.launch(headless=True, channel=get_browser_channel())
-                ctx = browser.new_context(viewport={'width': 1920, 'height': 1080})
-                page = ctx.new_page()
-
-                for _ji2, (_jfid2, _jtitle2) in enumerate(_jira_rest_failures, 1):
-                    try:
-                        _jsync_msg('[%d/%d] Fetching Jira (browser): %s' % (_ji2, len(_jira_rest_failures), _jfid2))
-                        jira = fetch_jira_issue(page, _jfid2, log=lambda m: None)
-                        save_jira(jira)
-                        if jira and jira.summary and (not _jtitle2 or _jtitle2 in ('(no title)', '(no title found on page)')):
-                            save_features(ss.get('selected_pi') or '', [(_jfid2, jira.summary[:120])])
-                            ss['all_pi_features'] = None
-                            _cached_load_all_features.clear()
-                        _jsync_msg('[%d/%d] ✅ %s (browser)' % (_ji2, len(_jira_rest_failures), _jfid2))
-                        _jira_ok += 1
-                    except Exception as _je2:
-                        _jsync_msg('[%d/%d] ❌ %s: FAILED — %s' % (_ji2, len(_jira_rest_failures), _jfid2, str(_je2)[:80]))
                         _jira_fail += 1
-
-                ctx.close(); browser.close(); pw.stop()
-            else:
-                _jira_fail = 0
-
-            _method = 'REST' if not _jira_rest_failures else 'REST + Browser'
-        else:
-            # ── BROWSER-ONLY SYNC ──
-            _jsync_msg('Launching browser for Jira fetch...')
-            pw = sync_playwright().start()
-            browser = pw.chromium.launch(headless=True, channel=get_browser_channel())
-            ctx = browser.new_context(viewport={'width': 1920, 'height': 1080})
-            page = ctx.new_page()
-            _jsync_msg('Browser launched')
-
-            for _ji, (_jfid, _jtitle) in enumerate(_jira_features, 1):
-                try:
-                    _jsync_msg('[%d/%d] Fetching Jira: %s — %s' % (_ji, _jira_total, _jfid, _jtitle[:40]))
-                    jira = fetch_jira_issue(page, _jfid, log=lambda m: None)
-                    save_jira(jira)
-                    if jira and jira.summary and (not _jtitle or _jtitle in ('(no title)', '(no title found on page)')):
-                        save_features(ss.get('selected_pi') or '', [(_jfid, jira.summary[:120])])
-                        ss['all_pi_features'] = None
-                        _cached_load_all_features.clear()
-                    _jsync_msg('[%d/%d] ✅ %s' % (_ji, _jira_total, _jfid))
-                    _jira_ok += 1
                 except Exception as _je:
-                    _jsync_msg('[%d/%d] ❌ %s: FAILED — %s' % (_ji, _jira_total, _jfid, str(_je)[:80]))
+                    _jsync_msg('[%d/%d] ❌ %s: REST(MCP) failed — Jira is MCP-only, no browser fallback' % (_ji, _jira_total, _jfid))
+                    _jira_rest_failures.append((_jfid, _jtitle))
                     _jira_fail += 1
 
-            ctx.close(); browser.close(); pw.stop()
-            _method = 'Browser'
+            # MCP-only: REST(MCP) failures are NOT retried via browser. If any occurred,
+            # alert loudly once; they have already been counted as failures above.
+            if _jira_rest_failures:
+                mcp_unavailable_alert('Jira', log=_jsync_msg)
+
+            _method = 'REST(MCP)'
+        else:
+            # ── MCP UNAVAILABLE: hard-fail, no browser fallback ──
+            # Jira is MCP-only. Alert loudly, launch NO browser, mark every feature failed.
+            mcp_unavailable_alert('Jira', log=_jsync_msg)
+            for _ji, (_jfid, _jtitle) in enumerate(_jira_features, 1):
+                _jsync_msg('[%d/%d] ❌ %s: MCP unavailable — Jira is MCP-only, no browser fallback' % (_ji, _jira_total, _jfid))
+                _jira_fail += 1
+            _method = 'MCP unavailable'
 
         _jsync_msg('JIRA SYNC COMPLETE (%s): %d/%d succeeded | %d failed' % (_method, _jira_ok, _jira_total, _jira_fail))
         _jsync_header.markdown("<div class='cli-header'>>> Jira sync complete! %d/%d features (%s)</div>" % (_jira_ok, _jira_total, _method), unsafe_allow_html=True)
         ss['logs'] = _jsync_lines
-        # Persistent exit report - the live _jsync_log writes are placeholder-bound and vanish on
+        # Persistent exit report. The live _jsync_log writes are placeholder-bound and vanish on
         # the next render, so the summary is stored in session state and rendered by the Exit
-        # Report block instead of being lost.
+        # Report block instead of being lost the moment the script re-runs.
         _jel = int(time.time() - _jsync_t0)
         _jitems = ['Method: %s' % _method,
                    'Succeeded: %d / %d' % (_jira_ok, _jira_total),
@@ -1725,18 +1702,19 @@ if ss.get('_jira_sync_running'):
             'footer': 'Finished %s | Duration: %dm %ds | %s' % (
                 datetime.now().strftime('%Y-%m-%d %H:%M:%S'), _jel // 60, _jel % 60, _method),
         }
+        ss['_jira_sync_completed'] = True
 
     except Exception as e:
         _jsync_msg('ERROR: %s' % str(e)[:200])
         _jsync_header.markdown("<div class='cli-header'>>> Jira Sync FAILED</div>", unsafe_allow_html=True)
         ss['logs'] = _jsync_lines
-        for _obj_name in ('ctx', 'browser', 'pw'):
-            _obj = locals().get(_obj_name)
-            if _obj:
-                try:
-                    if _obj_name == 'pw': _obj.stop()
-                    else: _obj.close()
-                except: pass
+
+# ---- clear the Jira 'Sync in progress' gate after completion (outside try) ----
+# The Jira sync gate (_jira_sync_running) is already cleared at the top of the sync block,
+# so the old st.rerun() here cleared nothing - it only discarded the finished CLI
+# output and the completion banner, dropping the user back to a blank home screen.
+# The completion summary now lives in ss['exit_report'] and renders normally.
+ss.pop('_jira_sync_completed', False)
 
 # ================================================================
 # MAIN EXECUTION — V8 Data-First Engine
@@ -1764,6 +1742,7 @@ if run_btn:
         feature_id = _features_to_run[0]
         ss['logs'] = []
         ss['result_path'] = None
+        ss['demo_doc_path'] = ''
         ss['cp_path'] = None
         ss['exit_report'] = None
         ss['batch_results'] = []
@@ -1803,21 +1782,21 @@ if run_btn:
                 except Exception:
                     pass
 
-                # Open browser only if REST is unavailable (cache miss scenario)
+                # MCP-only: Chalk/Jira have NO browser fallback. page stays None always.
                 pw = None
                 browser = None
                 context = None
                 page = None
                 if not _rest_ok:
-                    logger.set('REST unavailable — launching browser...')
-                    pw = sync_playwright().start()
-                    browser = pw.chromium.launch(headless=not headed, channel=get_browser_channel())
-                    context = browser.new_context(accept_downloads=True, viewport={'width': 1920, 'height': 1080})
-                    page = context.new_page()
-                    exit_items.append('Browser launched (REST unavailable)')
+                    # MCP gateway unavailable — alert loudly and fail the run. Do NOT launch
+                    # a browser. The pipeline blocks (block_jira_fetch / block_chalk_live) will
+                    # also raise McpUnavailable if reached, but we fail fast here first.
+                    _mcp_note = mcp_unavailable_alert('Chalk/Jira', log=logger.set)
+                    exit_items.append('❌ MCP gateway unavailable — Chalk/Jira are MCP-only (no browser fallback)')
+                    raise McpUnavailable(_mcp_note)
                 else:
-                    logger.set('REST available — browser-free mode')
-                    exit_items.append('REST mode (no browser)')
+                    logger.set('MCP gateway available — syncing via REST(MCP)')
+                    exit_items.append('MCP(REST) mode (no browser)')
 
                 # ── BATCH LOOP ──
                 _batch_count = len(_features_to_run)
@@ -2018,6 +1997,18 @@ if run_btn:
                     logger.set('%sBlock 6: Generating output %s...' % (_bp, feature_id))
                     output = pipe.run('Output_%s' % feature_id,
                         lambda: block_generate_output(suite, feature_id, ss.get('selected_pi') or 'Manual', 'Data-First', jira=jira, chalk=chalk, log=logger))
+
+                    if output.get('skipped') or not output.get('out_path'):
+                        # 0 TCs: block_generate_output wrote no files — report, don't offer downloads.
+                        _skip_msg = '%s: 0 test cases generated (%s) — no files written' % (
+                            feature_id, output.get('reason') or 'no testable items')
+                        st.warning(_skip_msg)
+                        ss['result_path'] = ''
+                        ss['demo_doc_path'] = ''
+                        _batch_skipped.append((feature_id, _skip_msg))
+                        exit_items.append('%s%s: ⚠️ SKIPPED — 0 TCs (%s)' % (
+                            _bp, feature_id, output.get('reason') or 'no testable items'))
+                        continue
 
                     out_path = output['out_path']
                     _data_source_count = len(suite.data_inventory.sources) if suite.data_inventory else 0
@@ -2222,11 +2213,18 @@ if run_btn:
 # SIDEBAR — Generation History
 # ================================================================
 with st.sidebar:
+    # -- Live theme picker -- switches palette on selection --
+    _theme_opts = list(_TSG_THEMES.keys())
+    _cur_theme = st.session_state.get('tsg_theme', 'Gold Command+')
+    st.radio('🎨 Theme', _theme_opts,
+             index=_theme_opts.index(_cur_theme) if _cur_theme in _theme_opts else 0,
+             key='tsg_theme')
+
     st.markdown("""<div style='padding:12px;border-radius:12px;
-        background:rgba(26,35,126,0.3);border:1px solid rgba(99,102,241,0.3);margin-bottom:12px;'>
-        <div style='font-weight:800;font-size:14px;color:#818cf8;'>TSG V8.0</div>
-        <div style='font-size:11px;color:#94a3b8;margin-top:4px;'>Data-First Engine</div>
-        <div style='font-size:10px;color:#64748b;margin-top:2px;'>Dimensions → Combinations → TCs</div>
+        background:rgba(15,23,42,0.6);border:1px solid rgba(0,229,255,0.28);margin-bottom:12px;'>
+        <div style='font-weight:800;font-size:14px;color:#22D3EE;'>TSG V9.0</div>
+        <div style='font-size:11px;color:#94A3B8;margin-top:4px;'>Data-First Engine</div>
+        <div style='font-size:10px;color:#64748B;margin-top:2px;'>Dimensions → Combinations → TCs</div>
     </div>""", unsafe_allow_html=True)
 
     _hist = get_history()
@@ -2248,7 +2246,7 @@ with st.sidebar:
 
     # DB Stats
     st.markdown("---")
-    _stats = get_db_stats()
+    _t_sb = time.perf_counter(); _stats = get_db_stats(); _sect("sidebar get_db_stats", _t_sb)
     st.markdown("**Database**")
     st.caption('Features: %d' % _stats.get('feature_count', 0))
     st.caption('Chalk cached: %d' % get_chalk_cache_count())
@@ -2357,3 +2355,5 @@ with st.sidebar:
     with _col4:
         if st.button('🔄 NBOP', key='reload_nbop_ui', help='Re-crawl NBOP portal'):
             st.toast('NBOP UI re-crawl would be triggered here.')
+
+_run_done()

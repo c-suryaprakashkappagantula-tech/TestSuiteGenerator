@@ -27,7 +27,8 @@ for _cache_dir in Path(__file__).parent.rglob('__pycache__'):
         pass
 
 import streamlit as st
-from playwright.sync_api import sync_playwright
+# MCP-only hardening (FEAT-002): Chalk/Jira no longer have a Playwright browser fallback.
+# The `from playwright.sync_api import sync_playwright` import was removed with the browser paths.
 
 from modules.config import (ROOT, OUTPUTS, CHECKPOINTS, ATTACHMENTS, INPUTS,
                              BROWSER_CHANNEL, BROWSER_HEADLESS, ts_short,
@@ -49,6 +50,13 @@ from modules.database import (init_db, save_pi_pages, load_pi_pages, save_featur
                                log_generation_db, get_history_db, get_db_stats, is_data_stale,
                                save_test_suite, load_latest_suite,
                                get_all_suite_history, save_artifact_hash, check_staleness)
+
+# MCP-only hardening (FEAT-002): loud hard-fail helper. Chalk/Jira are MCP-only; when the
+# MCP gateway is unavailable there is NO browser/REST fallback — we alert and fail loudly.
+_repo_root = str(Path(__file__).parent.parent)
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
+from shared.mcp_gateway.alerts import mcp_unavailable_alert, McpUnavailable
 
 # ================================================================
 # WINDOWS PLATFORM FIXES
@@ -120,6 +128,21 @@ st.markdown("""<style>
     border-radius: 8px !important;
 }
 </style>""", unsafe_allow_html=True)
+
+# ================================================================
+# MCP GATEWAY HEALTH CHECK (one-time, shown once per session)
+# ================================================================
+if not st.session_state.get('_mcp_check_done'):
+    st.session_state['_mcp_check_done'] = True
+    _mcp_cfg = Path.home() / '.kiro' / 'settings' / 'mcp.json'
+    if not _mcp_cfg.exists():
+        st.warning(
+            '⚠️ **MCP gateway not configured** — Jira/Chalk access is **MCP-only**. There is no '
+            'browser/REST fallback, so Sync and generation will fail until MCP is reachable.  \n'
+            'Run `python -m shared.mcp_gateway setup` once to configure your personal PAT and LiteLLM key, '
+            'then check `python -m shared.mcp_gateway status`.  \n'
+            'Config file expected at: `%s`' % _mcp_cfg
+        )
 
 # ================================================================
 # DEFAULT PI LIST
@@ -593,23 +616,8 @@ with left:
                                     except:
                                         pass
                         else:
-                            # Browser fallback
-                            _pw = sync_playwright().start()
-                            _br = _pw.chromium.launch(headless=True, channel=get_browser_channel())
-                            _cx = _br.new_context(viewport={'width': 1920, 'height': 1080})
-                            _pg = _cx.new_page()
-                            for _pi_label, _pi_url in ss['pi_list']:
-                                _feats = discover_features_on_pi(_pg, _pi_url, log=lambda m: None)
-                                _all[_pi_label] = _feats
-                                save_features(_pi_label, _feats)
-                                for _fid, _ftitle in _feats:
-                                    try:
-                                        _chalk = fetch_feature_from_pi(_pg, _pi_url, _fid, log=lambda m: None)
-                                        if _chalk and _chalk.scenarios:
-                                            save_chalk(_fid, _pi_label, _chalk)
-                                    except:
-                                        pass
-                            _cx.close(); _br.close(); _pw.stop()
+                            # MCP-only: no browser/REST fallback. Alert loudly, fetch nothing.
+                            mcp_unavailable_alert('Chalk', log=lambda m: None)
 
                         ss['all_pi_features'] = _all
                         if ss['selected_pi']:
@@ -617,9 +625,6 @@ with left:
                         st.rerun()
                     except Exception as _e:
                         st.error('Feature fetch failed: %s. Use Manual mode or run preload_db.py first.' % _e)
-                        for _obj in ('_cx', '_br', '_pw'):
-                            try: locals()[_obj].close() if _obj != '_pw' else locals()[_obj].stop()
-                            except: pass
 
         # When PI is selected, pull features from cache instantly
         if ss['selected_pi'] and not ss['pi_features']:
@@ -1444,11 +1449,11 @@ if ss.get('_sync_running'):
         _rest_client = ChalkRestClient(logger_fn=_sync_msg)
         if _rest_client.health_check_with_refresh():
             _rest_available = True
-            _sync_msg('✅ REST API available — using fast-path (no browser needed)')
+            _sync_msg('✅ MCP gateway available — syncing via REST(MCP)')
         else:
-            _sync_msg('⚠️ REST health check failed — falling back to browser')
+            _sync_msg('⚠️ MCP gateway health check failed — Chalk is MCP-only, no browser fallback')
     except Exception as _rest_err:
-        _sync_msg(f'⚠️ REST client unavailable ({_rest_err}) — using browser')
+        _sync_msg(f'⚠️ MCP gateway unavailable ({_rest_err}) — Chalk is MCP-only, no browser fallback')
 
     try:
         if _rest_available:
@@ -1528,93 +1533,35 @@ if ss.get('_sync_running'):
             ss['_sync_completed'] = True
 
         else:
-            # ── BROWSER FALLBACK SYNC ──
-            _sync_msg('Launching browser...')
-            pw = sync_playwright().start()
-            browser = pw.chromium.launch(headless=True, channel=get_browser_channel())
-            ctx = browser.new_context(viewport={'width': 1920, 'height': 1080})
-            page = ctx.new_page()
-            _sync_msg('Browser launched')
-
-            _sync_msg('Discovering PI pages (auto-detecting new PIs)...')
-            pi_links = discover_pi_links(page, log=lambda m: None)
-            _new_pi_list = [(p.label, p.url) for p in pi_links]
-
-            _old_labels = set(label for label, url in ss.get('pi_list', []))
-            _new_labels = set(label for label, url in _new_pi_list)
-            _added_pis = _new_labels - _old_labels
-            if _added_pis:
-                _sync_msg('NEW PIs detected: %s' % ', '.join(sorted(_added_pis)))
-
-            ss['pi_list'] = _new_pi_list
-            save_pi_pages(ss['pi_list'])
-            _sync_msg('Found %d PIs%s' % (len(ss['pi_list']),
-                ' (NEW: %s)' % ', '.join(sorted(_added_pis)) if _added_pis else ''))
-
-            if _sync_scope == 'Specific Iteration(s)' and _specific_pis:
-                _pis_to_sync = [(label, url) for label, url in ss['pi_list'] if label in _specific_pis]
-                _sync_msg('Syncing %d specific PI(s): %s' % (len(_pis_to_sync), ', '.join(_specific_pis)))
-            else:
-                _pis_to_sync = ss['pi_list']
-                _sync_msg('Syncing ALL %d PIs' % len(_pis_to_sync))
-
-            _all = ss.get('all_pi_features', {})
-            _chalk_count = 0
-            _total_feats = 0
-            for _pi_idx, (_pi_label, _pi_url) in enumerate(_pis_to_sync, 1):
-                _sync_msg('[%d/%d] Scanning %s...' % (_pi_idx, len(_pis_to_sync), _pi_label))
-                _feats = discover_features_on_pi(page, _pi_url, log=lambda m: None)
-                _all[_pi_label] = _feats
-                save_features(_pi_label, _feats)
-                _total_feats += len(_feats)
-
-                _pi_chalk = 0
-                for _fi, (_fid, _ftitle) in enumerate(_feats, 1):
-                    try:
-                        _chalk = fetch_feature_from_pi(page, _pi_url, _fid, log=lambda m: None)
-                        if _chalk and _chalk.scenarios:
-                            save_chalk(_fid, _pi_label, _chalk)
-                            _chalk_count += 1
-                            _pi_chalk += 1
-                    except:
-                        pass
-                _sync_msg('[%d/%d] %s: %d features, %d with Chalk data' % (
-                    _pi_idx, len(_pis_to_sync), _pi_label, len(_feats), _pi_chalk))
-
-            ss['all_pi_features'] = _all
-            if ss['selected_pi'] and ss['selected_pi'] in _all:
-                ss['pi_features'] = _all[ss['selected_pi']]
-            else:
-                ss['selected_pi'] = None
-                ss['selected_pi_url'] = ''
-                ss['pi_features'] = []
-            ctx.close(); browser.close(); pw.stop()
-
-            _done_msg = 'DONE: %d PIs synced | %d features | %d with Chalk data' % (
-                len(_pis_to_sync), _total_feats, _chalk_count)
-            _sync_msg(_done_msg)
-            _sync_header.markdown("<div class='cli-header'>>> Sync complete!</div>", unsafe_allow_html=True)
+            # ── MCP UNAVAILABLE: hard-fail, no browser fallback ──
+            # Chalk is MCP-only. Alert loudly, do NOT launch a browser, and do NOT set
+            # ss['_sync_completed'] (that would trigger the post-block rerun/work path).
+            _mcp_note = mcp_unavailable_alert('Chalk', log=_sync_msg)
+            _sync_header.markdown("<div class='cli-header'>>> Sync FAILED (MCP unavailable)</div>", unsafe_allow_html=True)
             ss['logs'] = _sync_lines
-            ss['_sync_completed'] = True
+            ss['exit_report'] = {
+                'status': 'FAILED',
+                'reason': 'MCP gateway unavailable — Chalk is MCP-only (no browser/REST fallback)',
+                'detail': _mcp_note,
+            }
 
     except Exception as e:
         _sync_msg('ERROR: %s' % str(e)[:200])
         _sync_header.markdown("<div class='cli-header'>>> Sync FAILED</div>", unsafe_allow_html=True)
         ss['logs'] = _sync_lines
-        for _obj_name in ('ctx', 'browser', 'pw'):
-            _obj = locals().get(_obj_name)
-            if _obj:
-                try:
-                    if _obj_name == 'pw': _obj.stop()
-                    else: _obj.close()
-                except: pass
 
 # ---- clear the Chalk 'Sync in progress' gate after completion (outside try) ----
-# The Chalk sync gate (_sync_running) is already cleared at the top of the sync block,
-# so the old st.rerun() here cleared nothing - it only discarded the finished CLI
-# output and the completion banner, dropping the user back to a blank home screen.
-# The completion summary now lives in ss['exit_report'] and renders normally.
-ss.pop('_sync_completed', False)
+# The Chalk sync gate (_sync_running) is cleared at the top of the sync block, but
+# that happens AFTER Step 2 already rendered the "blocked" banner near the top of
+# this same script run — so without a rerun the banner stays stuck on screen even
+# though the sync (incl. the REST fast-path) has finished. We now trigger exactly
+# ONE rerun here so the top re-evaluates _sync_in_progress (now False) and unblocks
+# Step 2. This is safe because the completion summary is persisted in ss['logs'] /
+# ss['exit_report'] and re-renders on the next run (the earlier blank-screen bug was
+# caused by rerunning BEFORE that summary was saved).
+_sync_just_completed = ss.pop('_sync_completed', False)
+if _sync_just_completed:
+    st.rerun()
 
 # ================================================================
 # JIRA SYNC EXECUTION
@@ -1652,11 +1599,11 @@ if ss.get('_jira_sync_running'):
         _jira_rc = JiraRestClient(logger_fn=_jsync_msg)
         if _jira_rc.health_check_with_refresh():
             _jira_rest_available = True
-            _jsync_msg('✅ Jira REST API available — using fast-path (no browser needed)')
+            _jsync_msg('✅ MCP gateway available — syncing Jira via REST(MCP)')
         else:
-            _jsync_msg('⚠️ Jira REST health check failed — falling back to browser')
+            _jsync_msg('⚠️ MCP gateway health check failed — Jira is MCP-only, no browser fallback')
     except Exception as _jira_rest_err:
-        _jsync_msg(f'⚠️ Jira REST client unavailable ({_jira_rest_err}) — using browser')
+        _jsync_msg(f'⚠️ MCP gateway unavailable ({_jira_rest_err}) — Jira is MCP-only, no browser fallback')
 
     try:
         _jira_ok = 0
@@ -1680,66 +1627,29 @@ if ss.get('_jira_sync_running'):
                         _jsync_msg('[%d/%d] ✅ %s (REST)' % (_ji, _jira_total, _jfid))
                         _jira_ok += 1
                     else:
-                        _jsync_msg('[%d/%d] ⚠️ %s: REST returned empty — queued for browser' % (_ji, _jira_total, _jfid))
+                        # MCP-only: no browser fallback. Count as a failure.
+                        _jsync_msg('[%d/%d] ❌ %s: REST(MCP) returned empty — Jira is MCP-only, no browser fallback' % (_ji, _jira_total, _jfid))
                         _jira_rest_failures.append((_jfid, _jtitle))
-                except Exception as _je:
-                    _jsync_msg('[%d/%d] ⚠️ %s: REST failed — queued for browser' % (_ji, _jira_total, _jfid))
-                    _jira_rest_failures.append((_jfid, _jtitle))
-
-            # Browser fallback for REST failures
-            if _jira_rest_failures:
-                _jsync_msg(f'Launching browser for {len(_jira_rest_failures)} REST failures...')
-                pw = sync_playwright().start()
-                browser = pw.chromium.launch(headless=True, channel=get_browser_channel())
-                ctx = browser.new_context(viewport={'width': 1920, 'height': 1080})
-                page = ctx.new_page()
-
-                for _ji2, (_jfid2, _jtitle2) in enumerate(_jira_rest_failures, 1):
-                    try:
-                        _jsync_msg('[%d/%d] Fetching Jira (browser): %s' % (_ji2, len(_jira_rest_failures), _jfid2))
-                        jira = fetch_jira_issue(page, _jfid2, log=lambda m: None)
-                        save_jira(jira)
-                        if jira and jira.summary and (not _jtitle2 or _jtitle2 in ('(no title)', '(no title found on page)')):
-                            save_features(ss.get('selected_pi') or '', [(_jfid2, jira.summary[:120])])
-                            ss['all_pi_features'] = None
-                            _cached_load_all_features.clear()
-                        _jsync_msg('[%d/%d] ✅ %s (browser)' % (_ji2, len(_jira_rest_failures), _jfid2))
-                        _jira_ok += 1
-                    except Exception as _je2:
-                        _jsync_msg('[%d/%d] ❌ %s: FAILED — %s' % (_ji2, len(_jira_rest_failures), _jfid2, str(_je2)[:80]))
                         _jira_fail += 1
-
-                ctx.close(); browser.close(); pw.stop()
-            else:
-                _jira_fail = 0
-
-            _method = 'REST' if not _jira_rest_failures else 'REST + Browser'
-        else:
-            # ── BROWSER-ONLY SYNC ──
-            _jsync_msg('Launching browser for Jira fetch...')
-            pw = sync_playwright().start()
-            browser = pw.chromium.launch(headless=True, channel=get_browser_channel())
-            ctx = browser.new_context(viewport={'width': 1920, 'height': 1080})
-            page = ctx.new_page()
-            _jsync_msg('Browser launched')
-
-            for _ji, (_jfid, _jtitle) in enumerate(_jira_features, 1):
-                try:
-                    _jsync_msg('[%d/%d] Fetching Jira: %s — %s' % (_ji, _jira_total, _jfid, _jtitle[:40]))
-                    jira = fetch_jira_issue(page, _jfid, log=lambda m: None)
-                    save_jira(jira)
-                    if jira and jira.summary and (not _jtitle or _jtitle in ('(no title)', '(no title found on page)')):
-                        save_features(ss.get('selected_pi') or '', [(_jfid, jira.summary[:120])])
-                        ss['all_pi_features'] = None
-                        _cached_load_all_features.clear()
-                    _jsync_msg('[%d/%d] ✅ %s' % (_ji, _jira_total, _jfid))
-                    _jira_ok += 1
                 except Exception as _je:
-                    _jsync_msg('[%d/%d] ❌ %s: FAILED — %s' % (_ji, _jira_total, _jfid, str(_je)[:80]))
+                    _jsync_msg('[%d/%d] ❌ %s: REST(MCP) failed — Jira is MCP-only, no browser fallback' % (_ji, _jira_total, _jfid))
+                    _jira_rest_failures.append((_jfid, _jtitle))
                     _jira_fail += 1
 
-            ctx.close(); browser.close(); pw.stop()
-            _method = 'Browser'
+            # MCP-only: REST(MCP) failures are NOT retried via browser. If any occurred,
+            # alert loudly once; they have already been counted as failures above.
+            if _jira_rest_failures:
+                mcp_unavailable_alert('Jira', log=_jsync_msg)
+
+            _method = 'REST(MCP)'
+        else:
+            # ── MCP UNAVAILABLE: hard-fail, no browser fallback ──
+            # Jira is MCP-only. Alert loudly, launch NO browser, mark every feature failed.
+            mcp_unavailable_alert('Jira', log=_jsync_msg)
+            for _ji, (_jfid, _jtitle) in enumerate(_jira_features, 1):
+                _jsync_msg('[%d/%d] ❌ %s: MCP unavailable — Jira is MCP-only, no browser fallback' % (_ji, _jira_total, _jfid))
+                _jira_fail += 1
+            _method = 'MCP unavailable'
 
         _jsync_msg('JIRA SYNC COMPLETE (%s): %d/%d succeeded | %d failed' % (_method, _jira_ok, _jira_total, _jira_fail))
         _jsync_header.markdown("<div class='cli-header'>>> Jira sync complete! %d/%d features (%s)</div>" % (_jira_ok, _jira_total, _method), unsafe_allow_html=True)
@@ -1769,13 +1679,6 @@ if ss.get('_jira_sync_running'):
         _jsync_msg('ERROR: %s' % str(e)[:200])
         _jsync_header.markdown("<div class='cli-header'>>> Jira Sync FAILED</div>", unsafe_allow_html=True)
         ss['logs'] = _jsync_lines
-        for _obj_name in ('ctx', 'browser', 'pw'):
-            _obj = locals().get(_obj_name)
-            if _obj:
-                try:
-                    if _obj_name == 'pw': _obj.stop()
-                    else: _obj.close()
-                except: pass
 
 # ---- clear the Jira 'Sync in progress' gate after completion (outside try) ----
 # The Jira sync gate (_jira_sync_running) is already cleared at the top of the sync block,
@@ -1850,21 +1753,21 @@ if run_btn:
                 except Exception:
                     pass
 
-                # Open browser only if REST is unavailable (cache miss scenario)
+                # MCP-only: Chalk/Jira have NO browser fallback. page stays None always.
                 pw = None
                 browser = None
                 context = None
                 page = None
                 if not _rest_ok:
-                    logger.set('REST unavailable — launching browser...')
-                    pw = sync_playwright().start()
-                    browser = pw.chromium.launch(headless=not headed, channel=get_browser_channel())
-                    context = browser.new_context(accept_downloads=True, viewport={'width': 1920, 'height': 1080})
-                    page = context.new_page()
-                    exit_items.append('Browser launched (REST unavailable)')
+                    # MCP gateway unavailable — alert loudly and fail the run. Do NOT launch
+                    # a browser. The pipeline blocks (block_jira_fetch / block_chalk_live) will
+                    # also raise McpUnavailable if reached, but we fail fast here first.
+                    _mcp_note = mcp_unavailable_alert('Chalk/Jira', log=logger.set)
+                    exit_items.append('❌ MCP gateway unavailable — Chalk/Jira are MCP-only (no browser fallback)')
+                    raise McpUnavailable(_mcp_note)
                 else:
-                    logger.set('REST available — browser-free mode')
-                    exit_items.append('REST mode (no browser)')
+                    logger.set('MCP gateway available — syncing via REST(MCP)')
+                    exit_items.append('MCP(REST) mode (no browser)')
 
                 # ── BATCH LOOP ──
                 _batch_count = len(_features_to_run)

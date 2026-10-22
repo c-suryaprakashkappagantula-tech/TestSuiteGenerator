@@ -211,6 +211,8 @@ def enrich_issue_post_fetch(issue: 'JiraIssue', log=print) -> 'JiraIssue':
 
 def fetch_jira_issue(page, issue_key: str, log=print) -> JiraIssue:
     """Fetch any Jira issue. Returns populated JiraIssue dataclass."""
+    from rest_clients._legacy_guard import require_legacy
+    require_legacy('TSG browser Jira fetch (%s)' % issue_key)
     issue = JiraIssue(key=issue_key)
 
     log(f'[JIRA] Navigating to {issue_key}...')
@@ -523,6 +525,9 @@ def validate_jira_issue(issue: JiraIssue, log=print) -> List[str]:
 def download_attachments(page, issue: JiraIssue, log=print) -> List[Path]:
     """Download all attachments using browser session. Returns list of local paths.
     Point 2: Uses page.request API for reliable downloads instead of window.location redirect."""
+    from rest_clients._legacy_guard import legacy_blocked
+    if legacy_blocked('JIRA', log):
+        return []
     paths = []
     for att in issue.attachments:
         try:
@@ -648,7 +653,7 @@ def fetch_jira_issue_rest(issue_key: str, log=print) -> Optional[JiraIssue]:
         log(f'[JIRA-REST] ✅ {issue.key} fetched via REST ({len(issue.subtasks)} subtasks, {len(issue.linked_issues)} links)')
         return issue
     except Exception as e:
-        log(f'[JIRA-REST] Failed: {e} — will use browser')
+        log(f'[JIRA-REST] Failed: {e} — MCP unavailable — Jira is MCP-only')
         return None
 
 
