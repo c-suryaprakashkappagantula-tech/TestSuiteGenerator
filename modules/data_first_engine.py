@@ -65,6 +65,39 @@ def _attach_degraded(suite, log: Callable = print) -> None:
         pass
 
 
+def _strict_obligation_recheck(suite, strict_override=None, log: Callable = print) -> None:
+    """R5 — flag-gated post-gate obligation re-check.
+
+    When the strict flag is ON: drop any kept TC that still declares an obligation no
+    step asserts (belt-and-suspenders after R2's cap) and record the reason on the
+    EXISTING coverage_audit dict (no new suite field). Entirely skipped when OFF.
+    """
+    try:
+        from .config import strict_assertion_gate_enabled
+        if not strict_assertion_gate_enabled(strict_override):
+            return
+        from .grounding_scorer import assertion_coverage
+        kept = []
+        blocked = []
+        for tc in (suite.test_cases or []):
+            covered, declared = assertion_coverage(tc)
+            if declared > 0 and covered < declared:
+                blocked.append(tc)
+            else:
+                kept.append(tc)
+        if blocked:
+            suite.test_cases = kept
+            reason = ('%d TC(s) dropped: declared obligation(s) with no asserting step'
+                      % len(blocked))
+            try:
+                suite.coverage_audit['strict_block_reason'] = reason
+            except Exception:
+                pass
+            log('[V8-ENGINE] STRICT GATE: %s' % reason)
+    except Exception as _exc:
+        _record_degraded('strict_obligation_recheck', _exc)
+
+
 # ================================================================
 # MAIN ENTRY POINT
 # ================================================================
@@ -98,6 +131,8 @@ def build_test_suite_v8(
     """
     parsed_docs = parsed_docs or []
     options = options or {}
+    # R2/R5 — resolve the strict-assertion-gate override ONCE (the only read of this key).
+    _strict_override = options.get('strict_assertion_gate')
 
     feature_id = jira.key if jira else ''
     feature_title = jira.summary if jira else ''
@@ -453,7 +488,10 @@ def build_test_suite_v8(
     from .grounding_scorer import gate_suite, suite_grounding_pct, grounding_badge, GATE_THRESHOLD
     _gate_threshold = options.get('grounding_threshold', GATE_THRESHOLD)
     log('[V8-ENGINE] Step 4b: Grounding gate (threshold=%d)...' % _gate_threshold)
-    suite.test_cases = gate_suite(suite.test_cases, threshold=_gate_threshold, log=log)
+    suite.test_cases = gate_suite(suite.test_cases, threshold=_gate_threshold, log=log,
+                                  strict_override=_strict_override)
+    # R5 — flag-gated post-gate obligation re-check (OFF => no-op).
+    _strict_obligation_recheck(suite, strict_override=_strict_override, log=log)
     _grounding_pct = suite_grounding_pct(suite.test_cases)
     _badge = grounding_badge(_grounding_pct)
     log('[V8-ENGINE] %s Grounding: %.1f%% | %d TCs passed gate' % (
@@ -1015,6 +1053,8 @@ def _build_cr_suite_v8(jira, chalk, parsed_docs, options, deep_mine_result, log,
     _cr_threshold = options.get('grounding_threshold', GATE_THRESHOLD)
     _cr_before = len(suite.test_cases)
     suite.test_cases = gate_suite(suite.test_cases, threshold=_cr_threshold, log=log)
+    # R5 — flag-gated post-gate obligation re-check on the CR suite (env fallback; OFF => no-op).
+    _strict_obligation_recheck(suite, strict_override=None, log=log)
     suite._grounding_pct = suite_grounding_pct(suite.test_cases)
     log('[V8-ENGINE] CR grounding gate (threshold=%d): %s %.1f%% | %d/%d TCs kept'
         % (_cr_threshold, grounding_badge(suite._grounding_pct),

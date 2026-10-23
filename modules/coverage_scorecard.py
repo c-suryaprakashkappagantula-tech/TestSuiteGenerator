@@ -85,6 +85,7 @@ def compute_scorecard(
     contract=None,
     nmno_result=None,
     log=None,
+    strict_override=None,
 ) -> CoverageScorecard:
     """Compute the coverage scorecard for a test suite.
 
@@ -124,10 +125,39 @@ def compute_scorecard(
         elif isinstance(_ac, list):
             ac_items = [str(a) for a in _ac if len(str(a)) > 15]
 
+    # R5 — obligation-aware AC lens (flag ON only). Pre-compute what obligation ids the
+    # suite actually asserts, so an AC with a parseable obligation is 'covered' only when
+    # asserted (not merely word-overlapping). OFF path is untouched.
+    _strict_cov = False
+    _asserted_oids = set()
+    try:
+        from .config import strict_assertion_gate_enabled
+        _strict_cov = strict_assertion_gate_enabled(strict_override)
+    except Exception:
+        _strict_cov = False
+    if _strict_cov:
+        for tc in tcs:
+            for s in (tc.steps or []):
+                if getattr(s, 'expected_value', '') and getattr(s, 'obligation_id', ''):
+                    _asserted_oids.add(s.obligation_id)
+
     if ac_items:
         covered_acs = 0
         uncovered_acs = []
         for ac in ac_items:
+            if _strict_cov:
+                try:
+                    from .dimension_extractor import _extract_obligations_from_text
+                    _obs = _extract_obligations_from_text(ac, 'AC')
+                except Exception:
+                    _obs = []
+                if _obs:
+                    _needed = {o.get('obligation_id') for o in _obs}
+                    if _needed <= _asserted_oids:
+                        covered_acs += 1
+                    else:
+                        uncovered_acs.append(ac[:80])
+                    continue
             # Extract key words from AC and check if any TC covers them
             ac_words = set(re.findall(r'\b\w{4,}\b', ac.lower()))
             ac_words -= {'shall', 'must', 'should', 'verify', 'ensure', 'when', 'then', 'given'}

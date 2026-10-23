@@ -2,9 +2,11 @@
 config.py — Central configuration for TestSuiteGenerator
 All paths relative to project root. Works for ANY feature ID.
 """
+import os
 import sys
 from pathlib import Path
 from datetime import datetime
+from typing import Optional
 
 ROOT = Path(__file__).parent.parent.resolve()
 MODULES = ROOT / 'modules'
@@ -138,3 +140,24 @@ def checkpoint_path(fid, ver='v1', pi='', title=''):
     name_parts.append(ver)
     name_parts.append(ts())
     return CHECKPOINTS / ('_'.join(name_parts) + '.xlsx')
+
+
+# ─── R2 strict-assertion-gate flag — the SINGLE read-point ─────────
+
+_STRICT_FLAG_ENV = 'TSG_STRICT_ASSERTION_GATE'
+
+
+def strict_assertion_gate_enabled(override: Optional[bool] = None) -> bool:
+    """Single source of truth for the R2/R5 strict assertion gate. Default OFF.
+
+    Resolution is one of exactly two inputs, resolved HERE and nowhere else:
+      - override: an explicit caller choice (the options-key path, resolved ONCE in
+        build_test_suite_v8). When not None it wins.
+      - env TSG_STRICT_ASSERTION_GATE: truthy token -> ON, else OFF.
+    R2 (score_tc) and R5 (data_first_engine gate, coverage_scorecard, pipeline) all call
+    this; no other module reads the env var or the options key for the gate decision.
+    """
+    if override is not None:
+        return bool(override)
+    raw = os.getenv(_STRICT_FLAG_ENV, '').strip().lower()
+    return raw in ('1', 'true', 'yes', 'on')

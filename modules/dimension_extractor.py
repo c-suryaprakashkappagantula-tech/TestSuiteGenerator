@@ -18,7 +18,7 @@ from typing import List, Dict, Optional, Callable, Any, Set
 from .traceability import TraceabilityRecord, create_traceability
 from .data_models_v8 import (
     Dimension, ExtractedScenario, NegativeSpec, DimensionSet,
-    DataSourceEntry, DataInventory,
+    DataSourceEntry, DataInventory, make_obligation,
 )
 from .nmno_api_lookup import NMNOLookupResult, NMNOBusinessRule, NMNOAPISpec
 
@@ -150,6 +150,24 @@ def extract_dimensions(
     # When NMNO has data, the Chalk DB scenarios are from the PI page (not the API spec page)
     # and often contain unrelated scenarios from other features on the same PI page.
     _nmno_has_data = nmno_result and nmno_result.business_rules
+
+    # ── 1a-R3. Mine Chalk feature text + tables + per-scenario fields for obligations.
+    #   Runs when deep-mine api_specs are empty (mine Chalk text BEFORE DB-cache titles).
+    #   Coexists with the DB-cache block below — relies on the normalized-title dedup. ──
+    _api_specs_empty = not (deep_mine_result and deep_mine_result.api_specs)
+    if _api_specs_empty and chalk is not None:
+        _chalk_text = _chalk_obligation_text(chalk)
+        if _chalk_text:
+            _din, _def = _prescan_feature_target(_chalk_text)
+            _chalk_obs = _extract_obligations_from_text(_chalk_text, 'Chalk Scenario', _din, _def)
+            if _chalk_obs:
+                _before = len(scenarios)
+                _attach_or_synthesize_obligations(
+                    scenarios, _chalk_obs, 'Chalk Scenario',
+                    getattr(chalk, 'feature_id', '') or '', log)
+                log('[DIM-EXTRACT]   Chalk obligations: %d parsed, %d scenario(s) synthesized' % (
+                    len(_chalk_obs), len(scenarios) - _before))
+
     # ── 1b. Extract from ChalkData object (DB cache scenarios) ──
     # ALWAYS use Chalk DB scenarios when available — they provide functional/happy path
     # scenarios that complement NMNO Business Rules (which provide negative/error TCs).
@@ -207,6 +225,22 @@ def extract_dimensions(
                     scenarios.append(_sc)
                     _neg_title_set.add(_sc.title.strip().lower())
             log('[DIM-EXTRACT]   Jira AC scenarios (all testable lines): %d scenario(s) added' % len(_jira_neg_scenarios))
+
+    # ── 2c-R3. Mine Jira AC+description for obligations; attach to matching scenarios
+    #   or synthesize a dedicated obligation-carrying scenario (this is what makes MO->O
+    #   its own TC). ──
+    if jira and getattr(jira, 'acceptance_criteria', ''):
+        _ac_text = (getattr(jira, 'acceptance_criteria', '') or '')
+        _desc = (getattr(jira, 'description', '') or '')
+        _jira_ob_text = (_ac_text + '\n' + _desc).strip()
+        _din, _def = _prescan_feature_target(_jira_ob_text)
+        _jira_obs = _extract_obligations_from_text(_jira_ob_text, 'Jira AC', _din, _def)
+        if _jira_obs:
+            _before = len(scenarios)
+            _attach_or_synthesize_obligations(
+                scenarios, _jira_obs, 'Jira AC', getattr(jira, 'key', '') or '', log)
+            log('[DIM-EXTRACT]   Jira obligations: %d parsed, %d scenario(s) synthesized' % (
+                len(_jira_obs), len(scenarios) - _before))
 
     # ── 3. Extract from subtask mines ──
     if deep_mine_result and deep_mine_result.subtask_mines:
@@ -1001,14 +1035,29 @@ def _clean_ac_title(ac_text: str) -> str:
     return cleaned
 
 
-def _derive_steps_hint_from_ac(ac_text: str, ac_lower: str) -> list:
+def _derive_steps_hint_from_ac(ac_text: str, ac_lower: str, obligations=None) -> list:
     """Derive domain-specific steps_hint from a subtask AC line.
 
     For de-prioritization/notification-driven ACs, generates meaningful steps
     instead of leaving steps_hint=[] which forces the generic template router.
 
+    `obligations` (strictly last, default None): when truthy, return obligation-derived
+    hint steps — a safety net; R4 is the primary producer of the structured assertion steps.
+
     Returns list of step strings, or [] if no domain match (falls to router).
     """
+    # R3: obligations win — produce hint steps straight from the parsed mapping/rule.
+    if obligations:
+        hints = []
+        for ob in obligations:
+            if ob.get('kind') == 'error_rule':
+                hints.append('Submit request satisfying: %s' % (ob.get('condition') or ac_text))
+                hints.append('Verify system returns %s' % ob.get('expected_value'))
+            else:
+                hints.append('Set %s = %s' % (ob.get('input_field') or 'input', ob.get('input_value')))
+                hints.append('Verify %s = %s' % (ob.get('expected_field') or 'output', ob.get('expected_value')))
+        return hints
+
     # De-prioritization: OFF notification at BCD reset
     if any(kw in ac_lower for kw in ['off notification', 'send an off', 'mhs_pfo_off', 'pfo_off']):
         if 'bcd' in ac_lower or 'reset' in ac_lower:
@@ -1711,6 +1760,300 @@ def _extract_dimensions_from_chalk(
 
 
 # ================================================================
+# R3 — OBLIGATION PARSER (tolerant AC/feature-text miner)
+# ================================================================
+
+# Terse mapping row: "MT -> I", "MO = O", "'MT' -> call_direction_ind='I'", "MT maps to I".
+MAP_ARROW = re.compile(
+    r"^\s*['\"]?(?P<in>[\w/ +.-]{1,40}?)['\"]?\s*(?:->|=>|=|maps to|is converted to)\s*"
+    r"['\"]?(?P<out>[\w/ +.=:'\"-]{1,60}?)['\"]?\s*$",
+    re.IGNORECASE)
+
+# Prose mapping: "MMS_TYPE_INDICATOR value 'MT' is converted to 'I' ... in the call_direction_ind field".
+MAP_PROSE = re.compile(
+    r"(?P<field>[A-Z][A-Z0-9_]{2,})\s+value\s+['\"]?(?P<in>[\w/]+)['\"]?\s+(?:is\s+)?"
+    r"(?:converted|mapped|set)\s+to\s+['\"]?(?P<out>[\w/]+)['\"]?"
+    r"(?:.*?\bin\s+the\s+(?P<efield>[\w_]+)\s+field)?",
+    re.IGNORECASE)
+
+# Field-list prefix: "FIELD: A -> X, B -> Y".
+MAP_FIELDLIST = re.compile(r"^\s*(?P<field>[A-Z][A-Z0-9_]{2,})\s*:\s*(?P<rest>.+)$")
+
+# Error rules.
+ERR_WHEN = re.compile(
+    r"[Ww]hen\s+(?P<cond>.{5,100}?),?\s+(?:return|respond\s+with|rejects?\s+with)\s+"
+    r"(?:error\s+|HTTP\s+\d+\s*\+?\s*)?(?P<code>ERR\d+)",
+    re.IGNORECASE)
+ERR_IF = re.compile(
+    r"[Ii]f\s+(?P<cond>.{5,100}?),?\s+.*?(?:reject|return|respond).*?"
+    r"(?P<http>HTTP\s+\d{3})?\s*\+?\s*(?P<code>ERR\d+)",
+    re.IGNORECASE)
+
+# BAU / "all other" catch-all row (prose).
+BAU_RE = re.compile(
+    r'\b(all\s+other|any\s+other|other/absent|otherwise|default)\b.*?'
+    r'\b(bau|unchanged|remain)\b',
+    re.IGNORECASE)
+
+# Inline field=value splitter run on a captured output token FIRST.
+_INLINE_FV = re.compile(
+    r"^\s*(?P<EF>[A-Za-z][A-Za-z0-9_]*)\s*(?:==|=|:)\s*['\"]?(?P<EV>[A-Za-z0-9_]+)['\"]?\s*$")
+
+# Tail-field recognizer for the prose form ("converted to 'I' ... in the X field").
+TAIL_FIELD_RE = re.compile(
+    r"(?P<EF>[a-z][a-z0-9_]{2,})\s*(?:=|:|\bto\b|\bin\s+the\b)\s*['\"]?(?P<EV>[A-Za-z0-9_]+)",
+    re.IGNORECASE)
+
+# Shared "is this a mapping shape?" test, used to relax the admission gate.
+_MAP_SHAPE_RE = re.compile(
+    r"['\"]?[\w/ +.-]{1,40}?['\"]?\s*(?:->|=>|=|maps to|is converted to)\s*['\"]?[\w/ +.=:'\"-]",
+    re.IGNORECASE)
+
+# Pre-scan: grab the feature's transform target when stated once in the text.
+_FEATURE_TARGET_RE = re.compile(
+    r'\b(?P<IN>[A-Z][A-Z0-9_]{3,})\b.*?\b(?:to|->|into)\b.*?\b(?P<EF>[a-z][a-z0-9_]{3,})\b'
+    r'(?:\s+(?:field|mapping|value))', re.DOTALL)
+
+
+def _norm(s):
+    return re.sub(r'\s+', ' ', (s or '').strip().lower())
+
+
+def _split_inline_field_value(out_value):
+    """('call_direction_ind=\\'I\\'') -> ('call_direction_ind', 'I'); ('I') -> ('', 'I')."""
+    m = _INLINE_FV.match((out_value or '').strip())
+    if m:
+        return m.group('EF'), m.group('EV')
+    return '', (out_value or '').strip()
+
+
+def _prescan_feature_target(text):
+    """Return (default_input_field, default_expected_field) from one scan of the whole text."""
+    m = _FEATURE_TARGET_RE.search(text or '')
+    if m:
+        return m.group('IN'), m.group('EF')
+    return '', ''
+
+
+def _resolve_fields(out_value, rest_of_line, default_input_field, default_expected_field,
+                    inline_in_field, mapprose_efield):
+    """Apply the locked precedence to produce (input_field, expected_field, expected_value).
+
+    expected_field precedence: inline field=value split > MAP_PROSE field / TAIL_FIELD_RE
+      > pre-scan default > ''.  input_field precedence: explicit token / inline LHS >
+      pre-scan default > ''.
+    """
+    inline_ef, bare_out = _split_inline_field_value(out_value)
+    if inline_ef:
+        expected_field = inline_ef
+    elif mapprose_efield:
+        expected_field = mapprose_efield
+    else:
+        m = TAIL_FIELD_RE.search(rest_of_line or '')
+        if m and _norm(m.group('EV')) == _norm(bare_out):
+            expected_field = m.group('EF')
+        elif default_expected_field:
+            expected_field = default_expected_field
+        else:
+            expected_field = ''
+    input_field = inline_in_field or default_input_field or ''
+    return input_field, expected_field, bare_out
+
+
+def _extract_obligations_from_text(text, source_ref,
+                                   default_input_field='',
+                                   default_expected_field=''):
+    """Parse transformation-rule and error-rule obligations from AC/feature text.
+
+    Emits ONE obligation dict per mapping row via make_obligation (never dedups by output
+    value, so MT->I AND MO->O both survive). Tolerant of terse bullets, '->' / unicode arrow
+    / '=' / '==' / ':' / 'maps to' / 'is converted to', the prose form, and the BAU row.
+    Returns [] when nothing matches (never raises).
+    """
+    obligations = []
+    if not text:
+        return obligations
+    current_field = default_input_field or ''
+    # Normalise a common unicode arrow to the ascii form before per-line parsing.
+    text = (text or '').replace('\u2192', '->')
+    for raw_line in text.split('\n'):
+        try:
+            line = re.sub(r'^[\s#*\-•\u2022\xa0]+', '', raw_line).strip()
+            line = re.sub(r'\xa0$', '', line).strip()
+            if not line:
+                continue
+
+            # ── Error rules (checked before mapping; they carry 'return/reject') ──
+            m_err = ERR_WHEN.search(line) or ERR_IF.search(line)
+            if m_err:
+                cond = (m_err.groupdict().get('cond') or '').strip()
+                http = (m_err.groupdict().get('http') or '').strip()
+                code = (m_err.groupdict().get('code') or '').strip()
+                exp_val = ('%s + %s' % (http, code)).strip(' +') if http else code
+                obligations.append(make_obligation(
+                    input_field=default_input_field or '', input_value=cond[:60] or 'condition',
+                    expected_field=default_expected_field or 'error_code',
+                    expected_value=exp_val, condition=cond,
+                    source_ref=source_ref, kind='error_rule'))
+                continue
+
+            # ── BAU / "all other" row (prose, no k->v) ──
+            if BAU_RE.search(line):
+                obligations.append(make_obligation(
+                    input_field=current_field or default_input_field or '',
+                    input_value='other/absent',
+                    expected_field=default_expected_field or '',
+                    expected_value='BAU', condition='other/absent value',
+                    source_ref=source_ref, kind='mapping'))
+                continue
+
+            # ── Field-list prefix: FIELD: A -> X, B -> Y ──
+            m_fl = MAP_FIELDLIST.match(line)
+            fieldlist_field = ''
+            pairs = None
+            if m_fl and ('->' in m_fl.group('rest') or '=' in m_fl.group('rest')
+                         or 'maps to' in m_fl.group('rest').lower()):
+                fieldlist_field = m_fl.group('field')
+                pairs = [p.strip() for p in m_fl.group('rest').split(',') if p.strip()]
+
+            if pairs is not None:
+                for pair in pairs:
+                    m_a = MAP_ARROW.match(pair)
+                    if not m_a:
+                        continue
+                    in_val = (m_a.group('in') or '').strip().strip('\'"')
+                    out_raw = (m_a.group('out') or '').strip()
+                    inln_if, _ = _split_inline_field_value(in_val)
+                    in_field, exp_field, exp_val = _resolve_fields(
+                        out_raw, pair, fieldlist_field or default_input_field,
+                        default_expected_field, inln_if or fieldlist_field, '')
+                    current_field = in_field or current_field
+                    obligations.append(make_obligation(
+                        input_field=in_field or fieldlist_field, input_value=in_val,
+                        expected_field=exp_field, expected_value=exp_val,
+                        source_ref=source_ref, kind='mapping'))
+                continue
+
+            # ── Prose mapping: "FIELD value 'A' is converted to 'X' ... in the Y field" ──
+            m_p = MAP_PROSE.search(line)
+            if m_p:
+                in_field = m_p.group('field')
+                in_val = (m_p.group('in') or '').strip()
+                out_raw = (m_p.group('out') or '').strip()
+                efield = (m_p.groupdict().get('efield') or '').strip()
+                in_field2, exp_field, exp_val = _resolve_fields(
+                    out_raw, line, in_field or default_input_field,
+                    default_expected_field, in_field, efield)
+                current_field = in_field2 or current_field
+                obligations.append(make_obligation(
+                    input_field=in_field2, input_value=in_val,
+                    expected_field=exp_field, expected_value=exp_val,
+                    source_ref=source_ref, kind='mapping'))
+                continue
+
+            # ── Terse arrow row: "MT -> I", "'MT' -> call_direction_ind='I'" ──
+            m_a = MAP_ARROW.match(line)
+            if m_a:
+                in_raw = (m_a.group('in') or '').strip().strip('\'"')
+                out_raw = (m_a.group('out') or '').strip()
+                inln_if, in_val = _split_inline_field_value(in_raw)
+                in_field, exp_field, exp_val = _resolve_fields(
+                    out_raw, line, inln_if or default_input_field,
+                    default_expected_field, inln_if, '')
+                current_field = in_field or current_field
+                obligations.append(make_obligation(
+                    input_field=in_field, input_value=in_val,
+                    expected_field=exp_field, expected_value=exp_val,
+                    source_ref=source_ref, kind='mapping'))
+                continue
+        except Exception:
+            # The parser must NEVER raise — skip an unparseable line.
+            continue
+    return obligations
+
+
+def _synthesize_obligation_scenario(ob, source_type, feature_id):
+    """Build one ExtractedScenario carrying a single obligation (shared by Jira + Chalk)."""
+    in_f = ob.get('input_field') or 'input'
+    in_v = ob.get('input_value') or ''
+    ex_f = ob.get('expected_field') or 'output'
+    ex_v = ob.get('expected_value') or ''
+    title = 'Verify %s=%s -> %s=%s' % (in_f, in_v, ex_f, ex_v)
+    if ob.get('kind') == 'error_rule':
+        category = 'Negative'
+    elif in_v == 'other/absent' or (ex_v or '').upper() == 'BAU':
+        category = 'Regression'
+    else:
+        category = 'Happy Path'
+    tr = create_traceability(
+        source_type=source_type,
+        source_id=feature_id or '',
+        extracted_text=(ob.get('source_ref') or source_type)[:200],
+    )
+    return ExtractedScenario(
+        title=title,
+        validation=ob.get('condition') or title,
+        category=category,
+        source=tr,
+        obligations=[ob],
+    )
+
+
+def _chalk_obligation_text(chalk):
+    """Assemble Chalk mapping text from the REAL ChalkData/ChalkScenario carriers.
+
+    ChalkData has NO summary / feature_text (verified chalk_parser.py); use the actual
+    fields that hold the Functional-Requirements panel and per-scenario mapping.
+    """
+    parts = []
+    for attr in ('feature_title', 'scope', 'rules', 'raw_text'):
+        v = getattr(chalk, attr, '') or ''
+        if v:
+            parts.append(v)
+    for _tbl in (getattr(chalk, 'tables', None) or []):
+        for _row in (_tbl or []):
+            parts.append(' | '.join(str(c) for c in (_row or []) if c))
+    for _sc in (getattr(chalk, 'scenarios', None) or []):
+        for attr in ('derivation_rule', 'cdr_input', 'validation'):
+            v = getattr(_sc, attr, '') or ''
+            if v:
+                parts.append(v)
+    return '\n'.join(parts).strip()
+
+
+def _attach_or_synthesize_obligations(scenarios, obs, source_type, feature_id, log=print):
+    """Attach each obligation to a matching existing scenario; synthesize the rest.
+
+    Matching is by input_field/input_value/condition appearing in a scenario's title or
+    validation. Synthesized titles are deduped (normalized) against existing titles.
+    """
+    if not obs:
+        return
+    existing_norm = {s.title.strip().lower() for s in scenarios}
+    for ob in obs:
+        in_v = _norm(ob.get('input_value'))
+        in_f = _norm(ob.get('input_field'))
+        cond = _norm(ob.get('condition'))
+        matched = None
+        for s in scenarios:
+            hay = _norm(s.title) + ' ' + _norm(s.validation)
+            if (in_v and in_v in hay) and (not in_f or in_f in hay):
+                matched = s
+                break
+            if cond and cond in hay:
+                matched = s
+                break
+        if matched is not None:
+            if ob not in matched.obligations:
+                matched.obligations.append(ob)
+            continue
+        syn = _synthesize_obligation_scenario(ob, source_type, feature_id)
+        if syn.title.strip().lower() not in existing_norm:
+            scenarios.append(syn)
+            existing_norm.add(syn.title.strip().lower())
+
+
+# ================================================================
 # JIRA EXTRACTION
 # ================================================================
 
@@ -2341,17 +2684,21 @@ def _extract_no_notification_negative_from_jira_ac(
         # Remove trailing Jira wiki markup artifacts
         line_stripped = re.sub(r'\xa0$', '', line_stripped).strip()
 
-        if not line_stripped or len(line_stripped) < _MIN_LEN:
-            continue
-        if _SKIP_PATTERNS.match(line_stripped):
-            continue
+        # R3: a recognizable mapping shape (MT -> I / FIELD: A -> X) is testable by
+        # construction — admit it regardless of length/verb. All other lines keep the gate.
+        _is_mapping_shape = bool(_MAP_SHAPE_RE.search(line_stripped))
+        if not _is_mapping_shape:
+            if not line_stripped or len(line_stripped) < _MIN_LEN:
+                continue
+            if _SKIP_PATTERNS.match(line_stripped):
+                continue
         # Must contain at least one action verb OR any negation-ish word to be testable.
         # The ADMISSION test stays broad (a line like "... remains unchanged" is
         # testable); only the NEGATIVE-category decision below uses the strict test.
         has_verb = bool(_TESTABLE_VERBS.search(line_stripped))
         has_neg_word = bool(re.search(r'\b(no|not|never|without|zero|unchanged|unaffected)\b',
                                       line_stripped, re.IGNORECASE))
-        if not (has_verb or has_neg_word):
+        if not (has_verb or has_neg_word or _is_mapping_shape):
             continue
         # Strict: only a real prohibition makes this a negative test.
         has_negation = bool(_TRUE_NEGATION_RE.search(line_stripped))
