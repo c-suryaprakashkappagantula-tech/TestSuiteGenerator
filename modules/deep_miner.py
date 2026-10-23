@@ -241,6 +241,31 @@ def _crawl_chalk_api_page(page, url: str, log=print) -> Optional[APISpec]:
 
     log('[DEEP-MINE]   Crawling Chalk page: %s' % spec.api_name)
 
+    # MCP-only mode (legacy OFF): read the page through the approved Chalk MCP, not a browser.
+    from rest_clients._legacy_guard import legacy_enabled
+    if not legacy_enabled():
+        m = re.search(r'/pages/(\d+)', url) or re.search(r'pageId=(\d+)', url)
+        if not m:
+            log('[DEEP-MINE]   [WARN] No page id in %s (short/tiny links need legacy) - skipped'
+                % url[:60])
+            return spec
+        try:
+            from rest_clients import ChalkRestClient
+            from bs4 import BeautifulSoup
+            html = ChalkRestClient(logger_fn=lambda _m: None).get_page_html(m.group(1)) or ''
+            soup = BeautifulSoup(html, 'html.parser')
+            raw_text = soup.get_text('\n')
+            tables = [[[c.get_text(' ', strip=True) for c in tr.find_all(['td', 'th'])]
+                       for tr in t.find_all('tr')] for t in soup.find_all('table')]
+            tables = [[r for r in t if r] for t in tables if t]
+            if len(raw_text.strip()) < 50:
+                log('[DEEP-MINE]   [WARN] Page returned minimal content (%d chars)' % len(raw_text))
+                return spec
+            _parse_api_spec_from_text(raw_text, tables, spec, log)
+        except Exception as e:
+            log('[DEEP-MINE]   [ERROR] MCP fetch failed for %s: %s' % (url[:50], str(e)[:100]))
+        return spec
+
     try:
         page.goto(url, timeout=60000, wait_until='domcontentloaded')
         try:

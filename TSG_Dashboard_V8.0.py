@@ -33,8 +33,10 @@ import streamlit as st
 from modules.config import (ROOT, OUTPUTS, CHECKPOINTS, ATTACHMENTS, INPUTS,
                              BROWSER_CHANNEL, BROWSER_HEADLESS, ts_short,
                              get_browser_channel)
-from modules.jira_fetcher import fetch_jira_issue, download_attachments
-from modules.chalk_parser import discover_pi_links, fetch_feature_from_pi, discover_features_on_pi
+# MCP-only hardening (FEAT-002): the browser scrapers (fetch_jira_issue / download_attachments
+# from jira_fetcher; discover_pi_links / fetch_feature_from_pi / discover_features_on_pi from
+# chalk_parser) are no longer imported here — the live Jira/Chalk paths are MCP-only
+# (fetch_jira_issue_rest / fetch_feature_rest) and there is no browser fallback.
 from modules.doc_parser import parse_file
 from modules.data_first_engine import build_test_suite_v8
 from modules.excel_generator import generate_excel

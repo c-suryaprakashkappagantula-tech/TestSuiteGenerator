@@ -492,7 +492,9 @@ def _persist_and_normalize(feature_id, pi_label, chalk, source, log):
 def block_chalk_live(page, feature_id, pi_url, pi_label, pi_list, log=print):
     """Block 3: Fetch Chalk data from live page (fallback when DB misses).
     V8.1: REST-first — tries REST API before browser scraping."""
-    from .chalk_parser import fetch_feature_from_pi, fetch_feature_rest, ChalkData
+    # MCP-only (FEAT-002): only the REST(MCP) fetch is used; the browser scraper
+    # fetch_feature_from_pi is no longer imported — there is no browser fallback.
+    from .chalk_parser import fetch_feature_rest, ChalkData
     from .database import save_chalk
     import re as _re_chalk
 
