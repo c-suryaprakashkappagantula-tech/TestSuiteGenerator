@@ -1002,25 +1002,57 @@ def _build_crossed_dimension_tc(
 # ================================================================
 
 
-def _build_obligation_steps(scenario, api_context):
-    """R4 — emit a thin provisioning wrapper + set-input/assert-output pair per obligation.
+def _build_obligation_steps(scenario, api_context, jira=None, feature_name='', feature_type=''):
+    """R4 — AUGMENT the grounded step chain with set-input/assert-output pairs per obligation.
+
+    Builds the SAME grounded chain a non-obligation sibling TC would get (via
+    get_step_chain with the correctly resolved feature_type — batch_file/PRR, ui_portal,
+    api, etc.), then SPLICES the obligation assertion steps onto the end so the TC carries
+    both meaningful navigation/validation steps AND the obligation assertion. This replaces
+    the old behaviour that emitted a thin wrapper + bare `Set X / Verify Y` pairs only.
 
     Stamps the new TestStep assertion fields so R2 can match a step to its obligation.
     An obligation whose expected_value is empty is dropped (an assert with nothing to
     assert is worse than none). Uses `.get()` on every obligation key (frozen schema).
+
+    Respects the feature_type='ui_portal' gate inside get_step_chain: a pure-UI feature
+    gets the NBOP navigation path and never has API/batch steps spliced in.
     """
-    from .step_templates import assertion_step_texts
+    from .step_templates import assertion_step_texts, get_step_chain as _get_chain
     steps = []
-    n = 1
+    n = 0
     _src_id = getattr(getattr(scenario, 'source', None), 'source_id', '') or ''
-    # Thin provisioning wrapper so the TC is runnable, not just two asserts.
-    steps.append(TestStep(
-        step_num=n,
-        summary='Prepare the system and submit the request that exercises: %s'
-                % _trim_title(scenario.title, 90),
-        expected='Request is accepted and reaches the component under test.',
-        data_reference=_src_id,
-    ))
+
+    # ── Grounded chain first (same machinery as the non-obligation path) ──
+    # Resolve feature_type exactly as the fallback branch in _build_scenario_tc does so a
+    # PRR/file-ingestion feature (4503) gets SFTP ingest + NBOP usage steps, and a pure-UI
+    # feature gets the navigation path — not bare asserts.
+    try:
+        _ctx = ((feature_name or '') + ' ' + (scenario.validation or '')).lower()
+        _ft = feature_type
+        _full_summary = ((getattr(jira, 'summary', '') or '') if jira else '').lower()
+        if _ft != 'ui' and any(kw in _full_summary for kw in (
+                'prr file', 'prr usage', 'batch file', 'sftp', 'file ingestion',
+                'batch ingest', 'usage file', 'mediation file')):
+            _ft = 'batch_file'
+        if _ft == 'batch_file' and jira and 'nbop' not in _ctx and 'nbop' in (
+                '%s %s %s' % (_full_summary, getattr(jira, 'description', '') or '',
+                              getattr(jira, 'acceptance_criteria', '') or '')).lower():
+            _ctx += ' nbop'
+        _chain = _get_chain(scenario.title, scenario.validation, _ctx, feature_type=_ft)
+        for (_s, _e) in (_chain or []):
+            n += 1
+            steps.append(TestStep(
+                step_num=n,
+                summary=_s,
+                expected=_e,
+                data_reference=_src_id,
+            ))
+    except Exception:
+        # Grounding must never break obligation TC generation — fall through with whatever
+        # grounded steps were built (possibly none) and still emit the assertions below.
+        pass
+
     for ob in (scenario.obligations or []):
         exp_val = (ob.get('expected_value') or '').strip()
         if not exp_val:
@@ -1067,8 +1099,11 @@ def _build_scenario_tc(
     # Build steps from scenario hints or api_spec
     steps = []
     if getattr(scenario, 'obligations', None):
-        # R4 — obligation-driven steps win; get_step_chain is reached ONLY when there are none.
-        steps = _build_obligation_steps(scenario, api_context)
+        # R4 — obligation path AUGMENTS the grounded chain: build grounded steps first,
+        # then splice the set-input/assert-output pairs on (see _build_obligation_steps).
+        steps = _build_obligation_steps(
+            scenario, api_context, jira=jira,
+            feature_name=feature_name, feature_type=feature_type)
     elif scenario.steps_hint:
         _is_negative = scenario.category == 'Negative'
         _rejection_msg = (scenario.validation or 'Operation rejected with appropriate error')

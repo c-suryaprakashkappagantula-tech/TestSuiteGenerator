@@ -189,6 +189,65 @@ def test_E_error_rule_obligation_and_tc_step():
     assert any('ERR333' in (s.expected_value or '') for s in tc.steps)
 
 
+# ── Test G — Defect 1: cross-feature blob does NOT bleed foreign obligations ──
+
+def test_G_defect1_foreign_pi_page_rows_are_scoped_out():
+    """A PI-page Chalk row carries the whole page's raw_text + tables (every feature on
+    the page). 4503 owns only PRR field-length/type scenarios; a foreign 4167 ERR333 row
+    sitting in raw_text/tables must NOT be mined into 4503's obligations (Defect 1)."""
+    owned = ChalkScenario(
+        title='Verify PRR record with a used numeric field with more digits than allowed',
+        validation='PRR record with an over-length numeric field is rejected at ingestion.',
+        derivation_rule='',
+        relationship='owned',
+    )
+    foreign_row = [
+        'MWTGPROV-4167 Verify Host MDN provided in inbound VZW call',
+        'If the Host MDN belongs to VZW (non-TMO), NSL rejects with HTTP 400 + ERR333',
+    ]
+    chalk = ChalkData(
+        feature_id='MWTGPROV-4503',
+        scope='Handle Non-Numeric Data Types in PRR Usage Files',
+        rules='',
+        raw_text=('MWTGPROV-4167[NSLNM, INTG]: VZW Host MDN provided in inbound call '
+                  'rejects with ERR333. Account lock lockStatus==ENABLE returns ERR140.'),
+    )
+    chalk.scenarios = [owned]
+    chalk.tables = [[['Test Scenario', 'Validation'], foreign_row]]
+
+    obs = _extract_obligations_from_text(_chalk_obligation_text(chalk), 'Chalk Scenario')
+    assert not any('ERR333' in (o.get('expected_value') or '') for o in obs), \
+        'foreign 4167 ERR333 obligation must be scoped out of 4503'
+    assert not any('ERR140' in (o.get('expected_value') or '') for o in obs), \
+        'foreign 4496 ERR140 obligation must be scoped out of 4503'
+    assert not any('host' in (o.get('input_value') or '').lower() for o in obs), \
+        "foreign 'Host' input_value must not appear in 4503 obligations"
+
+
+# ── Test H — Defect 3: prose/placeholder obligations rejected, clean ones admitted ──
+
+def test_H_defect3_admission_filter_rejects_prose_keeps_clean():
+    # (a) Prose condition starting with an article must be rejected.
+    prose = "If the Host is invalid, reject with ERR999"
+    obs_prose = _extract_obligations_from_text(prose, 'Jira AC')
+    assert not any('ERR999' in (o.get('expected_value') or '') for o in obs_prose), \
+        "leading-article prose 'the Host' obligation must be rejected"
+
+    # (b) The clean 4167 line (input_value 'Host MDN', real ERR333) must still be admitted.
+    obs_clean = _extract_obligations_from_text(FIXTURE_4167_AC, 'Jira AC')
+    assert any('ERR333' in (o.get('expected_value') or '') for o in obs_clean), \
+        'legitimate same-feature ERR333 error-rule must still be mined'
+
+    # (c) A mapping row defaulting to expected_field='internal' with empty expected_value
+    #     is rejected by the admission predicate.
+    from modules.dimension_extractor import _obligation_is_admissible
+    from modules.data_models_v8 import make_obligation
+    placeholder = make_obligation(input_field='NSLNM', input_value='other',
+                                  expected_field='internal', expected_value='',
+                                  kind='mapping')
+    assert _obligation_is_admissible(placeholder) is False
+
+
 # ── Test F — single flag read-point (env var AND option key) ──
 
 def _module_sources():

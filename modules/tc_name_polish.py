@@ -98,8 +98,10 @@ def clean_summary_name(summary: str, max_words: int = 12) -> str:
     # detail that belongs in the Description).
     tail = _EG_CLAUSE_RE.sub('', tail)
     tail = _PARENTHETICAL_RE.sub('', tail)
-    # Strip forbidden punctuation, collapse resulting repeated/edge underscores.
-    tail = _NAME_PUNCT_RE.sub('', tail)
+    # Replace forbidden punctuation with '_' (Defect 2b) rather than deleting it, so
+    # adjacent tokens don't jam together (e.g. 'NSLNM=the Host -> internal=ERR333' must
+    # not collapse to 'NSLNMthe_Host_internalERR333'). The collapses below then tidy up.
+    tail = _NAME_PUNCT_RE.sub('_', tail)
     tail = re.sub(r'_-+_', '_', tail)          # arrow/dash remnants between words
     tail = re.sub(r'_{2,}', '_', tail).strip('_-. ')
     # Cut trailing dangling connective words left by the trims.
