@@ -1,0 +1,48 @@
+# Pre-existing baseline failures on branch feat/tsg-assertion-model
+# Captured before (and re-confirmed after) the assertion-grounding edits.
+# These are NOT caused by this work and must not be counted as regressions.
+
+## 28 collection ERRORS — ModuleNotFoundError: No module named 'shared'
+# Root cause: these modules import modules.crawl_grounding -> modules.contract_bridge ->
+#   `from shared.execution_contract import ...`; the `shared` package lives at the MAIN repo
+#   root (c:\Users\P3314665\Documents\mcp-jira-server\shared\) and is absent from the worktree,
+#   and tests\conftest.py only puts the worktree root on sys.path. Environment/path gap,
+#   unfixable offline, out of scope for assertion-grounding.
+tests/test_apply_crawl_grounding.py
+tests/test_classify_ui_action.py
+tests/test_contract_writer_ui_branch.py
+tests/test_crawl_grounding_basics.py
+tests/test_crawl_grounding_prop_01_determinism.py
+tests/test_crawl_grounding_prop_02_wellformed.py
+tests/test_crawl_grounding_prop_03_sources.py
+tests/test_crawl_grounding_prop_04_ties.py
+tests/test_crawl_grounding_prop_05_closers.py
+tests/test_crawl_grounding_prop_06_classification.py
+tests/test_crawl_grounding_prop_07_idempotent.py
+tests/test_crawl_grounding_prop_08_feature_keys.py
+tests/test_crawl_grounding_prop_09_typed_iff_registered.py
+tests/test_crawl_grounding_prop_10_params_roundtrip.py
+tests/test_crawl_grounding_prop_11_existing_typed.py
+tests/test_crawl_grounding_prop_12_report_completeness.py
+tests/test_crawl_grounding_prop_14_staleness.py
+tests/test_crawl_grounding_prop_15_tc_invariance.py
+tests/test_crawl_grounding_prop_16_nonui_suite.py
+tests/test_crawl_grounding_prop_16_nonui_workbook.py
+tests/test_crawl_index.py
+tests/test_crawl_matcher.py
+tests/test_excel_grounding_wiring.py
+tests/test_execution_contract_ui_ids.py
+tests/test_ground_step.py
+tests/test_grounding_report_sheet.py
+tests/test_strip_closer_steps.py
+tests/test_ui_feature_detect.py
+
+# Note: `hypothesis` is also absent (would independently break the prop tests), but the
+# collection error that surfaces is the `shared` one. Not installable offline — skip.
+
+## test_suite_snapshot.py — pre-existing data-drift vs tests\fixtures\expected_suites.json
+# Already RED at baseline (builds 16 suites from tsg_cache.db, ~5 min). Not a reliable
+# regression oracle until regenerated; treated as pre-existing.
+
+## Fast hermetic baseline (collects + runs today, used as the regression oracle):
+#   tests\test_titles.py + tests\test_determinism.py => 35 passed (0.40s) before edits.

@@ -27,7 +27,7 @@ Usage:
 
 import os
 import re
-from typing import List, Callable, Optional
+from typing import List, Callable, Optional, Tuple
 
 # Default gate threshold — TCs below this are dropped
 GATE_THRESHOLD = int(os.getenv('GROUNDING_GATE_THRESHOLD', '40'))
@@ -81,11 +81,31 @@ def _is_filler_expected(text: str) -> bool:
     return any(p.search(text or '') for p in _FILLER_EXPECTED_PATTERNS)
 
 
-def score_tc(tc) -> int:
+def assertion_coverage(tc) -> Tuple[int, int]:
+    """(#obligations asserted, #obligations declared). Advisory — never gates by itself.
+
+    An obligation is 'asserted' when some step carries BOTH a non-empty expected_value
+    and the obligation_id. Returns (0, 0) when the TC declares no obligations.
+    """
+    declared = list(getattr(tc, 'obligation_ids', []) or [])
+    if not declared:
+        return (0, 0)
+    asserted = set()
+    for s in (getattr(tc, 'steps', None) or []):
+        ev = (getattr(s, 'expected_value', '') or '').strip()
+        oid = (getattr(s, 'obligation_id', '') or '').strip()
+        if ev and oid:
+            asserted.add(oid)
+    return (len(asserted & set(declared)), len(declared))
+
+
+def score_tc(tc, strict_override=None) -> int:
     """Score a TestCase on a 0–100 grounding scale.
 
     Args:
         tc: A TestCase dataclass instance with traceability, steps, summary, etc.
+        strict_override: resolved strict-gate choice threaded from build_test_suite_v8.
+            None => fall back to the env read inside config.strict_assertion_gate_enabled.
 
     Returns:
         Integer 0–100. Higher = more grounded in real data.
@@ -149,6 +169,18 @@ def score_tc(tc) -> int:
     except Exception:
         pass
 
+    # ── R2: advisory assertion coverage (computed in BOTH flag states; mutates only a
+    #    new underscore attribute, so the OFF path's return value is byte-for-byte today). ──
+    covered, declared = assertion_coverage(tc)
+    tc._assertion_coverage = (covered, declared)
+
+    from .config import strict_assertion_gate_enabled
+    if strict_assertion_gate_enabled(strict_override) and declared > 0 and covered < declared:
+        # DOMINANT term (flag ON only): an unasserted obligation caps the score below the
+        # gate. Legacy terms survive as a secondary tie-breaker among already-failing TCs.
+        # Threshold-relative (GATE_THRESHOLD is env-configurable), never a hardcoded 39.
+        return max(0, min(score, GATE_THRESHOLD - 1))
+
     return max(0, min(score, 100))
 
 
@@ -161,6 +193,7 @@ def gate_suite(
     test_cases: List,
     threshold: int = GATE_THRESHOLD,
     log: Callable = print,
+    strict_override=None,
 ) -> List:
     """Apply the grounding gate: drop TCs below threshold.
 
@@ -170,6 +203,7 @@ def gate_suite(
         test_cases: List of TestCase objects
         threshold: Minimum grounding score to keep (default GATE_THRESHOLD)
         log: Logging function
+        strict_override: resolved strict-gate choice threaded to score_tc (None => env).
 
     Returns:
         Filtered list of TestCase objects with grounding_score attached.
@@ -181,7 +215,7 @@ def gate_suite(
     dropped = []
 
     for tc in test_cases:
-        score = score_tc(tc)
+        score = score_tc(tc, strict_override=strict_override)
         # Attach score to TC for Excel export and UI display
         tc.grounding_score = score
 

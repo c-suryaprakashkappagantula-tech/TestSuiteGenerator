@@ -17,6 +17,27 @@ from typing import List, Dict, Optional, Tuple, Any
 from .traceability import TraceabilityRecord
 
 
+# ─── R1 Obligation schema (frozen 8-key dict) ──────────────────────
+
+def make_obligation(input_field='', input_value='', expected_field='', expected_value='',
+                    condition='', source_ref='', kind='mapping') -> Dict[str, Any]:
+    """Single constructor for the frozen 8-key obligation schema. All keys always present.
+
+    `obligation_id` is derived here so a TestStep and its obligation share the same id.
+    Every consumer reads via `.get()` so a missing key can never raise.
+    """
+    return {
+        'condition':      condition,      # free-text trigger, '' for an unconditional row
+        'input_field':    input_field,    # 'MMS_TYPE_INDICATOR' | 'host_mdn_network'
+        'input_value':    input_value,    # 'MT' | 'MO' | 'other/absent' | 'VZW'
+        'expected_field': expected_field, # 'call_direction_ind' | 'http_status'/'error_code'
+        'expected_value': expected_value, # 'I' | 'O' | 'BAU' | 'HTTP 400 + ERR333'
+        'source_ref':     source_ref,     # provenance: 'Jira AC', 'Chalk Scenario', feature id
+        'kind':           kind,           # 'mapping' | 'error_rule' (lets R4 pick phrasing)
+        'obligation_id':  '%s:%s' % (input_field or 'input', input_value),  # stable link id
+    }
+
+
 # ─── Dimension Models ───────────────────────────────────────────────
 
 
@@ -49,6 +70,8 @@ class ExtractedScenario:
     steps_hint: List[str] = field(default_factory=list)  # hint steps from source
     user_requested: bool = False                 # True when authored from a user custom instruction
     priority_hint: str = ''                       # optional "P1"|"P2"|"P3" hint from the instruction
+    # ── R1 assertion-grounding: structured obligations parsed from the AC (default empty) ──
+    obligations: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -133,6 +156,12 @@ class TestStep:
     summary: str = ''
     expected: str = ''
     data_reference: str = ''                     # specific field/value from data source
+    # ── R1 assertion fields (all default empty → zero behavioural change) ──
+    input_field: str = ''                        # e.g. 'MMS_TYPE_INDICATOR'
+    input_value: str = ''                        # e.g. 'MT'
+    expected_field: str = ''                     # e.g. 'call_direction_ind'
+    expected_value: str = ''                     # e.g. 'I' | 'O' | 'BAU' | 'HTTP 400 + ERR333'
+    obligation_id: str = ''                      # stable link to the obligation this step covers
 
 
 @dataclass

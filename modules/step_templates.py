@@ -33,6 +33,33 @@ def _trim_title(s: str, n: int) -> str:
     return s[:cut].rstrip(' ,;:-') if cut > n // 2 else s[:n]
 
 
+def assertion_step_texts(obligation):
+    """R4 — centralised wording for the set-input / assert-output step pair.
+
+    Returns (set_summary, set_expected, assert_summary, assert_expected). Uses `.get()`
+    on the frozen 8-key obligation schema so a missing key can never raise. `get_step_chain`
+    is intentionally left untouched (preserves every non-obligation TC byte-for-byte).
+    """
+    ob = obligation or {}
+    kind = ob.get('kind') or 'mapping'
+    in_field = ob.get('input_field') or 'input'
+    in_value = ob.get('input_value') or ''
+    exp_value = ob.get('expected_value') or ''
+    if kind == 'error_rule':
+        exp_field = ob.get('expected_field') or 'result'
+        set_summary = 'Set up condition: %s' % (ob.get('condition') or in_value or in_field)
+        set_expected = 'Precondition established.'
+        assert_summary = 'Verify %s = %s' % (exp_field, exp_value)
+        assert_expected = 'System returns %s.' % exp_value
+    else:  # mapping
+        exp_field = ob.get('expected_field') or 'output'
+        set_summary = 'Set %s = %s' % (in_field, in_value)
+        set_expected = 'Input %s is set to %s.' % (in_field, in_value)
+        assert_summary = 'Verify %s = %s' % (exp_field, exp_value)
+        assert_expected = '%s equals %s in the produced record.' % (exp_field, exp_value)
+    return (set_summary, set_expected, assert_summary, assert_expected)
+
+
 def get_step_chain(sc_title, sc_validation, feature_context, feature_type=''):
     """Return list of (step_summary, expected_result) tuples based on scenario type.
 

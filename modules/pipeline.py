@@ -851,6 +851,24 @@ def block_generate_output(suite, feature_id, pi, strategy, jira=None, chalk=None
         suite._coverage_scorecard = scorecard
         from .coverage_scorecard import format_scorecard_text
         log('[SCORECARD]\n' + format_scorecard_text(scorecard))
+        # ── R5 (flag ON only): consume the strict block signal / loud-warn on HIGH risk. ──
+        try:
+            from .config import strict_assertion_gate_enabled
+            if strict_assertion_gate_enabled():
+                _block_reason = (getattr(suite, 'coverage_audit', None) or {}).get('strict_block_reason')
+                if _block_reason:
+                    _msg = '[STRICT BLOCK] Unasserted obligation(s): %s' % _block_reason
+                    log(_msg)
+                    if _msg not in (suite.warnings or []):
+                        suite.warnings.append(_msg)
+                elif getattr(scorecard, 'overall_risk', '') == 'HIGH':
+                    _msg = ('[STRICT WARN] Coverage scorecard reports HIGH overall risk '
+                            '(not an unasserted obligation — review before release).')
+                    log(_msg)
+                    if _msg not in (suite.warnings or []):
+                        suite.warnings.append(_msg)
+        except Exception as _blk_err:
+            log('[SCORECARD] strict-consume skipped: %s' % str(_blk_err)[:80])
     except Exception as _sc_err:
         log('[SCORECARD] Skipped: %s' % str(_sc_err)[:80])
         _record_degraded('coverage scorecard', _sc_err)

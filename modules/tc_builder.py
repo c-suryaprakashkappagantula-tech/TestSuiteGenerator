@@ -1002,6 +1002,55 @@ def _build_crossed_dimension_tc(
 # ================================================================
 
 
+def _build_obligation_steps(scenario, api_context):
+    """R4 — emit a thin provisioning wrapper + set-input/assert-output pair per obligation.
+
+    Stamps the new TestStep assertion fields so R2 can match a step to its obligation.
+    An obligation whose expected_value is empty is dropped (an assert with nothing to
+    assert is worse than none). Uses `.get()` on every obligation key (frozen schema).
+    """
+    from .step_templates import assertion_step_texts
+    steps = []
+    n = 1
+    _src_id = getattr(getattr(scenario, 'source', None), 'source_id', '') or ''
+    # Thin provisioning wrapper so the TC is runnable, not just two asserts.
+    steps.append(TestStep(
+        step_num=n,
+        summary='Prepare the system and submit the request that exercises: %s'
+                % _trim_title(scenario.title, 90),
+        expected='Request is accepted and reaches the component under test.',
+        data_reference=_src_id,
+    ))
+    for ob in (scenario.obligations or []):
+        exp_val = (ob.get('expected_value') or '').strip()
+        if not exp_val:
+            continue  # defensive — nothing to assert
+        oid = ob.get('obligation_id') or ('%s:%s' % (ob.get('input_field') or 'input',
+                                                      ob.get('input_value')))
+        set_summary, set_expected, assert_summary, assert_expected = assertion_step_texts(ob)
+        n += 1
+        steps.append(TestStep(
+            step_num=n,
+            summary=set_summary,
+            expected=set_expected,
+            input_field=ob.get('input_field') or '',
+            input_value=ob.get('input_value') or '',
+            obligation_id=oid,
+            data_reference=ob.get('source_ref') or _src_id,
+        ))
+        n += 1
+        steps.append(TestStep(
+            step_num=n,
+            summary=assert_summary,
+            expected=assert_expected,
+            expected_field=ob.get('expected_field') or ('result' if ob.get('kind') == 'error_rule' else 'output'),
+            expected_value=exp_val,
+            obligation_id=oid,
+            data_reference=ob.get('source_ref') or _src_id,
+        ))
+    return steps
+
+
 def _build_scenario_tc(
     scenario: ExtractedScenario,
     jira,
@@ -1017,7 +1066,10 @@ def _build_scenario_tc(
 
     # Build steps from scenario hints or api_spec
     steps = []
-    if scenario.steps_hint:
+    if getattr(scenario, 'obligations', None):
+        # R4 — obligation-driven steps win; get_step_chain is reached ONLY when there are none.
+        steps = _build_obligation_steps(scenario, api_context)
+    elif scenario.steps_hint:
         _is_negative = scenario.category == 'Negative'
         _rejection_msg = (scenario.validation or 'Operation rejected with appropriate error')
         _success_msg = (scenario.validation or 'Operation completes successfully')
@@ -1434,6 +1486,10 @@ def _build_scenario_tc(
             if _m:
                 _derived_state = _m.group(1).strip().title()
 
+    # R4 — the obligation ids this TC covers (computed once from the finalized steps list;
+    # harmless empty list when no step carries an obligation_id). Stamped at both returns.
+    _obligation_ids = sorted({s.obligation_id for s in steps if getattr(s, 'obligation_id', '')})
+
     # Chalk's own "Pre-req:" is ground truth (Rule #1) — prefer it over any template.
     _chalk_prereq = (getattr(scenario, 'chalk_prereq', '') or '').strip()
     _chalk_prereq = re.sub(r'^\s*pre-?(?:req|requisite|condition)s?\s*[:\-]\s*', '',
@@ -1460,6 +1516,7 @@ def _build_scenario_tc(
             traceability=scenario.source,
             dimension_values={},
             user_requested=getattr(scenario, 'user_requested', False),
+            obligation_ids=_obligation_ids,
         )
         # Rule #1: a Chalk-authored precondition must never be replaced by enrichment.
         setattr(_tc, 'precond_from_chalk', True)
@@ -1528,6 +1585,7 @@ def _build_scenario_tc(
         traceability=scenario.source,
         dimension_values={},
         user_requested=getattr(scenario, 'user_requested', False),
+        obligation_ids=_obligation_ids,
     )
 
 
