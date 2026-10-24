@@ -1810,9 +1810,12 @@ _MAP_SHAPE_RE = re.compile(
     re.IGNORECASE)
 
 # Pre-scan: grab the feature's transform target when stated once in the text.
+# NOTE: no re.DOTALL — the pre-scan must match WITHIN A SINGLE LINE only. With DOTALL a
+# stray match across the whole (multi-feature) blob stamped bogus global defaults
+# (input_field='NSLNM', expected_field='internal') onto every obligation (Defect 3).
 _FEATURE_TARGET_RE = re.compile(
     r'\b(?P<IN>[A-Z][A-Z0-9_]{3,})\b.*?\b(?:to|->|into)\b.*?\b(?P<EF>[a-z][a-z0-9_]{3,})\b'
-    r'(?:\s+(?:field|mapping|value))', re.DOTALL)
+    r'(?:\s+(?:field|mapping|value))')
 
 
 def _norm(s):
@@ -1860,6 +1863,64 @@ def _resolve_fields(out_value, rest_of_line, default_input_field, default_expect
     return input_field, expected_field, bare_out
 
 
+# Obligation-admission filter (Defect 3). Reject rows whose input/condition is free
+# prose (leading article) or whose expected_field is a bare placeholder with no concrete
+# expected value. KEEP legitimate error rules that carry a real ERRnnn AND a condition
+# naming a concrete field/value, and KEEP same-feature mapping/BAU rows.
+_LEADING_ARTICLE_RE = re.compile(r'^(?:the|a|an)\b', re.IGNORECASE)
+_PLACEHOLDER_FIELDS = {'internal', 'output', 'result'}
+_ERR_CODE_RE = re.compile(r'\bERR\d+\b', re.IGNORECASE)
+_FIELD_TOKEN_RE = re.compile(r"^[\w/.=:+'\"-]+$")  # single token, no internal whitespace
+
+
+def _has_real_err_code(value):
+    return bool(_ERR_CODE_RE.search(value or ''))
+
+
+def _looks_like_field_token(value):
+    """True for a recognisable field/enumerated token: single word, ERRnnn, BAU, FIELD=VAL,
+    or a short slash-delimited enum like 'other/absent'. False for free prose."""
+    v = (value or '').strip()
+    if not v:
+        return False
+    if _has_real_err_code(v) or v.upper() == 'BAU':
+        return True
+    # A compact token with no spaces (field name, enum, inline field=value) is acceptable.
+    if ' ' not in v and _FIELD_TOKEN_RE.match(v):
+        return True
+    return False
+
+
+def _obligation_is_admissible(ob):
+    """Return True when an obligation is clean enough to emit. Never raises."""
+    try:
+        in_v = (ob.get('input_value') or '').strip()
+        cond = (ob.get('condition') or '').strip()
+        exp_f = (ob.get('expected_field') or '').strip().lower()
+        exp_v = (ob.get('expected_value') or '').strip()
+        kind = ob.get('kind') or 'mapping'
+
+        # Error rules: ADMIT when they carry a real ERRnnn AND the condition names a
+        # concrete token (not free prose starting with an article).
+        if kind == 'error_rule':
+            if _has_real_err_code(exp_v) and _looks_like_field_token(cond or in_v):
+                return True
+            # Fall through to the generic article/prose check otherwise.
+
+        # Reject free prose: input/condition that starts with an article ("the Host", ...).
+        probe = in_v or cond
+        if probe and _LEADING_ARTICLE_RE.match(probe):
+            return False
+
+        # Reject placeholder expected_field with no concrete expected value.
+        if exp_f in _PLACEHOLDER_FIELDS and not _looks_like_field_token(exp_v):
+            return False
+
+        return True
+    except Exception:
+        return False  # a parse edge rejects rather than admitting junk
+
+
 def _extract_obligations_from_text(text, source_ref,
                                    default_input_field='',
                                    default_expected_field=''):
@@ -1890,21 +1951,25 @@ def _extract_obligations_from_text(text, source_ref,
                 http = (m_err.groupdict().get('http') or '').strip()
                 code = (m_err.groupdict().get('code') or '').strip()
                 exp_val = ('%s + %s' % (http, code)).strip(' +') if http else code
-                obligations.append(make_obligation(
+                _ob = make_obligation(
                     input_field=default_input_field or '', input_value=cond[:60] or 'condition',
                     expected_field=default_expected_field or 'error_code',
                     expected_value=exp_val, condition=cond,
-                    source_ref=source_ref, kind='error_rule'))
+                    source_ref=source_ref, kind='error_rule')
+                if _obligation_is_admissible(_ob):
+                    obligations.append(_ob)
                 continue
 
             # ── BAU / "all other" row (prose, no k->v) ──
             if BAU_RE.search(line):
-                obligations.append(make_obligation(
+                _ob = make_obligation(
                     input_field=current_field or default_input_field or '',
                     input_value='other/absent',
                     expected_field=default_expected_field or '',
                     expected_value='BAU', condition='other/absent value',
-                    source_ref=source_ref, kind='mapping'))
+                    source_ref=source_ref, kind='mapping')
+                if _obligation_is_admissible(_ob):
+                    obligations.append(_ob)
                 continue
 
             # ── Field-list prefix: FIELD: A -> X, B -> Y ──
@@ -1928,10 +1993,12 @@ def _extract_obligations_from_text(text, source_ref,
                         out_raw, pair, fieldlist_field or default_input_field,
                         default_expected_field, inln_if or fieldlist_field, '')
                     current_field = in_field or current_field
-                    obligations.append(make_obligation(
+                    _ob = make_obligation(
                         input_field=in_field or fieldlist_field, input_value=in_val,
                         expected_field=exp_field, expected_value=exp_val,
-                        source_ref=source_ref, kind='mapping'))
+                        source_ref=source_ref, kind='mapping')
+                    if _obligation_is_admissible(_ob):
+                        obligations.append(_ob)
                 continue
 
             # ── Prose mapping: "FIELD value 'A' is converted to 'X' ... in the Y field" ──
@@ -1945,10 +2012,12 @@ def _extract_obligations_from_text(text, source_ref,
                     out_raw, line, in_field or default_input_field,
                     default_expected_field, in_field, efield)
                 current_field = in_field2 or current_field
-                obligations.append(make_obligation(
+                _ob = make_obligation(
                     input_field=in_field2, input_value=in_val,
                     expected_field=exp_field, expected_value=exp_val,
-                    source_ref=source_ref, kind='mapping'))
+                    source_ref=source_ref, kind='mapping')
+                if _obligation_is_admissible(_ob):
+                    obligations.append(_ob)
                 continue
 
             # ── Terse arrow row: "MT -> I", "'MT' -> call_direction_ind='I'" ──
@@ -1961,10 +2030,12 @@ def _extract_obligations_from_text(text, source_ref,
                     out_raw, line, inln_if or default_input_field,
                     default_expected_field, inln_if, '')
                 current_field = in_field or current_field
-                obligations.append(make_obligation(
+                _ob = make_obligation(
                     input_field=in_field, input_value=in_val,
                     expected_field=exp_field, expected_value=exp_val,
-                    source_ref=source_ref, kind='mapping'))
+                    source_ref=source_ref, kind='mapping')
+                if _obligation_is_admissible(_ob):
+                    obligations.append(_ob)
                 continue
         except Exception:
             # The parser must NEVER raise — skip an unparseable line.
@@ -2000,24 +2071,55 @@ def _synthesize_obligation_scenario(ob, source_type, feature_id):
 
 
 def _chalk_obligation_text(chalk):
-    """Assemble Chalk mapping text from the REAL ChalkData/ChalkScenario carriers.
+    """Assemble Chalk mapping text from FEATURE-OWNED ChalkData/ChalkScenario carriers.
 
     ChalkData has NO summary / feature_text (verified chalk_parser.py); use the actual
     fields that hold the Functional-Requirements panel and per-scenario mapping.
+
+    A PI-page Chalk row carries the WHOLE page's `raw_text` and `tables` blob (every
+    feature on the page), so mining those wholesale bleeds foreign features' rows into
+    this feature's obligations (Defect 1). We therefore:
+      * use only the feature-owned panels (feature_title/scope/rules) and DROP raw_text;
+      * mine only scenarios whose relationship == 'owned' (empty/missing == owned, so
+        hand-built fixtures still mine);
+      * keep only table rows whose title matches the feature's OWN scenario titles,
+        reusing the owner-attribution helpers already in database.py.
     """
     parts = []
-    for attr in ('feature_title', 'scope', 'rules', 'raw_text'):
+    for attr in ('feature_title', 'scope', 'rules'):
         v = getattr(chalk, attr, '') or ''
         if v:
             parts.append(v)
-    for _tbl in (getattr(chalk, 'tables', None) or []):
-        for _row in (_tbl or []):
-            parts.append(' | '.join(str(c) for c in (_row or []) if c))
+    # Owned scenarios only (treat missing/empty relationship as owned).
+    owned_scenarios = []
     for _sc in (getattr(chalk, 'scenarios', None) or []):
+        rel = (getattr(_sc, 'relationship', '') or '').strip().lower()
+        if rel in ('', 'owned'):
+            owned_scenarios.append(_sc)
+    for _sc in owned_scenarios:
         for attr in ('derivation_rule', 'cdr_input', 'validation'):
             v = getattr(_sc, attr, '') or ''
             if v:
                 parts.append(v)
+    # Feature-scope the table blob: keep only rows matching the feature's own scenario
+    # titles. Reuse database.py's owner attribution (local import avoids any import cycle).
+    try:
+        from .database import _owned_title_keys, _row_belongs_to_feature
+        owned_keys = _owned_title_keys([getattr(_sc, 'title', '') for _sc in owned_scenarios])
+    except Exception:
+        _owned_title_keys = None
+        _row_belongs_to_feature = None
+        owned_keys = set()
+    for _tbl in (getattr(chalk, 'tables', None) or []):
+        for _row in (_tbl or []):
+            cells = [str(c) for c in (_row or []) if c]
+            if not cells:
+                continue
+            # The row title is the first non-empty cell; scope the row to this feature.
+            if _row_belongs_to_feature is not None and owned_keys:
+                if not _row_belongs_to_feature(cells[0], owned_keys):
+                    continue  # row belongs to another feature on the same PI page
+            parts.append(' | '.join(cells))
     return '\n'.join(parts).strip()
 
 

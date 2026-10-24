@@ -432,6 +432,10 @@ def _build_summary_sheet(wb, suite: TestSuite):
             c.font = _hf; c.fill = _hfill; c.alignment = _center; c.border = _bdr
         r += 1
         total_steps = 0
+        # Word-boundary truncation (Defect 2a): the raw short_name[:80] slice cut names
+        # mid-word on the Summary sheet (e.g. '..._than_the_old_as'). Reuse the builder's
+        # smart truncation. Lazy import keeps the module graph acyclic.
+        from .tc_builder import _smart_truncate_title
         for tc in suite.test_cases:
             import re as _re3
             short_name = _re3.sub(r'^TC\d+[_\s-]+' + _re3.escape(suite.feature_id) + r'[_\s-]*', '', tc.summary)
@@ -439,7 +443,7 @@ def _build_summary_sheet(wb, suite: TestSuite):
             ws.cell(row=r, column=1, value=_tc_label(suite, tc)).font = _nf
             ws.cell(row=r, column=1).alignment = _center; ws.cell(row=r, column=1).border = _bdr
             ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=3)
-            ws.cell(row=r, column=2, value=short_name[:80]).font = _nf
+            ws.cell(row=r, column=2, value=_smart_truncate_title(short_name, 80)).font = _nf
             ws.cell(row=r, column=2).alignment = _wrap; ws.cell(row=r, column=2).border = _bdr
             ws.cell(row=r, column=4, value=tc.category).font = _nf
             ws.cell(row=r, column=4).alignment = _center; ws.cell(row=r, column=4).border = _bdr
