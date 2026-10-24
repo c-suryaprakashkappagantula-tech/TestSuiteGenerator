@@ -1477,6 +1477,59 @@ def _aggregate_ui_scenarios(
 # ================================================================
 
 
+# Matches a Chalk "Alternate Flow A:" / "Alternate Flow B:" branch marker. The letter
+# is captured so each branch gets a stable id that survives semantic dedup.
+_ALT_FLOW_MARKER_RE = re.compile(r'Alternate\s+Flow\s+([A-Z])\s*:', re.IGNORECASE)
+
+# Tokens that make an alternate-flow branch a Negative test.
+_ALT_FLOW_NEG_RE = re.compile(
+    r'\b(exception|unroutable|not\s+found|does\s+not\s+fail|do\s+not\s+fail|'
+    r'fails?|failure|reject(?:ed|s)?|error|skipped|stale|invalid|malformed|'
+    r'missing|unavailable)\b',
+    re.IGNORECASE)
+
+
+def _split_alt_flow_validation(validation: str):
+    """Split a Chalk `validation` string on 'Alternate Flow X:' markers.
+
+    Returns a list of (branch_id, branch_text) tuples. branch_id is 'A'/'B'/... for each
+    alternate flow; the lead-in text before the first 'Alternate Flow A:' (if any
+    substantive) is returned first with branch_id '' so it can become its own branch.
+    When no markers are present, returns [] (caller keeps the 1->1 behavior).
+    """
+    text = (validation or '').strip()
+    if not text:
+        return []
+    markers = list(_ALT_FLOW_MARKER_RE.finditer(text))
+    if not markers:
+        return []
+    out = []
+    lead_in = text[:markers[0].start()].strip(' \t\r\n.;:-')
+    if lead_in and len(lead_in) >= 15:
+        out.append(('', lead_in))
+    for i, m in enumerate(markers):
+        branch_id = m.group(1).upper()
+        start = m.end()
+        end = markers[i + 1].start() if i + 1 < len(markers) else len(text)
+        branch_text = text[start:end].strip(' \t\r\n.;:-')
+        if branch_text:
+            out.append((branch_id, branch_text))
+    # Need at least two distinct pieces for a split to be meaningful.
+    return out if len(out) >= 2 else []
+
+
+def _summarize_branch(branch_text: str, max_len: int = 48) -> str:
+    """A short, human-readable summary of an alternate-flow branch for a TC title suffix."""
+    s = re.sub(r'\s+', ' ', (branch_text or '').strip())
+    # Prefer the clause up to the first arrow/colon/comma — that is usually the condition.
+    head = re.split(r'\s*(?:->|=>|:|,|;)\s*', s, maxsplit=1)[0].strip()
+    if len(head) < 6:
+        head = s
+    if len(head) > max_len:
+        head = head[:max_len].rsplit(' ', 1)[0].strip() + '...'
+    return head
+
+
 def _extract_scenarios_from_chalk_data(chalk, log: Callable = print) -> tuple:
     """Extract scenarios from a ChalkData object (DB cache).
 
@@ -1568,6 +1621,48 @@ def _extract_scenarios_from_chalk_data(chalk, log: Callable = print) -> tuple:
         _owner_feature = getattr(sc, 'owner_feature_id', '') or feature_id
         _owner_pi = getattr(sc, 'owner_pi', '')
         _relationship = getattr(sc, 'relationship', 'owned') or 'owned'
+        _chalk_prereq = (getattr(sc, 'prereq', '') or '').strip()
+
+        # ── Split packed "Alternate Flow A:/B:/C:" branches into sub-scenarios ──
+        # A single ChalkScenario often packs multiple real branches into its validation
+        # string (e.g. 4074: env routing has 3, pairing recon has 6). Each branch is a
+        # distinct testable behavior and must become its own TC. The siblings share the
+        # parent steps_hint/prereq but carry a distinct title, validation, category and
+        # a stable _branch_id so the semantic dedup in combination_engine does NOT
+        # re-merge them.
+        branches = _split_alt_flow_validation(validation)
+
+        if branches:
+            for branch_id, branch_text in branches:
+                if branch_id:
+                    branch_title = '%s - Alternate Flow %s: %s' % (
+                        title, branch_id, _summarize_branch(branch_text))
+                else:
+                    branch_title = '%s - %s' % (title, _summarize_branch(branch_text))
+                # Per-branch category: a fault/exception branch is Negative, else keep
+                # the parent's (usually Happy Path).
+                branch_category = 'Negative' if _ALT_FLOW_NEG_RE.search(branch_text) else category
+                btr = create_traceability(
+                    source_type='Chalk Scenario',
+                    source_id=_owner_feature,
+                    extracted_text=branch_title[:200],
+                    pi_label=_owner_pi,
+                )
+                b_ext = ExtractedScenario(
+                    title=branch_title,
+                    validation=branch_text,
+                    category=branch_category,
+                    source=btr,
+                    steps_hint=steps_hint,
+                )
+                setattr(b_ext, '_relationship', _relationship)
+                setattr(b_ext, '_source_tc_num', _source_tc_num)
+                setattr(b_ext, 'chalk_prereq', _chalk_prereq)
+                # Branch id keeps semantically-similar siblings distinct through dedup.
+                setattr(b_ext, '_branch_id', branch_id or 'LEAD')
+                scenarios.append(b_ext)
+            continue
+
         tr = create_traceability(
             source_type='Chalk Scenario',
             source_id=_owner_feature,
@@ -1587,7 +1682,7 @@ def _extract_scenarios_from_chalk_data(chalk, log: Callable = print) -> tuple:
         setattr(extracted, '_source_tc_num', _source_tc_num)
         # Chalk's own "Pre-req:" text is ground truth written by the test architect.
         # Carry it so tc_builder can use it verbatim instead of a generic template.
-        setattr(extracted, 'chalk_prereq', (getattr(sc, 'prereq', '') or '').strip())
+        setattr(extracted, 'chalk_prereq', _chalk_prereq)
         scenarios.append(extracted)
 
     if scenarios:
@@ -1808,6 +1903,51 @@ TAIL_FIELD_RE = re.compile(
 _MAP_SHAPE_RE = re.compile(
     r"['\"]?[\w/ +.-]{1,40}?['\"]?\s*(?:->|=>|=|maps to|is converted to)\s*['\"]?[\w/ +.=:'\"-]",
     re.IGNORECASE)
+
+# A Jira wiki macro token: {panel...}, {color...}, {{mono}}, etc. Used to veto the
+# mapping-shape gate so a stray `{panel:title=Functional Requirements}` (where
+# `title=Functional` reads as an X=Y mapping) is never admitted as a scenario even if it
+# reaches the gate un-stripped. A genuine mapping ("'MT' -> I", "FIELD = VALUE") has no
+# surrounding braces and is unaffected.
+_WIKI_TOKEN_RE = re.compile(r'\{[^{}]*\}|\{\{.*?\}\}', re.DOTALL)
+
+
+def _is_mapping_shape_line(line: str) -> bool:
+    """True when `line` looks like an X=Y / X->Y mapping AND is not a Jira wiki token."""
+    if _WIKI_TOKEN_RE.search(line or ''):
+        return False
+    return bool(_MAP_SHAPE_RE.search(line or ''))
+
+# Jira wiki tokens that are presentation-only and must be removed before line-splitting
+# AC text into testable scenarios.
+_WIKI_PANEL_OPEN_RE = re.compile(r'\{panel(?::[^}]*)?\}', re.IGNORECASE)   # {panel} / {panel:title=...}
+_WIKI_PANEL_CLOSE_RE = re.compile(r'\{panel\}', re.IGNORECASE)
+_WIKI_COLOR_RE = re.compile(r'\{color(?::[^}]*)?\}', re.IGNORECASE)        # {color:#fff} / {color}
+_WIKI_FORMAT_RE = re.compile(
+    r'\{(?:noformat|code|quote|section|column|expand)(?::[^}]*)?\}', re.IGNORECASE)
+_WIKI_MONO_RE = re.compile(r'\{\{(.*?)\}\}', re.DOTALL)                     # {{monospace}} -> inner text
+
+
+def _strip_jira_wiki_markup(text: str) -> str:
+    """Remove Jira wiki presentation tokens from AC text, preserving the readable content.
+
+    Handles the common block/inline macros so the line-splitter never sees
+    `{panel:title=...}` / `{color:#ff0000}` / `{{code}}` etc. Inner text of `{{...}}`
+    (monospace) is kept; the wrapper braces are dropped. Any remaining single-token
+    `{...}` macro with no spaces (e.g. a stray `{anchor}`) is also removed, but prose
+    that merely happens to contain braces is left intact.
+    """
+    if not text:
+        return text
+    out = _WIKI_MONO_RE.sub(lambda m: m.group(1), text)
+    out = _WIKI_PANEL_OPEN_RE.sub('', out)
+    out = _WIKI_PANEL_CLOSE_RE.sub('', out)
+    out = _WIKI_COLOR_RE.sub('', out)
+    out = _WIKI_FORMAT_RE.sub('', out)
+    # Remove any leftover brace-wrapped macro token that has no internal whitespace
+    # (true Jira macros never contain spaces inside the braces); leaves prose untouched.
+    out = re.sub(r'\{[^{}\s]+\}', '', out)
+    return out
 
 # Pre-scan: grab the feature's transform target when stated once in the text.
 # NOTE: no re.DOTALL — the pre-scan must match WITHIN A SINGLE LINE only. With DOTALL a
@@ -2745,15 +2885,33 @@ def _extract_no_notification_negative_from_jira_ac(
     ac_text = (getattr(jira, 'acceptance_criteria', '') or '') if jira else ''
     if not ac_text:
         return result
+    # Strip Jira wiki markup BEFORE line-splitting. Tokens like {panel:title=...},
+    # {color:#fff}, {{monospace}}, {noformat}/{code} wrappers are presentation, not
+    # testable behavior — and {panel:title=Functional Requirements} otherwise trips the
+    # X=Y mapping gate and surfaces as a junk "Verify {panel:title=...}" scenario (4074).
+    ac_text = _strip_jira_wiki_markup(ac_text)
+    if not ac_text.strip():
+        return result
 
     norm_existing = {re.sub(r'\s+', ' ', t.lower()).strip() for t in existing_scenario_titles}
 
-    # Action verbs that confirm a line describes testable behavior
+    # Action verbs that confirm a line describes testable behavior.
+    # Stems use a prefix match (stem + \w*) so inflected forms are caught:
+    # "validate" also matches "validates/validated/validation", "notif" -> "notifies",
+    # "correct" -> "corrects/corrected/correction".  Batch/pipeline verbs
+    # (ingest/move/support/route/categorize/pick up/deliver/monitor/alert/fail) are
+    # included so file-ingestion / reconciliation ACs (e.g. 4074) are not silently
+    # dropped.  The _MIN_LEN and _SKIP_PATTERNS gates below still bound admission.
     _TESTABLE_VERBS = re.compile(
-        r'\b(send|receive|trigger|provision|remove|process|transition|update|display|'
-        r'show|hide|notif|validate|verify|ensure|confirm|check|set|reset|add|delete|'
-        r'enable|disable|block|allow|reject|accept|handle|store|return|generate|emit|'
-        r'populate|clear|flag|unflag|apply|remove|strip|propagate|replac)\b',
+        r'\b(send\w*|receiv\w*|trigger\w*|provision\w*|remov\w*|process\w*|'
+        r'transition\w*|updat\w*|display\w*|show\w*|hid\w*|hide\w*|notif\w*|'
+        r'validat\w*|verif\w*|ensur\w*|confirm\w*|check\w*|set\w*|reset\w*|add\w*|'
+        r'delet\w*|enabl\w*|enable\w*|disabl\w*|disable\w*|block\w*|allow\w*|'
+        r'reject\w*|accept\w*|handl\w*|handle\w*|stor\w*|store\w*|return\w*|'
+        r'generat\w*|emit\w*|populat\w*|clear\w*|flag\w*|unflag\w*|appl\w*|apply\w*|'
+        r'strip\w*|propagat\w*|replac\w*|correct\w*|reconcil\w*|categori[sz]\w*|'
+        r'ingest\w*|mov\w*|move\w*|support\w*|rout\w*|route\w*|deliver\w*|'
+        r'monitor\w*|alert\w*|fail\w*|pick\s*up\w*)\b',
         re.IGNORECASE,
     )
 
@@ -2788,7 +2946,7 @@ def _extract_no_notification_negative_from_jira_ac(
 
         # R3: a recognizable mapping shape (MT -> I / FIELD: A -> X) is testable by
         # construction — admit it regardless of length/verb. All other lines keep the gate.
-        _is_mapping_shape = bool(_MAP_SHAPE_RE.search(line_stripped))
+        _is_mapping_shape = _is_mapping_shape_line(line_stripped)
         if not _is_mapping_shape:
             if not line_stripped or len(line_stripped) < _MIN_LEN:
                 continue
