@@ -13,6 +13,7 @@ Source types:
   - "NBOP UI"          — extracted from NBOP UI knowledge/crawl data
   - "Attachment"       — extracted from LLD/HLD/spec attachments
   - "Related Feature"  — extracted from same API in another PI's Chalk data
+  - "QMetry Test Case" — authored directly from a QMetry test case (TC key is the locator)
 """
 from dataclasses import dataclass
 
@@ -26,6 +27,7 @@ ALLOWED_SOURCE_TYPES = frozenset([
     "NBOP UI",
     "Attachment",
     "Related Feature",
+    "QMetry Test Case",
 ])
 
 

@@ -19,6 +19,7 @@ from modules.qmetry_steps_source import (
     resolve_project_id, split_packed_steps, _valid_keys,
     parse_qmetry_xlsx, _apply_packed_rule, attach_steps_to_scenarios,
     fetch_authored_steps, enrich_scenarios_with_qmetry,
+    _infer_qmetry_category, _build_new_scenario_from_tc,
     QMetrySessionError,
 )
 from modules.data_models_v8 import ExtractedScenario, make_obligation
@@ -190,8 +191,8 @@ def test_attach_mt_to_i(tmp_path):
     ob = make_obligation(input_field='MMS_TYPE_INDICATOR', input_value='MT',
                          expected_field='call_direction_ind', expected_value='I')
     sc = _scenario('MT conversion', obligations=[ob])
-    n = attach_steps_to_scenarios([sc], authored, log=lambda *a: None,
-                                  validated_keys=['MWTGMED-5214'])
+    n, new = attach_steps_to_scenarios([sc], authored, log=lambda *a: None,
+                                       validated_keys=['MWTGMED-5214'])
     assert n >= 1
     assert sc.steps_hint and sc.steps_hint[0].startswith('Place/ingest')
     assert len(sc.steps_hint) == 4
@@ -267,9 +268,9 @@ def test_tier23_expected_override_filler_path(tmp_path):
     }}
     sc = _scenario('Regression check for billing output',
                    validation='the billing feed stays BAU with no anomalies')
-    n = attach_steps_to_scenarios([sc], authored, log=lambda *a: None,
-                                  validated_keys=['MWTGMED-5214'])
-    assert n == 1 and len(sc.steps_hint) == 2
+    n, new = attach_steps_to_scenarios([sc], authored, log=lambda *a: None,
+                                       validated_keys=['MWTGMED-5214'])
+    assert n == 1 and len(sc.steps_hint) == 2 and new == []
     tc = _build_scenario_tc(sc, _Jira(), 'Mediation', api_context={})
     # filler appended → more than 2 steps
     assert len(tc.steps) > 2
@@ -312,9 +313,9 @@ def test_valuepair_onto_obligation_routes_through_obligation_path():
     ob = make_obligation(input_field='MMS_TYPE_INDICATOR', input_value='MT',
                          expected_field='call_direction_ind', expected_value='I')
     sc = _scenario('MT conversion', obligations=[ob])   # empty steps_hint
-    n = attach_steps_to_scenarios([sc], authored, log=lambda *a: None,
-                                  validated_keys=['MWTGMED-5214'])
-    assert n == 1 and sc.steps_hint == ['Do the thing']
+    n, new = attach_steps_to_scenarios([sc], authored, log=lambda *a: None,
+                                       validated_keys=['MWTGMED-5214'])
+    assert n == 1 and sc.steps_hint == ['Do the thing'] and new == []
     steps = _build_obligation_steps(sc, {}, jira=_Jira(), feature_name='Mediation')
     assert steps[0].summary == 'Do the thing'
     asserts = [s for s in steps if s.obligation_id == ob.get('obligation_id')]
@@ -333,19 +334,20 @@ def test_story_linkage_prefilter_and_prefix_collision():
         'step_summaries': ['do'],
     }}
     sc = _scenario('Regression check for billing output')
-    n = attach_steps_to_scenarios([sc], authored, log=lambda *a: None,
-                                  validated_keys=['MWTGMED-5300'])
-    assert n == 1 and sc.steps_hint == ['do']
+    n, new = attach_steps_to_scenarios([sc], authored, log=lambda *a: None,
+                                       validated_keys=['MWTGMED-5300'])
+    assert n == 1 and sc.steps_hint == ['do'] and new == []
 
     # prefix collision: MWTGMED-521 must NOT be whole-key-eligible for MWTGMED-5214,
-    # so the TC is filtered out (ineligible) and nothing attaches.
+    # so the TC is filtered out (ineligible) and nothing attaches — and it is NOT added
+    # as a new TC (ineligible TCs never reach the ADD-AS-NEW-TC tier).
     sc2 = _scenario('Regression check for billing output')
-    n2 = attach_steps_to_scenarios([sc2], {'X': {
+    n2, new2 = attach_steps_to_scenarios([sc2], {'X': {
         'summary': 'Regression check for billing output', 'story_linkages': ['MWTGMED-5214'],
         'steps': [{'summary': 'd', 'test_data': '', 'expected': 'o'}],
         'step_summaries': ['d']}}, log=lambda *a: None,
         validated_keys=['MWTGMED-521'])
-    assert n2 == 0 and sc2.steps_hint == []
+    assert n2 == 0 and sc2.steps_hint == [] and new2 == []
 
 
 # ─── 8. value-pair precedence: each pair binds its own TC; no positional pairing ──
@@ -369,21 +371,23 @@ def test_valuepair_binding_no_positional():
                   'steps': [{'summary': 'mo-step', 'test_data': '', 'expected': 'O'}],
                   'step_summaries': ['mo-step']},
     }
-    n = attach_steps_to_scenarios([mo_sc, mt_sc], authored, log=lambda *a: None,
-                                  validated_keys=['MWTGMED-5214'])
-    assert n == 2
+    n, new = attach_steps_to_scenarios([mo_sc, mt_sc], authored, log=lambda *a: None,
+                                       validated_keys=['MWTGMED-5214'])
+    assert n == 2 and new == []             # both matched → nothing added as new
     assert mt_sc.steps_hint == ['mt-step']   # MT TC bound to the MT obligation
     assert mo_sc.steps_hint == ['mo-step']   # MO TC bound to the MO obligation
 
-    # A value pair with no matching obligation is NOT positionally attached — dropped.
+    # A value pair with no matching obligation is NOT positionally attached to an
+    # existing scenario — it is added as its OWN new test case (eligible + unmatched).
     other = _scenario('unrelated', obligations=[])
-    n2 = attach_steps_to_scenarios([other], {
+    n2, new2 = attach_steps_to_scenarios([other], {
         'TC_X': {'summary': "value 'XX' is converted to 'YY'",
                  'story_linkages': ['MWTGMED-5214'],
                  'steps': [{'summary': 'x', 'test_data': '', 'expected': 'y'}],
                  'step_summaries': ['x']}}, log=lambda *a: None,
         validated_keys=['MWTGMED-5214'])
-    assert n2 == 0 and other.steps_hint == []
+    assert n2 == 0 and other.steps_hint == []   # existing scenario untouched
+    assert len(new2) == 1 and new2[0].steps_hint == ['x']   # TC_X added as new
 
 
 # ─── 8b. NO positional fallback: shared-linkage, N scenarios, M TCs ──
@@ -421,17 +425,18 @@ def test_shared_linkage_no_positional_assignment():
                    'steps': [{'summary': 'vzw', 'test_data': '', 'expected': 'ok'}],
                    'step_summaries': ['vzw']},
     }
-    n = attach_steps_to_scenarios(scenarios, authored, log=lambda *a: None,
-                                  validated_keys=['MWTGMED-5214'])
+    n, new = attach_steps_to_scenarios(scenarios, authored, log=lambda *a: None,
+                                       validated_keys=['MWTGMED-5214'])
     # Value-pair TCs land on their EXACT obligation scenario.
     assert mt_sc.steps_hint == ['mt']
     assert mo_sc.steps_hint == ['mo']
     # CBRS TC binds by similarity (title == summary).
     assert cbrs_sc.steps_hint == ['cbrs']
-    # The unrelated regression TC clears no similarity bar → dropped, NOT attached
-    # to the leftover noise scenario positionally.
+    # The unrelated regression TC clears no similarity bar → NOT attached to the leftover
+    # noise scenario positionally; instead it is added as its OWN new test case.
     assert noise_sc.steps_hint == []
     assert n == 3
+    assert len(new) == 1 and new[0].steps_hint == ['vzw'] and new[0].category == 'Regression'
 
 
 # ─── 9. unknown project skips ───────────────────────────────────────
@@ -490,14 +495,15 @@ def test_blank_subtask_key_does_not_match(monkeypatch, tmp_path):
     out2 = fetch_authored_steps('76000', 'FOO-0', ['', '  '], cookies={}, log=lambda *a: None)
     assert out2 == {} and calls['export'] == 0
 
-    # (c) tier-2 with a blank key in the set does not match
+    # (c) tier-2 with a blank key in the set does not match; with no valid validated_keys
+    # the TC is INELIGIBLE → neither enriched nor added as a new TC.
     sc = _scenario('x')
-    n = attach_steps_to_scenarios([sc], {'TC': {
+    n, new = attach_steps_to_scenarios([sc], {'TC': {
         'summary': 'g', 'story_linkages': ['MWTGMED-5214'],
         'steps': [{'summary': 'd', 'test_data': '', 'expected': 'o'}],
         'step_summaries': ['d']}}, log=lambda *a: None,
         validated_keys=_valid_keys(['', '  ']))
-    assert n == 0 and sc.steps_hint == []
+    assert n == 0 and sc.steps_hint == [] and new == []
 
 
 # ─── 10. no session is fail-safe at the engine hook ─────────────────
@@ -522,3 +528,126 @@ def test_no_session_is_fail_safe(monkeypatch):
         raised = True
     assert raised                    # the entry point surfaces it for the hook to catch
     assert sc.steps_hint == []       # scenario untouched
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 11. ADD-AS-NEW-TC — eligible-but-unmatched QMetry TCs become new TCs
+# ═══════════════════════════════════════════════════════════════════
+
+# The mixed-file E2E TC that live-runs on MWTGPROV-4628 (MWTGMED-TC-1888):
+# matches no Chalk scenario, is eligible by story linkage, carries authored steps.
+_MIXED_SUMMARY = ('Both MT and MO records in the same file convert correctly '
+                  'in the call_direction_ind field')
+_MIXED_TC = {
+    'summary': _MIXED_SUMMARY,
+    'story_linkages': ['MWTGMED-5214'],
+    'steps': [
+        {'summary': 'Place a single PRR input file containing BOTH an MT and an MO record',
+         'test_data': 'MMS_TYPE_INDICATOR in {MT, MO}', 'expected': 'File accepted'},
+        {'summary': 'Let Mediation run the PRR processing job', 'test_data': '',
+         'expected': 'Job completes'},
+        {'summary': 'Inspect call_direction_ind on both output records', 'test_data': '',
+         'expected': "MT→'I' and MO→'O' in the same output file"},
+    ],
+    'step_summaries': [
+        'Place a single PRR input file containing BOTH an MT and an MO record',
+        'Let Mediation run the PRR processing job',
+        'Inspect call_direction_ind on both output records',
+    ],
+}
+
+
+def _mt_scenario_and_tc():
+    """An MT→I obligation scenario plus the authored MT→I TC that matches it (tier-1)."""
+    ob = make_obligation(input_field='MMS_TYPE_INDICATOR', input_value='MT',
+                         expected_field='call_direction_ind', expected_value='I')
+    mt_sc = _scenario("MMS_TYPE_INDICATOR value 'MT' is converted to 'I'", obligations=[ob])
+    mt_tc = {
+        'summary': "MMS_TYPE_INDICATOR value 'MT' is converted to 'I' in call_direction_ind",
+        'story_linkages': ['MWTGMED-5214'],
+        'steps': [{'summary': 'mt-step', 'test_data': '', 'expected': 'I'}],
+        'step_summaries': ['mt-step'],
+    }
+    return mt_sc, mt_tc
+
+
+def test_unmatched_eligible_tc_added_as_new():
+    # One TC matches (MT→I, tier-1, enriched) and one matches nothing (the mixed-file
+    # E2E). Exactly ONE new scenario is added; the matched scenario is NOT duplicated.
+    mt_sc, mt_tc = _mt_scenario_and_tc()
+    authored = {'MWTGMED-TC-MT': mt_tc, 'MWTGMED-TC-1888': dict(_MIXED_TC)}
+    n, new = attach_steps_to_scenarios([mt_sc], authored, log=lambda *a: None,
+                                       validated_keys=['MWTGMED-5214'])
+    # MT TC enriched the obligation scenario (count==1), and is NOT re-added.
+    assert n == 1
+    assert mt_sc.steps_hint == ['mt-step']
+    # Exactly one new scenario: the mixed-file E2E.
+    assert len(new) == 1
+    nsc = new[0]
+    assert nsc.title == _MIXED_SUMMARY
+    assert nsc.validation == _MIXED_SUMMARY
+    assert nsc.category == 'E2E'
+    assert nsc.steps_hint == _MIXED_TC['step_summaries']
+    assert nsc._qmetry_expected == "MT→'I' and MO→'O' in the same output file"
+    assert nsc.source.source_type == 'QMetry Test Case'
+    assert nsc.source.source_id == 'MWTGMED-TC-1888'
+    assert nsc.user_requested is True
+    # The matched MT scenario still appears exactly once (never duplicated as a new TC).
+    assert sum(1 for s in [mt_sc] + new if s.obligations) == 1
+
+
+def test_matched_tc_not_added_as_new():
+    # Both authored TCs match (one tier-1 value-pair, one tier-2 similarity) → NO new TCs.
+    mt_sc, mt_tc = _mt_scenario_and_tc()
+    sim_sc = _scenario('Regression check for billing output')
+    sim_tc = {
+        'summary': 'Regression check for billing output',
+        'story_linkages': ['MWTGMED-5214'],
+        'steps': [{'summary': 'do the regression check', 'test_data': '', 'expected': 'ok'}],
+        'step_summaries': ['do the regression check'],
+    }
+    authored = {'MWTGMED-TC-MT': mt_tc, 'MWTGMED-TC-SIM': sim_tc}
+    n, new = attach_steps_to_scenarios([mt_sc, sim_sc], authored, log=lambda *a: None,
+                                       validated_keys=['MWTGMED-5214'])
+    assert n == 2
+    assert new == []                       # nothing added as new
+    assert mt_sc.steps_hint == ['mt-step']
+    assert sim_sc.steps_hint == ['do the regression check']
+
+
+def test_ineligible_tc_not_added():
+    # A TC whose Story Linkages do NOT contain any validated key and matches nothing is
+    # NOT enriched AND NOT added as a new TC (eligibility drop preserved).
+    sc = _scenario('some existing scenario')
+    authored = {'MWTGMED-TC-X': dict(_MIXED_TC)}   # linked to MWTGMED-5214 only
+    n, new = attach_steps_to_scenarios([sc], authored, log=lambda *a: None,
+                                       validated_keys=['MWTGMED-9999'])   # wrong key
+    assert n == 0
+    assert new == []
+    assert sc.steps_hint == []
+
+
+def test_category_inference():
+    assert _infer_qmetry_category('End-to-end roaming regression') == 'Regression'
+    assert _infer_qmetry_category('No impact to Verizon billing') == 'Regression'
+    assert _infer_qmetry_category('End to end flow of the PRR file') == 'E2E'
+    assert _infer_qmetry_category(_MIXED_SUMMARY) == 'E2E'
+    assert _infer_qmetry_category('MT value converts to I in call_direction_ind') == 'Happy Path'
+    assert _infer_qmetry_category('') == 'Happy Path'
+
+
+def test_new_tc_builds_through_scenario_pipeline():
+    # Build a new scenario via the add-as-new path and run it through the SAME
+    # _build_scenario_tc the engine uses — assert authored steps/expected survive.
+    nsc = _build_new_scenario_from_tc('MWTGMED-TC-1888', dict(_MIXED_TC))
+    tc = _build_scenario_tc(nsc, _Jira(), 'Mediation', api_context={})
+    summaries = [s.summary for s in tc.steps]
+    # the three authored step summaries appear in order among the built steps
+    for hint in _MIXED_TC['step_summaries']:
+        assert any(hint in s for s in summaries), 'authored step missing: %s' % hint
+    # authored last-step expected lands on the last AUTHORED step
+    _n = len(_MIXED_TC['step_summaries'])
+    assert tc.steps[_n - 1].expected == "MT→'I' and MO→'O' in the same output file"
+    assert tc.summary
+    from modules.qmetry_steps_source import ExtractedScenario as _ES  # sanity: import OK
+    assert tc.category in {'Happy Path', 'Negative', 'Edge Case', 'E2E', 'Regression', 'Rollback'}
