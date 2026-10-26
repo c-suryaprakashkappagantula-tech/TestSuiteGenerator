@@ -36,10 +36,10 @@ GATE_THRESHOLD = int(os.getenv('GROUNDING_GATE_THRESHOLD', '40'))
 _AUTHORITATIVE_SOURCES = frozenset([
     # Title-case (standard)
     'Chalk Scenario', 'Business Rule', 'Jira AC', 'NBOP UI',
-    'Attachment', 'Subtask AC',
+    'Attachment', 'Subtask AC', 'QMetry Test Case',
     # Lowercase variants (dimension-derived TCs)
     'chalk scenario', 'business rule', 'jira ac', 'nbop ui',
-    'attachment', 'subtask ac',
+    'attachment', 'subtask ac', 'qmetry test case',
     'chalk', 'jira', 'nbop', 'subtask',
 ])
 

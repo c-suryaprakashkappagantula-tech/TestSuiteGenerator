@@ -30,6 +30,20 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
+# New-TC construction reuses the engine's own scenario object + traceability factory
+# (never a hand-built TestCase). Guard the import so a bare unit import of the splitter
+# helpers still works even if the package context is unusual.
+try:
+    from .data_models_v8 import ExtractedScenario
+    from .traceability import create_traceability
+except Exception:  # pragma: no cover — fallback for non-package import contexts
+    try:
+        from modules.data_models_v8 import ExtractedScenario
+        from modules.traceability import create_traceability
+    except Exception:
+        ExtractedScenario = None
+        create_traceability = None
+
 # ── MDA client path (sys.path import only — never forked) ──
 _MDA = r'c:\Users\P3314665\Documents\mcp-jira-server\MDA-Jira-Dashboard'
 if _MDA not in sys.path:
@@ -590,6 +604,58 @@ def _authored_expected(tc: Dict[str, Any]) -> str:
     return ''
 
 
+def _infer_qmetry_category(summary: str) -> str:
+    """Infer a TC category from a QMetry TC summary.
+
+    Mapping (all outputs are members of the engine's _VALID_CATEGORIES):
+      * 'regression' / 'no impact'                         → 'Regression'
+      * 'end to end' / 'end-to-end' / 'e2e', or the mixed-
+        file phrase 'both … in the same file'             → 'E2E'
+      * otherwise                                          → 'Happy Path'
+    """
+    low = (summary or '').lower()
+    if 'regression' in low or 'no impact' in low:
+        return 'Regression'
+    if ('end to end' in low or 'end-to-end' in low or 'e2e' in low
+            or ('both ' in low and 'in the same file' in low)):
+        return 'E2E'
+    return 'Happy Path'
+
+
+def _build_new_scenario_from_tc(tc_key: str, tc: Dict[str, Any]):
+    """Build a NEW ExtractedScenario from an eligible-but-unmatched QMetry TC.
+
+    The returned scenario carries the authored summary as its title/validation, the
+    authored step summaries as ``steps_hint`` and the authored last-step Expected
+    Result as ``_qmetry_expected`` — IDENTICAL to what ``_apply_match`` attaches for a
+    matched TC — so the existing ``_build_scenario_tc`` path turns it into a TC with the
+    real QA steps, interior/last expecteds, summary, precondition, sno and category.
+    ``user_requested=True`` protects this authored ground-truth from near-dup collapse.
+    """
+    summary = (tc.get('summary') or '').strip()
+    locator = (tc_key or '').strip()
+    # create_traceability requires non-empty extracted_text/source_id — fall back to the
+    # TC key so a blank summary can never raise.
+    title = summary or locator
+    source = create_traceability(
+        source_type='QMetry Test Case',
+        source_id=locator or title,
+        extracted_text=summary or locator or title,
+        confidence=1.0,
+    )
+    sc = ExtractedScenario(
+        title=title,
+        validation=title,
+        category=_infer_qmetry_category(summary),
+        source=source,
+        steps_hint=list(_authored_hint_list(tc)),
+        obligations=[],
+    )
+    sc._qmetry_expected = _authored_expected(tc)
+    sc.user_requested = True
+    return sc
+
+
 def _apply_match(sc, tc, tier, tc_key, enriched_ids, log) -> bool:
     """Attach a TC's authored steps to scenario ``sc``. Returns True on attach.
 
@@ -617,8 +683,9 @@ def tier_name(tier: int) -> str:
     return {1: 'value-pair', 2: 'similarity'}.get(tier, 'tier-%d' % tier)
 
 
-def attach_steps_to_scenarios(scenarios, authored, log=print, validated_keys=None) -> int:
-    """Attach authored QMetry steps onto the correctly-matched ExtractedScenario.
+def attach_steps_to_scenarios(scenarios, authored, log=print, validated_keys=None):
+    """Attach authored QMetry steps onto the correctly-matched ExtractedScenario,
+    and build NEW scenarios for eligible-but-unmatched TCs.
 
     Matching rule (per decision — NO positional/document-order fallback, EVER):
 
@@ -636,17 +703,22 @@ def attach_steps_to_scenarios(scenarios, authored, log=print, validated_keys=Non
         whose Jaccard ≥ _MATCH_THRESHOLD and is strictly the highest scorer. A tie for
         the top score leaves the TC UNMATCHED (no arbitrary/positional pick).
 
-      TIER 3 — DROP: a TC that matches no obligation and clears no similarity bar is
-        dropped (authored steps discarded); the affected scenarios keep normal
-        generation. Logged at INFO.
+      TIER 3 — ADD-AS-NEW-TC: an ELIGIBLE TC that matched no obligation and cleared no
+        similarity bar is NOT dropped — a new ExtractedScenario is built from its
+        authored summary + steps and returned to the caller to append AFTER the existing
+        (Chalk-derived) scenarios. A true DROP only remains for INELIGIBLE TCs (they fail
+        the story-linkage pre-filter and never reach any tier).
 
-    Each scenario is enriched at most once. ``obligations`` are never cleared.
-    Returns the enrichment count.
+    Each existing scenario is enriched at most once; matched TCs only ENRICH and are NEVER
+    re-added as new TCs. ``obligations`` are never cleared. Returns
+    ``(enrichment_count, new_scenarios)`` where ``new_scenarios`` is the ordered list of
+    ADD-AS-NEW-TC scenarios the caller must append to the live scenario list.
     """
     scenarios = list(scenarios or [])
     validated_keys = validated_keys or []
     enriched_ids = set()          # id() of scenarios already enriched
     claimed_obligations = set()   # (input, output) pairs already bound to a TC
+    matched_tc_keys = set()       # TC keys that ENRICHED a scenario (tier 1/2) → not re-added
     count = 0
 
     # Eligible TCs only (story-linkage pre-filter), in document order.
@@ -690,6 +762,7 @@ def attach_steps_to_scenarios(scenarios, authored, log=print, validated_keys=Non
             continue
         if _apply_match(target, tc, 1, tc_key, enriched_ids, log):
             claimed_obligations.add(pair)
+            matched_tc_keys.add(tc_key)
             count += 1
 
     # ── TIER 2: title/summary similarity (fallback). Single strictly-highest scorer
@@ -715,9 +788,26 @@ def attach_steps_to_scenarios(scenarios, authored, log=print, validated_keys=Non
                 % (tc_key, top, len(winners)))
             continue
         if _apply_match(winners[0], tc, 2, tc_key, enriched_ids, log):
+            matched_tc_keys.add(tc_key)
             count += 1
 
-    return count
+    # ── TIER 3: ADD-AS-NEW-TC. Every ELIGIBLE TC that never enriched a scenario
+    #    (not in matched_tc_keys) becomes its own new scenario, built from its authored
+    #    summary + steps, returned for the caller to append AFTER the existing scenarios
+    #    (keeps Chalk-first ordering). Ineligible TCs never reach here (dropped above). ──
+    new_scenarios = []
+    for tc_key, tc in eligible:
+        if tc_key in matched_tc_keys:
+            continue
+        if ExtractedScenario is None or create_traceability is None:
+            log('[QMETRY] TC %s unmatched but new-TC builder unavailable — skipped' % tc_key)
+            continue
+        new_sc = _build_new_scenario_from_tc(tc_key, tc)
+        new_scenarios.append(new_sc)
+        log('[QMETRY] TC %s unmatched — added as NEW test case (category=%s, %d steps)'
+            % (tc_key, new_sc.category, len(new_sc.steps_hint)))
+
+    return count, new_scenarios
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -741,7 +831,14 @@ def enrich_scenarios_with_qmetry(scenarios, jira, options, log=print) -> int:
     cookies = load_qmetry_cookies(log=log)   # raises QMetrySessionError if none authenticate
     authored = fetch_authored_steps(pid, feature_key, subtask_keys, cookies=cookies, log=log)
 
-    n = attach_steps_to_scenarios(scenarios, authored, log=log,
-                                  validated_keys=_valid_keys(subtask_keys))
-    log('[QMETRY] authored steps attached to %d scenario(s)' % n)
+    n, new_scenarios = attach_steps_to_scenarios(
+        scenarios, authored, log=log, validated_keys=_valid_keys(subtask_keys))
+    # Append the ADD-AS-NEW-TC scenarios to the LIVE scenario list the engine passed in
+    # (dimension_set.scenarios), AFTER the existing Chalk-derived scenarios — the engine's
+    # plan/build path then emits their TCs in sequence after the Chalk-derived ones.
+    if new_scenarios:
+        scenarios.extend(new_scenarios)
+    log('[QMETRY] authored steps attached to %d scenario(s)'
+        '%s' % (n, (' and %d new QMetry-only test case(s) added' % len(new_scenarios))
+                if new_scenarios else ''))
     return n
