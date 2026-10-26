@@ -203,3 +203,33 @@ FEAT-001/002/003 integrate cleanly (65 deliverable tests pass; output byte-ident
 the 16 snapshot features, so zero regression). Every real-xlsx check that does not depend on a
 live QMetry session holds. Items A (QMetry auth / ~17 count) and B (stale snapshot fixture) each
 need a human decision.
+
+## Parent decision (both items resolved — proceed to finalize)
+The workflow owner WAIVED both items for this headless environment:
+- **A — WAIVED:** 9-vs-17 is the findings §7 UI-vs-headless divergence (QMetry 401 / no
+  authenticated session), an environment limitation, not a regression. In-scope correct behavior
+  for THIS change is fail-loud + Summary-sheet warning + `suite.warnings`, which is verified.
+  Acceptance is verified on the **9-TC headless output only**; full 17 requires a live QMetry
+  session.
+- **B — KNOWN PRE-EXISTING, leave as-is:** the 37 failures fail identically at base `42ef69b`
+  with byte-identical counts/titles (diff=0) → zero NEW regressions. `expected_suites.json` is
+  NOT regenerated inside this loop (repinning a committed regression guard is a separate product
+  decision not requested). The `shared`-module collection errors are the same pre-existing
+  environment gap.
+
+## Final acceptance on the 9-TC headless output (all PASS)
+Workbook: `outputs\MWTGPROV-4628_60.2_..._20261026_203950.xlsx`
+- **TC01 = 4 steps, asserts `call_direction_ind = BAU`** (expected text:
+  "call_direction_ind = BAU in the Amdocs TMO billing output record; all other fields …"). PASS.
+- **0 leaked placeholder values** — no `= output`, `= result`, `= value` anywhere. PASS.
+- **Grounding intact** — all 9 TCs report **100%** grounding (no TC regressed below its prior
+  gate). PASS.
+- **Batch/SFTP preconditions on 9/9 scenario TCs.** PASS.
+- **0 banned mediation phrases; 0 genuine fabricated FIELD='VALUE' pairs** (MO/MT are real
+  obligation values). PASS.
+- **Chalk coverage 3/3.** PASS.
+- **QMetry-skip warning visible** in the Summary sheet + `suite.warnings` (fail-loud). PASS.
+
+Acceptance bar for this change — "zero NEW regressions + real-xlsx acceptance on the 9-TC
+output" — is MET. The ~17 / TC10-TC17 path is explicitly WAIVED here (verified on 9-TC headless
+output; full 17 requires a live QMetry session — environment limitation, not a regression).
