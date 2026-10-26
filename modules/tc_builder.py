@@ -1087,7 +1087,12 @@ def _build_obligation_steps(scenario, api_context, jira=None, feature_name='', f
             if _ft == 'batch_file' and jira and 'nbop' not in _ctx and 'nbop' in (
                     '%s %s %s' % (_full_summary, _jdesc, _jac)).lower():
                 _ctx += ' nbop'
-            _chain = _get_chain(scenario.title, scenario.validation, _ctx, feature_type=_ft)
+            # Thread the scenario's first obligation into the chain so the mediation
+            # builder renders the REAL <input_field>='<input_value>' pair (TC2/TC3) instead
+            # of fabricating one. Non-mediation branches ignore the obligation kwarg.
+            _ob = (scenario.obligations or [None])[0]
+            _chain = _get_chain(scenario.title, scenario.validation, _ctx,
+                                feature_type=_ft, obligation=_ob)
             for (_s, _e) in (_chain or []):
                 n += 1
                 steps.append(TestStep(
@@ -1452,7 +1457,9 @@ def _build_scenario_tc(
             # The batch template returns before any other ctx check; this marker only lets
             # it add the downstream NBOP usage check when the feature itself names NBOP.
             _ctx += ' nbop'
-        _chain = _get_chain(scenario.title, scenario.validation, _ctx, feature_type=_ft)
+        # Non-obligation fallback path: no real value-pair to thread.
+        _chain = _get_chain(scenario.title, scenario.validation, _ctx,
+                            feature_type=_ft, obligation=None)
         steps = [TestStep(step_num=i, summary=s, expected=e, data_reference=scenario.source.source_id)
                  for i, (s, e) in enumerate(_chain, 1)]
 

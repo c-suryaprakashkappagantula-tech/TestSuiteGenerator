@@ -69,11 +69,10 @@ _BANNED_MEDIATION_PHRASES = frozenset({
     'transaction_history', 'line_history', '200 ok', 'transactionid', 'oauth',
 })
 
-# Field tokens used to pull a concrete input/output pair out of a scenario so the
-# PRR steps name the real field/value rather than reading as generic boilerplate.
-_PRR_INPUT_RE = re.compile(
-    r'(MMS_TYPE_INDICATOR|call_direction_ind|[A-Z][A-Z0-9_]{3,})\s*(?:value\s*)?'
-    r'[=\'"\s]*\s*([A-Za-z0-9]{1,8})\b', re.I)
+# Genuine conversion detection ("X -> Y", "converts to") used to name the real
+# output value in the inspect step. The old `_PRR_INPUT_RE` fallback (which scraped
+# two adjacent tokens into a fabricated "<word> = <word>" pair) has been retired —
+# the step-1 file clause now comes from `_prr_input_file_clause`, never a regex scrape.
 _PRR_CONV_RE = re.compile(
     r"['\"]?([A-Za-z0-9]{1,8})['\"]?\s*(?:->|→|is converted to|converts? to|maps? to)\s*"
     r"['\"]?([A-Za-z0-9]{1,8})['\"]?", re.I)
@@ -82,7 +81,11 @@ _PRR_CONV_RE = re.compile(
 def _prr_scenario_fields(title, validation):
     """Best-effort extraction of (input_descr, output_field, output_value) from a
     PRR/mediation scenario. Returns ('', 'call_direction_ind', '') when nothing is
-    found so the steps still name the canonical output field."""
+    found so the steps still name the canonical output field.
+
+    `in_descr` is ONLY ever a genuine conversion input (from `_PRR_CONV_RE`) or empty —
+    it never fabricates a "<word> = <word>" token. The step-1 file clause is built
+    separately by `_prr_input_file_clause`."""
     blob = '%s %s' % (title or '', validation or '')
     out_field = 'call_direction_ind'
     m_field = re.search(r'\b(call_direction_ind|[a-z][a-z0-9_]{4,})\b\s*(?:field|=)', blob, re.I)
@@ -93,13 +96,50 @@ def _prr_scenario_fields(title, validation):
         return ('%s = %s' % ('MMS_TYPE_INDICATOR', conv.group(1))
                 if 'mms_type' in blob.lower() else conv.group(1),
                 out_field, conv.group(2))
-    mi = _PRR_INPUT_RE.search(blob)
-    if mi:
-        return ('%s = %s' % (mi.group(1), mi.group(2)), out_field, '')
     return ('', out_field, '')
 
 
-def _prr_mediation_steps(sc_title, sc_validation, t, ctx, negative=False):
+def _prr_input_file_clause(obligation, sc_title, sc_validation, t):
+    """Build the step-1 "Place/ingest ..." file clause for a PRR/mediation scenario.
+
+    Branching rule, in order (NEVER fabricates a "<word> = <word>" token):
+      1. Real value-pair present (obligation has non-empty input_field AND input_value,
+         e.g. MMS_TYPE_INDICATOR='MT') -> keep the authentic
+         "...containing <field>='<value>'..." wording (preserves TC2/TC3 exactly).
+      2. No real pair -> a clean generic clause chosen by scenario intent (matched
+         against `t`, the lowercased title + ' ' + validation):
+           * VZW/Verizon  -> Verizon (VZW) PRR input file
+           * CBRS         -> CBRS PRR input file
+           * other/absent / non-MMS pass-through -> non-MMS / other MMS_TYPE_INDICATOR value
+           * generic TMO (no-loss / e2e / unchanged / regression) -> representative TMO file
+      3. Fallback (intent unclear) -> representative TMO file.
+
+    The only `=` the result may contain is the real `<field>='<value>'` form from branch 1.
+    """
+    ob = obligation or {}
+    in_field = (ob.get('input_field') or '').strip()
+    in_value = (ob.get('input_value') or '').strip()
+    # A synthesized no-impact obligation carries input_value='other/absent' — that is NOT
+    # a real value-pair, so treat it as the "other/absent" generic case.
+    if in_field and in_value and in_value.lower() not in ('other/absent', 'other', 'absent'):
+        return ("Place/ingest the TMO PRR input file containing %s='%s' onto the "
+                "biller SFTP." % (in_field, in_value))
+
+    # No real pair → pick a clean generic clause by intent. VZW/CBRS first.
+    if re.search(r'\b(?:verizon|vzw)\b', t):
+        return 'Place/ingest a Verizon (VZW) PRR input file onto the biller SFTP.'
+    if re.search(r'\bcbrs\b', t):
+        return 'Place/ingest a CBRS PRR input file onto the biller SFTP.'
+    if re.search(r'other\s*/\s*absent|\bother\b|\babsent\b|non[- ]?mms|output\s+bau|\bbau\b', t):
+        return ('Place/ingest a TMO PRR input file containing records with a non-MMS / '
+                'other MMS_TYPE_INDICATOR value onto the biller SFTP.')
+    if re.search(r'no\s+loss|degradation|end[- ]to[- ]end|unchanged|remains?|regression', t):
+        return 'Place/ingest a representative TMO PRR input file onto the biller SFTP.'
+    # Fallback — intent unclear.
+    return 'Place/ingest a representative TMO PRR input file onto the biller SFTP.'
+
+
+def _prr_mediation_steps(sc_title, sc_validation, t, ctx, negative=False, obligation=None):
     """PRR/mediation flow steps (NO NSL-provisioning steps).
 
     Positive mapping scenario (e.g. MMS_TYPE_INDICATOR MT -> call_direction_ind I):
@@ -119,11 +159,9 @@ def _prr_mediation_steps(sc_title, sc_validation, t, ctx, negative=False):
         t))
 
     if _regression and not out_value:
-        file_descr = 'the relevant PRR input file for this scenario (%s)' % _sc
-        if re.search(r'\b(?:verizon|vzw|cbrs)\b', t):
-            file_descr = 'the VZW/CBRS PRR input file (%s)' % _sc
+        _file_clause = _prr_input_file_clause(obligation, sc_title, sc_validation, t)
         steps = [
-            ('Place/ingest %s onto the biller SFTP for Mediation pickup' % file_descr,
+            (_file_clause,
              'PRR input file is staged and picked up by Mediation for processing'),
             ('Run the TMO_PRR_Processing_01 mediation flow (let Mediation process the file)',
              'Mediation processes the PRR file without errors'),
@@ -137,8 +175,7 @@ def _prr_mediation_steps(sc_title, sc_validation, t, ctx, negative=False):
         return steps
 
     # Positive / mapping flow
-    _input_clause = (('containing %s' % in_descr) if in_descr
-                     else 'containing the input field/value for this scenario (%s)' % _sc)
+    _file_clause = _prr_input_file_clause(obligation, sc_title, sc_validation, t)
     if out_value:
         _inspect = ('Inspect the %s field in the Amdocs output and compare against the '
                     'pre-change baseline' % out_field)
@@ -150,7 +187,7 @@ def _prr_mediation_steps(sc_title, sc_validation, t, ctx, negative=False):
         _inspect_exp = (sc_validation or 'The %s output field matches the expected value; '
                         'all other fields remain as BAU' % out_field)
     steps = [
-        ('Place/ingest the TMO PRR input file %s onto the biller SFTP' % _input_clause,
+        (_file_clause,
          'PRR input file is staged and picked up by Mediation for processing'),
         ('Run the TMO_PRR_Processing_01 mediation flow (let Mediation process the file)',
          'Mediation processes the PRR file and emits the Amdocs TMO billing record(s)'),
@@ -176,7 +213,7 @@ def _assert_no_banned_mediation(steps):
     return steps
 
 
-def get_step_chain(sc_title, sc_validation, feature_context, feature_type=''):
+def get_step_chain(sc_title, sc_validation, feature_context, feature_type='', obligation=None):
     """Return list of (step_summary, expected_result) tuples based on scenario type.
 
     When feature_type='ui_portal', ALL scenarios route to UI step templates.
@@ -233,7 +270,8 @@ def get_step_chain(sc_title, sc_validation, feature_context, feature_type=''):
                  'no corrupted record persists'),
             ]
             return _assert_no_banned_mediation(steps)
-        steps = _prr_mediation_steps(sc_title, sc_validation, t, ctx, negative=False)
+        steps = _prr_mediation_steps(sc_title, sc_validation, t, ctx, negative=False,
+                                     obligation=obligation)
         # Regression-style scenario on a feature whose context names NBOP as the usage view:
         # also confirm the downstream NBOP view is unchanged.
         if 'nbop' in ctx and re.search(

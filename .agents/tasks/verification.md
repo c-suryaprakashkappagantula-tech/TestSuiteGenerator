@@ -1,155 +1,126 @@
-# Verification — Feature-class-aware step generation for Mediation/PRR/billing (MWTGPROV-4628)
+# Verification — TSG Mediation PRR step-1 input-clause fix
 
-Branch: `feat/tsg-mediation-steps`
-Worktree: `c:\Users\P3314665\Documents\mcp-jira-server\TestSuiteGenerator\.worktrees\tsg-mediation-steps`
+Branch: `feat/tsg-mediation-inputfix`
+Worktree: `c:\Users\P3314665\Documents\mcp-jira-server\TestSuiteGenerator\.worktrees\tsg-mediation-inputfix`
 venv python: `c:\Users\P3314665\Documents\mcp-jira-server\.venv\Scripts\python.exe`
 
-## What changed (root causes fixed)
+## What changed
 
-1. **Classification.** `modules/qmetry_pattern_library.py` gained a pure, no-I/O detector
-   `is_mediation_feature(*texts)` (signals: `mediation`, `prr`, `amdocs`, `billing record`,
-   `call_direction_ind`, `mms_type_indicator`, `tmo_prr_processing`, `biller sftp`, and the
-   component tokens `wpamed` / `[med` / `, med` / `med,`). A bare `nslnm` does NOT match.
-   `modules/tc_builder.py::classify_feature` now runs a **RULE 0** mediation check BEFORE the
-   `[NSLNM]→api` rule and returns `classification='batch_file'` for a mediation feature.
-   4628 previously logged `Classification: api (confidence=0.95, api_kw=['NSLNM'])`; it now
-   logs `Classification: batch_file`.
+- `modules/step_templates.py`
+  - Retired the fabricating fallback regex `_PRR_INPUT_RE`. `_prr_scenario_fields` now returns a
+    real conversion pair (via `_PRR_CONV_RE`) or empty for `in_descr` — it never scrapes two
+    adjacent tokens into a fake `"<word> = <word>"`.
+  - Added `_prr_input_file_clause(obligation, sc_title, sc_validation, t)` implementing the precise
+    branching rule: real `FIELD='VALUE'` from the obligation → authentic clause; otherwise a clean
+    generic clause by intent (VZW / CBRS / other-absent/non-MMS / generic TMO) with a plain generic
+    fallback. The result never contains a fabricated `=`.
+  - `_prr_mediation_steps(...)` gained an `obligation=None` kwarg; both the regression and positive
+    branches build step 1 from `_prr_input_file_clause`.
+  - `get_step_chain(...)` gained a keyword-only `obligation=None`, threaded into the `batch_file`
+    positive `_prr_mediation_steps` call. No other branch changed.
+- `modules/tc_builder.py`
+  - `_build_obligation_steps`: threads the scenario's first obligation into `_get_chain(...)` so
+    the real `MMS_TYPE_INDICATOR='MT'`/`='MO'` pair is rendered (TC2/TC3 preserved).
+  - `_build_scenario_tc` fallback: passes `obligation=None` explicitly.
+- `tests/test_mediation_input_clause.py` (NEW): real-pair, no-pair (no-loss / e2e / other-absent),
+  VZW, CBRS, synthesized-other-absent obligation, full-builder negative guard, and the
+  `get_step_chain` obligation-threading case.
+- `tests/test_authored_step_verbatim.py`: extended with the live-exact authored line
+  `"Let Mediation run the TMO_PRR_Processing_01 flow"` to lock verbatim pass-through.
+- `modules/output_sanitizer.py`: NOT edited. See "Authored-step artifact" below.
 
-2. **Step template.** `modules/step_templates.py` `get_step_chain` `batch_file` branch now calls
-   a new `_prr_mediation_steps(...)` helper that emits the PRR flow —
-   (1) place/ingest the TMO PRR input file → (2) run `TMO_PRR_Processing_01` mediation flow →
-   (3) retrieve the processed Amdocs TMO billing output record(s) → (4) inspect
-   `call_direction_ind` / the scenario output field and compare against the pre-change baseline.
-   No-impact/regression scenarios (BAU / VZW / CBRS / "unchanged") emit the baseline-compare
-   form (process → retrieve Amdocs → compare field-by-field/byte-for-byte, assert UNCHANGED).
-   A module-private `_BANNED_MEDIATION_PHRASES` frozenset + `_assert_no_banned_mediation()` makes
-   the NSL-provisioning chain **structurally unreachable** for the mediation class (asserts at the
-   end of the batch branch). The obligation path (`_build_obligation_steps`) and the plain
-   fallback path (`_build_scenario_tc`) both route to `batch_file` via `is_mediation_feature`.
-   Both `build_downstream_verification_steps` splice sites (positive ~line 1444 and negative
-   `_build_negative_tc` ~line 1834) are guarded to skip entirely for a mediation feature, so
-   Service Grouping / Century Report / TRANSACTION_HISTORY can never re-append.
+## Authored-step "Verify that let/retrieve" artifact — root cause & finding
 
-3. **Splitter/humanizer artifact.** `TestStep` gained `authored: bool = False`
-   (`modules/data_models_v8.py`). Authored QMetry steps (`steps_hint`) are now stamped
-   `authored=True` in both builders. `modules/output_sanitizer.py::polish_suite` computes
-   `_lock_summary = authored or _is_imperative(summary)` and suppresses the `'Verify that ' +
-   lower()` prefix/recase on those steps (the `"Verify that let Mediation…"` artifact). Expected-
-   result derivation, char-cleanup and length-trim still apply.
+`polish_suite` is the only pass that can prefix a step summary with "Verify that " (verified by
+grepping all of `modules/*.py`). It already locks a summary when `authored=True` OR the first word
+is an imperative verb (`_lock_summary`). A scratch reproduction (`_scratch_repro.py`, now deleted)
+built an obligation TC whose `steps_hint` included the live-exact lines
+`"Let Mediation run the TMO_PRR_Processing_01 flow"` and
+`"Retrieve the processed Amdocs TMO billing output record"`, ran it through
+`_build_scenario_tc` + `polish_suite`, and the lines came out byte-for-byte unchanged — the
+`authored=True` flag set in `_build_obligation_steps` is honored end-to-end. No leak reproduced, so
+`output_sanitizer.py` needed no edit. The behavior is now locked permanently by the extended
+`test_authored_step_verbatim.py`. The live 4628 re-run confirms zero artifacts (counts below).
 
-## Preserved
-- Obligation assertion steps still emit `Set/Verify <field>=<value>` with `obligation_id`
-  (R2/R5) — verified in the live run (TC1 steps 5-8) and `test_assertion_grounding.py`.
-- QMetry authored steps verbatim (TC2/TC3 and TC10-17) — now WITHOUT the "Verify that" artifact.
-- CHALK-GUARD: live run logged `Chalk coverage OK: 3/3 scenarios -> TCs`; 17 TCs produced,
-  source ordering unchanged (step CONTENT only).
-- Genuine non-mediation NSL features stay `api` (classification test
-  `test_pure_nsl_provisioning_stays_api`).
+## 1. py_compile
 
-## Commands run and results
-
-- **py_compile** (all edited modules + 3 new test files): exit 0.
-- **New tests** `tests/test_mediation_classification.py` + `tests/test_mediation_steps_structural.py`
-  + `tests/test_authored_step_verbatim.py`: **8 passed**.
-- **Targeted gate** `test_assertion_grounding.py` + `test_qmetry_steps_source.py` + the 3 new files:
-  **40 passed** (32 baseline + 8 new).
-- **Broad hermetic set** `pytest tests/ -k "not slow and not cache"` (ignoring the 28 documented
-  `shared`-ModuleNotFoundError collection files + the slow/pre-RED `test_suite_snapshot.py`):
-  **250 passed, 1 skipped, 7 failed**.
-  - The 7 failures are all PRE-EXISTING (confirmed by re-running them against a `git stash` of
-    only the 5 edited modules — identical 7 failures on pre-change code):
-    - 6 × `test_contract_bridge_ui_exports.py` → `ModuleNotFoundError: No module named 'shared'`
-      (same environment/path gap as the 28 baseline collection errors; `shared/` lives at the
-      MAIN repo root, absent from the worktree).
-    - 1 × `test_ac_gate.py::TestEnumerationHeaders::test_4349_role_list_survives` — unrelated to
-      this work (AC enumeration-header behaviour for feature 4349).
-  - **ZERO new regressions.** No snapshots were regenerated.
-
-## Live headless run — `python run_headless.py MWTGPROV-4628 PI-60`
-
-NOTE on data: the worktree's checked-in `tsg_cache.db` (168 KB stub) and
-`CABOT_CHALK_DB.db` (950 KB stub) contain NO 4628 data, so a run against them yields 0 TCs and
-no xlsx (as plan.md warned). To perform a genuine live run entirely inside the worktree, the
-MAIN checkout's caches were COPIED into the worktree (read-only from main; `tsg_cache.db` is
-gitignored). `CABOT_CHALK_DB.db` is git-TRACKED, so after the runs it was restored with
-`git checkout -- CABOT_CHALK_DB.db` and the stub `tsg_cache.db` was restored — neither is part
-of this commit, and the MAIN checkout was never written to.
-
-Result: **17 TCs | 70 steps**, `Classification: batch_file`, `CHALK-GUARD ... 3/3 scenarios -> TCs`.
-
-Produced xlsx (AFTER):
-`outputs/MWTGPROV-4628_60.2_-_New_MVNO_-_Update_TMO_MMS_TYPE_INDICATOR_Values_for_Amdocs_call_direction_ind_20261026_154229.xlsx`
-(absolute: the worktree `outputs/` folder; untracked build artifact.)
-
-### Banned-phrase grep across all 17 TCs (Test Cases sheet)
-`Trigger API`, `NSL processes request with 200 OK`, `Transaction ID generated`,
-`Download Century Report`, `Service Grouping`, `NE Portal`, `TRANSACTION_HISTORY`, `LINE_HISTORY`
-
-- BEFORE (pre-change code, same cache): **61 hits**
-  (`Trigger API`=6, `NSL...200 OK`=5, `Transaction ID generated`=5, `Download Century Report`=5,
-  `Service Grouping`=10, `NE Portal`=10, `TRANSACTION_HISTORY`=10, `LINE_HISTORY`=10)
-- AFTER (this change): **0 hits** — ZERO across all 17 TCs.
-
-PRR-flow verb counts AFTER: ingest=19, mediation=41, tmo_prr_processing=20, amdocs=42,
-call_direction_ind=24, baseline=13.
-
-### TC1 before/after (evidence)
-BEFORE:
 ```
-1 | Trigger API: input=other/absent -> output=BAU | NSL processes request with 200 OK. Transaction ID generated
-2 | Download Century Report (Service Grouping) | SERVICE_GROUPING HTML downloaded
-3 | Verify NE Portal transactions | NE Portal shows transaction completed
-4 | Validate Service Grouping for: input=other/absent -> output=BAU | other/absent value
-5 | Check audit logs (TRANSACTION_HISTORY & LINE_HISTORY) | TRANSACTION_HISTORY and LINE_HISTORY show ...
-6 | Set input = other/absent | Input is set to other/absent.
-7 | Verify output = BAU | output equals BAU in the produced record.
-8 | Set MMS_TYPE_INDICATOR = other/absent | Input MMS_TYPE_INDICATOR is set to other/absent.
-9 | Verify call_direction_ind = BAU | call_direction_ind equals BAU in the produced record.
+python -m py_compile modules/step_templates.py modules/tc_builder.py modules/output_sanitizer.py
 ```
-AFTER:
-```
-1 | Place/ingest the TMO PRR input file containing absent onto the biller SFTP | PRR input file is staged and picked up by Mediation for processing
-2 | Run the TMO_PRR_Processing_01 mediation flow (let Mediation process the file) | Mediation processes the PRR file and emits the Amdocs TMO billing record(s)
-3 | Retrieve the processed Amdocs TMO billing output record(s) for the test data | Amdocs TMO billing output record(s) are produced and available
-4 | Inspect the call_direction_ind field in the Amdocs output and compare against the pre-change baseline | call_direction_ind = output in the Amdocs TMO billing output record; all other fields remain as BAU
-5 | Set input = other/absent | Input is set to other/absent.
-6 | Verify output = BAU | output equals BAU in the produced record.
-7 | Set MMS_TYPE_INDICATOR = other/absent | Input MMS_TYPE_INDICATOR is set to other/absent.
-8 | Verify call_direction_ind = BAU | call_direction_ind equals BAU in the produced record.
-```
+Result: EXIT=0.
 
-### TC8 before/after (evidence)
-BEFORE:
-```
-1 | Trigger API: The 'MT' to 'I' conversion end to end ... | NSL processes request with 200 OK. Transaction ID generated
-2 | Download Century Report (Service Grouping) | SERVICE_GROUPING HTML downloaded
-3 | Verify NE Portal transactions | NE Portal shows transaction completed
-4 | Validate Service Grouping for: The 'MT' to 'I' conversion ... | Validate the 'MT' to 'I' conversion end to end ...
-5 | Check audit logs (TRANSACTION_HISTORY & LINE_HISTORY) | TRANSACTION_HISTORY and LINE_HISTORY show ...
-```
-AFTER:
-```
-1 | Place/ingest the TMO PRR input file containing conversion = end onto the biller SFTP | PRR input file is staged and picked up by Mediation for processing
-2 | Run the TMO_PRR_Processing_01 mediation flow (let Mediation process the file) | Mediation processes the PRR file and emits the Amdocs TMO billing record(s)
-3 | Retrieve the processed Amdocs TMO billing output record(s) for the test data | Amdocs TMO billing output record(s) are produced and available
-4 | Inspect the call_direction_ind field (scenario output) in the Amdocs output and compare against the pre-change baseline | Validate the 'MT' to 'I' conversion end to end in the TMO billing record delivered to Amdocs.
-```
+## 2. Unit + hermetic tests
 
-### Authored QMetry TCs — artifact removed
-TC2 (MO→O) / TC3 (MT→I) step 2 now reads verbatim `Let Mediation run the TMO_PRR_Processing_01
-flow.` — previously `Verify that let Mediation run the TMO_PRR_Processing_01 flow.`. The
-"Verify that let Mediation…" artifact is gone. TC10-17 (QMetry Test Case) are clean and PRR-shaped.
+```
+python -m pytest tests/test_mediation_input_clause.py tests/test_mediation_steps_structural.py \
+  tests/test_mediation_classification.py tests/test_assertion_grounding.py \
+  tests/test_authored_step_verbatim.py -q
+```
+Result: **29 passed** (0 failed). Includes the 11 assertion-grounding tests, the 3 mediation tests
+from the prior fix (structural + classification 17-TC / 3→TC chalk-guard), the authored-verbatim
+tests, and the new input-clause suite.
 
-## Known cosmetic imperfections (NOT NSL boilerplate, NOT the reported artifacts)
-- The crude input-field extractor for plain Jira-AC fallback TCs occasionally yields awkward
-  phrases in step 1, e.g. TC7 `...containing loss = of...`, TC8 `...containing conversion = end...`.
-  These are PRR-flow steps (ingest → TMO_PRR_Processing_01 → retrieve Amdocs → baseline) with
-  imperfect value parsing — no banned phrase, no NSL step.
-- TC6 (`No impact to Verizon or CBRS billing records`) routed to a notification-content template
-  (VZW notification-format comparison) rather than the PRR baseline-compare form, because its
-  Jira-AC text matched the notification-content heuristic. Still contains zero banned NSL phrases.
-- A couple of authored steps show expected==summary echo (step 2/3 of TC2/TC3) — an expected-
-  result derivation detail, not the banned summary artifact.
+## 2b. Broader non-cache set — git-stash baseline delta (zero NEW regressions)
 
-These are reported for the reviewer's judgement; the root-cause mandate (no NSL steps for the
-mediation class, PRR-flow shaped, authored verbatim without the "Verify that" artifact) is met.
+```
+python -m pytest -q -m "not slow" --continue-on-collection-errors
+```
+- WITH changes:  26 failed, 257 passed, 4 skipped, 73 deselected, 28 collection errors.
+- BASELINE (git stash of ONLY the edited source files `modules/step_templates.py` +
+  `modules/tc_builder.py` + `tests/test_authored_step_verbatim.py`, and the new test files hidden):
+  identical — 54 FAILED/ERROR node ids.
+- `Compare-Object before_fails.txt after_fails.txt` → **IDENTICAL — zero new regressions.**
+- The 26 failures + 28 collection errors are pre-existing environment issues (e.g.
+  `ModuleNotFoundError: No module named 'shared'` for the contract-bridge/crawl tests, and
+  CR-path/descriptions/eligibility tests that need live DB fixtures). They fail the same way on the
+  clean baseline. No snapshots were regenerated to mask anything.
+
+## 3. Live re-run (real generator)
+
+Caches `tsg_cache.db` and `CABOT_CHALK_DB.db` were copied READ-ONLY from
+`...\TestSuiteGenerator` into the worktree, then removed/restored afterward (worktree left clean —
+`git status` shows only the four intended edits + the new test file).
+
+```
+python run_headless.py MWTGPROV-4628 PI-60
+```
+Produced: `outputs/MWTGPROV-4628_60.2_-_New_MVNO_-_Update_TMO_MMS_TYPE_INDICATOR_Values_for_Amdocs_call_direction_ind_20261026_165322.xlsx`
+Result line: `[RESULT] 17 TCs generated (70 steps total)`; `[PIPELINE] Chalk DB Scenarios ... 3 items`
+→ **17 TCs, CHALK-GUARD 3/3 scenarios→TCs. Unchanged.**
+
+### Acceptance checks read from the produced xlsx
+
+- **Banned NSL phrases:** trigger api=0, nsl 200=0, download century report=0, service grouping=0,
+  ne portal=0, transaction_history=0, line_history=0 → **TOTAL 0 hits.**
+- **"Verify that let" = 0, "Verify that retrieve" = 0** → artifact gone.
+- **Fabricated `<word> = <word>` in any Place/ingest step = 0.**
+- **TC2/TC3 clause:** `containing MMS_TYPE_INDICATOR='MT'` present (2), `='MO'` present (2) — kept,
+  with the obligation Set/Verify assertion steps intact.
+- Distinct Place/ingest step-1 texts produced (all clean):
+  - `Place/ingest the TMO PRR input file containing MMS_TYPE_INDICATOR='MO'.`
+  - `Place/ingest the TMO PRR input file containing MMS_TYPE_INDICATOR='MT'.`
+  - `Place/ingest a Verizon (VZW) PRR input file onto the biller SFTP.`
+  - `Place/ingest a TMO PRR input file containing records with a non-MMS / other MMS_TYPE_INDICATOR value onto the biller SFTP.`
+  - `Place/ingest a representative TMO PRR input file onto the biller SFTP.`
+
+### Per-TC step-1 evidence (AFTER). BEFORE = the fabricated artifact from the prior live 4628.
+
+| TC | BEFORE (prior build, fabricated) | AFTER (this build) |
+|---|---|---|
+| TC01 (input other/absent → BAU) | `...containing absent ...` | `Place/ingest a TMO PRR input file containing records with a non-MMS / other MMS_TYPE_INDICATOR value onto the biller SFTP.` |
+| TC04 (VZW/CBRS processing active) | `...the VZW/CBRS PRR input file (...)` | `Place/ingest a Verizon (VZW) PRR input file onto the biller SFTP.` |
+| TC07 (No loss of existing functionality) | `...containing loss = of ...` | `Place/ingest a representative TMO PRR input file onto the biller SFTP.` |
+| TC08 (MT→I conversion end to end) | `...containing conversion = end ...` (a.k.a. `Validate = the`) | `Place/ingest a representative TMO PRR input file onto the biller SFTP.` |
+
+QMetry-authored TC10–TC17 step-1 lines pass through verbatim and clean (e.g. TC14
+`Process a CBRS PRR file.`, TC15 `Process a Verizon PRR file through the VZW processing flow.`,
+TC10 `Ingest the TMO PRR file with the malformed record.`). No fabricated pairs, no
+"Verify that" prefixes.
+
+## Cleanup
+
+- Copied read-only caches removed; `CABOT_CHALK_DB.db` restored to the committed version;
+  gitignored `tsg_cache.db` restored from backup; run-created `outputs/` artifacts and all
+  `_scratch_*` probes deleted. `git status` shows only: `modules/step_templates.py`,
+  `modules/tc_builder.py`, `tests/test_authored_step_verbatim.py`, `tests/test_mediation_input_clause.py`
+  (plus a pre-existing, untouched `.agents/tasks/plan.md` modification that is not part of this fix).

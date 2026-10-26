@@ -29,6 +29,11 @@ def _tc():
                  summary='Inspect the call_direction_ind field in the output record',
                  expected='call_direction_ind equals I in the produced record.',
                  authored=False),  # not authored, but already imperative
+        # Live-exact 4628 line that showed up as 'Verify that let Mediation run ...' — lock it.
+        TestStep(step_num=4,
+                 summary='Let Mediation run the TMO_PRR_Processing_01 flow',
+                 expected='Mediation runs the TMO_PRR_Processing_01 flow successfully.',
+                 authored=True),
     ]
     return TestCase(summary='MWTGPROV-4628_Authored_Mediation_Steps', steps=steps,
                     traceability=tr, category='Happy Path',
@@ -48,6 +53,11 @@ def test_authored_steps_not_verify_prefixed_or_recased():
     s2 = tc.steps[1].summary
     assert s2.startswith('Retrieve ')
     assert not s2.lower().startswith('verify that')
+
+    # Live-exact artifact line: must survive byte-for-byte, no 'Verify that let ...'.
+    s4 = tc.steps[3].summary
+    assert s4 == 'Let Mediation run the TMO_PRR_Processing_01 flow', s4
+    assert not s4.lower().startswith('verify that')
 
 
 def test_imperative_non_authored_step_not_verify_prefixed():
