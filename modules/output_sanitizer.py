@@ -545,12 +545,18 @@ def polish_suite(suite, log: Callable = print) -> dict:
         for st in steps:
             s0, e0 = getattr(st, 'summary', '') or '', getattr(st, 'expected', '') or ''
             s, e = _fix_body(s0), _fix_body(e0)
+            # Authored (QMetry) steps and already-imperative steps keep their summary
+            # verbatim: never apply a 'Verify that ' prefix or re-casing. Char cleanup,
+            # length trim, and expected-result derivation still apply — only the
+            # summary-rewriting rules below are suppressed when _lock_summary is True.
+            _authored = bool(getattr(st, 'authored', False))
+            _lock_summary = _authored or _is_imperative(s)
             if _POL_STEP_PREFIX_RE.match(s):
                 s = _POL_STEP_PREFIX_RE.sub('', s); c['prefix'] += 1
             m = _POL_ECHO_RE.match(e)
             if m:
                 stmt = m.group(1).strip().rstrip(' .')
-                if stmt and _norm(stmt) == _norm(s):
+                if stmt and _norm(stmt) == _norm(s) and not _lock_summary:
                     # Declarative Chalk line written as both step and '<same> - confirmed'.
                     # Make the step the check and the statement its expected result.
                     _v = _POL_VERDICT_RE.match(s.rstrip(' .'))
@@ -579,7 +585,7 @@ def polish_suite(suite, log: Callable = print) -> dict:
                     x = _expected_for_step(s, neg)
                     if _norm(x) != _norm(s) and not _POL_WEAK_EXP.match(x):
                         e = x; c['generic'] += 1
-                elif re.match(r'^[A-Za-z]', s) and len(s.split()) >= 3:
+                elif re.match(r'^[A-Za-z]', s) and len(s.split()) >= 3 and not _lock_summary:
                     # Declarative outcome written as the step ('NSL rejects ... ERR333'):
                     # it is the expected result; the step becomes the check.
                     e = _ucfirst(s.rstrip(' .')) + '.'
@@ -632,6 +638,7 @@ def polish_suite(suite, log: Callable = print) -> dict:
                 if _norm(x) in used and '->' in summ:      # same outcome as a sibling
                     x = _expected_for_step(summ.split('->', 1)[0], neg)
                 if _norm(x) == _norm(summ) and not _is_imperative(summ) \
+                        and not getattr(st, 'authored', False) \
                         and re.match(r'^[A-Za-z]', summ) and not _POL_CHECK_VERB_RE.match(summ):
                     _f = summ.split(' ', 1)[0]
                     _s = summ if re.fullmatch(r'[A-Z][a-z]+', _f) is None else summ[0].lower() + summ[1:]
@@ -651,7 +658,8 @@ def polish_suite(suite, log: Callable = print) -> dict:
                     x = _expected_for_step(summ, neg)
                     if _norm(x) != _norm(summ):
                         st.expected = x; c['generic'] += 1
-                elif re.match(r'^[A-Za-z]', summ) and not _POL_CHECK_VERB_RE.match(summ):
+                elif re.match(r'^[A-Za-z]', summ) and not _POL_CHECK_VERB_RE.match(summ) \
+                        and not getattr(st, 'authored', False):
                     _f = summ.split(' ', 1)[0]
                     _s = summ if re.fullmatch(r'[A-Z][a-z]+', _f) is None else summ[0].lower() + summ[1:]
                     st.summary = 'Verify that ' + _s.rstrip(' .') + '.'

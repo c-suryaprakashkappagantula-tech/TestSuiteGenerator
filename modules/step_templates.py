@@ -60,6 +60,122 @@ def assertion_step_texts(obligation):
     return (set_summary, set_expected, assert_summary, assert_expected)
 
 
+# ── Mediation / PRR / billing step builder ────────────────────────────────────
+# Phrases that belong to the NSL-provisioning flow and MUST NEVER appear in a
+# mediation/PRR/billing step chain. Used as a structural guard at the end of the
+# batch_file branch so the NSL chain is unreachable for the mediation class.
+_BANNED_MEDIATION_PHRASES = frozenset({
+    'trigger api', 'century report', 'service grouping', 'ne portal',
+    'transaction_history', 'line_history', '200 ok', 'transactionid', 'oauth',
+})
+
+# Field tokens used to pull a concrete input/output pair out of a scenario so the
+# PRR steps name the real field/value rather than reading as generic boilerplate.
+_PRR_INPUT_RE = re.compile(
+    r'(MMS_TYPE_INDICATOR|call_direction_ind|[A-Z][A-Z0-9_]{3,})\s*(?:value\s*)?'
+    r'[=\'"\s]*\s*([A-Za-z0-9]{1,8})\b', re.I)
+_PRR_CONV_RE = re.compile(
+    r"['\"]?([A-Za-z0-9]{1,8})['\"]?\s*(?:->|→|is converted to|converts? to|maps? to)\s*"
+    r"['\"]?([A-Za-z0-9]{1,8})['\"]?", re.I)
+
+
+def _prr_scenario_fields(title, validation):
+    """Best-effort extraction of (input_descr, output_field, output_value) from a
+    PRR/mediation scenario. Returns ('', 'call_direction_ind', '') when nothing is
+    found so the steps still name the canonical output field."""
+    blob = '%s %s' % (title or '', validation or '')
+    out_field = 'call_direction_ind'
+    m_field = re.search(r'\b(call_direction_ind|[a-z][a-z0-9_]{4,})\b\s*(?:field|=)', blob, re.I)
+    if m_field and '_' in m_field.group(1):
+        out_field = m_field.group(1)
+    conv = _PRR_CONV_RE.search(blob)
+    if conv:
+        return ('%s = %s' % ('MMS_TYPE_INDICATOR', conv.group(1))
+                if 'mms_type' in blob.lower() else conv.group(1),
+                out_field, conv.group(2))
+    mi = _PRR_INPUT_RE.search(blob)
+    if mi:
+        return ('%s = %s' % (mi.group(1), mi.group(2)), out_field, '')
+    return ('', out_field, '')
+
+
+def _prr_mediation_steps(sc_title, sc_validation, t, ctx, negative=False):
+    """PRR/mediation flow steps (NO NSL-provisioning steps).
+
+    Positive mapping scenario (e.g. MMS_TYPE_INDICATOR MT -> call_direction_ind I):
+      1. ingest the TMO PRR input file containing the scenario input
+      2. run the TMO_PRR_Processing mediation flow
+      3. retrieve the processed Amdocs TMO billing output record(s)
+      4. inspect the output field / compare against the pre-change baseline
+    No-impact / regression scenario (BAU, VZW/CBRS, 'remains unchanged'):
+      process the relevant PRR file -> retrieve Amdocs output -> compare
+      field-by-field / byte-for-byte against the baseline, asserting UNCHANGED.
+    """
+    in_descr, out_field, out_value = _prr_scenario_fields(sc_title, sc_validation)
+    _sc = _trim_title(sc_title, 70)
+    _regression = bool(re.search(
+        r'\b(?:unchanged|unaffected|no\s+impact|no\s+regression|regression|remains?'
+        r'\s+(?:as\s+)?(?:bau|the\s+same)|bau|verizon|vzw|cbrs|byte[- ]for[- ]byte)\b',
+        t))
+
+    if _regression and not out_value:
+        file_descr = 'the relevant PRR input file for this scenario (%s)' % _sc
+        if re.search(r'\b(?:verizon|vzw|cbrs)\b', t):
+            file_descr = 'the VZW/CBRS PRR input file (%s)' % _sc
+        steps = [
+            ('Place/ingest %s onto the biller SFTP for Mediation pickup' % file_descr,
+             'PRR input file is staged and picked up by Mediation for processing'),
+            ('Run the TMO_PRR_Processing_01 mediation flow (let Mediation process the file)',
+             'Mediation processes the PRR file without errors'),
+            ('Retrieve the processed Amdocs TMO billing output record(s) for the test data',
+             'Amdocs TMO billing output record(s) are produced and available'),
+            ('Compare the Amdocs output record(s) field-by-field/byte-for-byte against the '
+             'pre-change baseline and assert they are UNCHANGED',
+             sc_validation or 'Output records match the pre-change baseline exactly — '
+             'no unintended change (BAU preserved)'),
+        ]
+        return steps
+
+    # Positive / mapping flow
+    _input_clause = (('containing %s' % in_descr) if in_descr
+                     else 'containing the input field/value for this scenario (%s)' % _sc)
+    if out_value:
+        _inspect = ('Inspect the %s field in the Amdocs output and compare against the '
+                    'pre-change baseline' % out_field)
+        _inspect_exp = ('%s = %s in the Amdocs TMO billing output record; all other fields '
+                        'remain as BAU' % (out_field, out_value))
+    else:
+        _inspect = ('Inspect the %s field (scenario output) in the Amdocs output and compare '
+                    'against the pre-change baseline' % out_field)
+        _inspect_exp = (sc_validation or 'The %s output field matches the expected value; '
+                        'all other fields remain as BAU' % out_field)
+    steps = [
+        ('Place/ingest the TMO PRR input file %s onto the biller SFTP' % _input_clause,
+         'PRR input file is staged and picked up by Mediation for processing'),
+        ('Run the TMO_PRR_Processing_01 mediation flow (let Mediation process the file)',
+         'Mediation processes the PRR file and emits the Amdocs TMO billing record(s)'),
+        ('Retrieve the processed Amdocs TMO billing output record(s) for the test data',
+         'Amdocs TMO billing output record(s) are produced and available'),
+        (_inspect, _inspect_exp),
+    ]
+    return steps
+
+
+def _assert_no_banned_mediation(steps):
+    """Structural guard: no NSL-provisioning phrase may appear in a mediation chain.
+
+    Raises AssertionError so the structural test can rely on it, which makes the
+    banned NSL chain unreachable for the mediation/PRR class.
+    """
+    for _s, _e in (steps or []):
+        blob = ('%s %s' % (_s or '', _e or '')).lower()
+        for banned in _BANNED_MEDIATION_PHRASES:
+            assert banned not in blob, (
+                'Mediation/PRR step chain contains banned NSL-provisioning phrase '
+                '%r: %r' % (banned, _s))
+    return steps
+
+
 def get_step_chain(sc_title, sc_validation, feature_context, feature_type=''):
     """Return list of (step_summary, expected_result) tuples based on scenario type.
 
@@ -103,36 +219,28 @@ def get_step_chain(sc_title, sc_validation, feature_context, feature_type=''):
             'prr file', 'prr usage', 'batch file', 'sftp ingest', 'file ingestion',
             'batch ingest', 'usage file', 'tmo prr')):
         if _is_negative(t):
-            return [
-                ('Prepare a PRR/batch file with invalid or out-of-spec data (e.g. wrong field type, '
-                 'field length exceeds maximum, non-numeric value in numeric field)',
-                 'Invalid file prepared and staged on SFTP for ingestion'),
-                ('Trigger the batch file ingestion process for the prepared invalid file',
-                 'File is picked up by the ingest scheduler / triggered manually'),
-                ('Monitor the processing log / error report for the ingested file',
-                 'Processing log shows file rejected or records skipped — error details captured'),
-                ('Verify no invalid data is written to NSL DB (subscriber records unchanged)',
-                 'NSL DB records for test subscriber remain unaffected; no corrupted data persists'),
+            steps = [
+                ('Place/ingest a PRR input file with invalid or out-of-spec data for this '
+                 'scenario (e.g. wrong field type, field length exceeds maximum, non-numeric '
+                 'value in numeric field) onto the biller SFTP',
+                 'Invalid PRR input file is staged for Mediation pickup'),
+                ('Run the TMO_PRR_Processing_01 mediation flow for the prepared invalid file',
+                 'Mediation picks up and attempts to process the PRR file'),
+                ('Inspect the Mediation processing/error report for the ingested file',
+                 'Processing report shows the file/record rejected — error details captured'),
+                ('Verify no invalid data reaches the Amdocs TMO billing output (records unchanged)',
+                 'Amdocs TMO billing records for the test data remain unaffected; '
+                 'no corrupted record persists'),
             ]
-        steps = [
-            ('Prepare a valid PRR/batch file with test subscriber data matching the scenario: %s'
-             % _trim_title(sc_title, 70),
-             'PRR/batch file is correctly formatted, field types/lengths within spec, '
-             'staged on SFTP server ready for ingestion'),
-            ('Trigger the batch file ingestion process (scheduler pick-up or manual trigger)',
-             'File is picked up from SFTP and ingestion process starts successfully'),
-            ('Monitor processing log to confirm file is processed without errors',
-             'Processing log shows all records accepted; no parse errors or field violations'),
-            ('Verify NSL DB / downstream system reflects the updated subscriber data from the file',
-             sc_validation or 'Subscriber data updated correctly — field values match PRR file input'),
-        ]
-        # Regression-style scenario ('... remains unchanged') on a feature whose context
-        # names NBOP as the usage view: also confirm the downstream NBOP view is unchanged.
+            return _assert_no_banned_mediation(steps)
+        steps = _prr_mediation_steps(sc_title, sc_validation, t, ctx, negative=False)
+        # Regression-style scenario on a feature whose context names NBOP as the usage view:
+        # also confirm the downstream NBOP view is unchanged.
         if 'nbop' in ctx and re.search(
                 r'\b(?:unchanged|unaffected|no\s+regression|regression|remains?\s+the\s+same)\b', t):
             steps.append(('Open NBOP usage details for the test line',
                           'Usage displays exactly as before the change'))
-        return steps
+        return _assert_no_banned_mediation(steps)
 
     # Check negative/error FIRST — but Sync Key Info negatives get their own handler
     if _is_negative(t):

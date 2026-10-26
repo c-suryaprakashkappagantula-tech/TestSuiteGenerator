@@ -27,6 +27,7 @@ from .data_models_v8 import (
 from .integration_contract import (
     resolve_operation, build_downstream_verification_steps,
 )
+from . import qmetry_pattern_library
 
 
 # Confluence macro remnants ({{code}}, trailing }}, stray }) leak from Jira AC and
@@ -144,6 +145,21 @@ def classify_feature(jira_summary: str, ac_text: str) -> FeatureClassification:
 
     _has_nbop_component = 'NBOP' in _prefix_part if _has_prefix else False
     _has_nslnm_component = any(kw in _prefix_part for kw in ['NSLNM', 'NENM']) if _has_prefix else False
+
+    # ── RULE 0: Mediation / PRR / billing → batch_file (BEFORE the NSLNM→api rule) ──
+    # A Mediation/PRR/billing feature (e.g. MWTGPROV-4628, whose summary carries
+    # [NSLNM ...] but whose body is about MMS_TYPE_INDICATOR → call_direction_ind in the
+    # Amdocs TMO billing record) must NOT fall through to RULE 1 and classify as api — that
+    # routes it to NSL-provisioning step templates (Trigger API / NE Portal / Century Report).
+    # Reuse the existing 'batch_file' label that get_step_chain already understands.
+    # A pure [NSLNM] feature with NO mediation signal does not match here (stays RULE 1 → api).
+    if qmetry_pattern_library.is_mediation_feature(jira_summary or '', ac_text or ''):
+        return FeatureClassification(
+            classification='batch_file',
+            api_keywords_found=[],
+            ui_keywords_found=[],
+            confidence=0.95,
+        )
 
     # ── RULE 1: [NSLNM/NENM] without [NBOP] → always API ──
     if _has_nslnm_component and not _has_nbop_component:
@@ -1046,6 +1062,7 @@ def _build_obligation_steps(scenario, api_context, jira=None, feature_name='', f
                 summary=_h,
                 expected=_exp,
                 data_reference=_src_id,
+                authored=True,
             ))
     else:
         # ── Grounded chain first (same machinery as the non-obligation path) ──
@@ -1056,13 +1073,19 @@ def _build_obligation_steps(scenario, api_context, jira=None, feature_name='', f
             _ctx = ((feature_name or '') + ' ' + (scenario.validation or '')).lower()
             _ft = feature_type
             _full_summary = ((getattr(jira, 'summary', '') or '') if jira else '').lower()
-            if _ft != 'ui' and any(kw in _full_summary for kw in (
-                    'prr file', 'prr usage', 'batch file', 'sftp', 'file ingestion',
-                    'batch ingest', 'usage file', 'mediation file')):
+            _jdesc = (getattr(jira, 'description', '') or '') if jira else ''
+            _jac = (getattr(jira, 'acceptance_criteria', '') or '') if jira else ''
+            # Mediation/PRR/billing features (e.g. 4628) must get PRR-flow steps, never NSL.
+            # Route through the batch_file branch of get_step_chain when a real mediation
+            # signal is present in the feature summary/description/AC or the scenario text.
+            if _ft != 'ui' and (
+                    _ft == 'batch_file'
+                    or qmetry_pattern_library.is_mediation_feature(
+                        _full_summary, _jdesc, _jac, scenario.validation or '',
+                        scenario.title or '', feature_name or '')):
                 _ft = 'batch_file'
             if _ft == 'batch_file' and jira and 'nbop' not in _ctx and 'nbop' in (
-                    '%s %s %s' % (_full_summary, getattr(jira, 'description', '') or '',
-                                  getattr(jira, 'acceptance_criteria', '') or '')).lower():
+                    '%s %s %s' % (_full_summary, _jdesc, _jac)).lower():
                 _ctx += ' nbop'
             _chain = _get_chain(scenario.title, scenario.validation, _ctx, feature_type=_ft)
             for (_s, _e) in (_chain or []):
@@ -1211,6 +1234,7 @@ def _build_scenario_tc(
                 summary=hint,
                 expected=_exp,
                 data_reference=scenario.source.source_id,
+                authored=True,
             ))
         # Add final verification step with the actual validation from Chalk
         # GUARD: Only append when steps_hint was empty or had generic content.
@@ -1413,13 +1437,18 @@ def _build_scenario_tc(
         # the FULL Jira summary; only this routing flag changes, ctx stays as before.
         _ft = feature_type
         _full_summary = ((getattr(jira, 'summary', '') or '') if jira else '').lower()
-        if _ft != 'ui' and any(kw in _full_summary for kw in (
-                'prr file', 'prr usage', 'batch file', 'sftp', 'file ingestion',
-                'batch ingest', 'usage file', 'mediation file')):
+        _jdesc = (getattr(jira, 'description', '') or '') if jira else ''
+        _jac = (getattr(jira, 'acceptance_criteria', '') or '') if jira else ''
+        # Mediation/PRR/billing features route QMetry-unmatched Chalk/Jira-AC TCs to the
+        # PRR file-ingestion branch instead of _api_flow_steps (Trigger API / Century Report).
+        if _ft != 'ui' and (
+                _ft == 'batch_file'
+                or qmetry_pattern_library.is_mediation_feature(
+                    _full_summary, _jdesc, _jac, scenario.validation or '',
+                    scenario.title or '', feature_name or '')):
             _ft = 'batch_file'
         if _ft == 'batch_file' and jira and 'nbop' not in _ctx and 'nbop' in (
-                '%s %s %s' % (_full_summary, getattr(jira, 'description', '') or '',
-                              getattr(jira, 'acceptance_criteria', '') or '')).lower():
+                '%s %s %s' % (_full_summary, _jdesc, _jac)).lower():
             # The batch template returns before any other ctx check; this marker only lets
             # it add the downstream NBOP usage check when the feature itself names NBOP.
             _ctx += ' nbop'
@@ -1440,8 +1469,18 @@ def _build_scenario_tc(
     # Syniverse dual-assertion, NBOP MIG tables, and TMO Genesis — not just the
     # API request/response. Only fires for operations with a known integration
     # contract; read-only/inquiry/UI-only features resolve to None and get nothing.
+    # GUARD: skip entirely for a Mediation/PRR/billing feature — those NSL splices
+    # (Service Grouping / Century Report / TRANSACTION_HISTORY) are wrong for a
+    # mediation class and must be structurally unreachable there.
+    _is_mediation_tc = (
+        feature_type == 'batch_file'
+        or qmetry_pattern_library.is_mediation_feature(
+            (getattr(jira, 'summary', '') or '') if jira else '',
+            (getattr(jira, 'description', '') or '') if jira else '',
+            (getattr(jira, 'acceptance_criteria', '') or '') if jira else '',
+            scenario.validation or '', scenario.title or '', feature_name or ''))
     try:
-        _contract = resolve_operation(
+        _contract = None if _is_mediation_tc else resolve_operation(
             feature_name,
             description=(scenario.validation or scenario.title or ''),
         )
@@ -1830,8 +1869,15 @@ def _build_negative_tc(
         ]
 
     # ── Inject "no unintended downstream change" assertion (negative-path depth) ──
+    # GUARD: skip for Mediation/PRR/billing features (no NSL splices on mediation class).
+    _neg_is_mediation = qmetry_pattern_library.is_mediation_feature(
+        (getattr(jira, 'summary', '') or '') if jira else '',
+        (getattr(jira, 'description', '') or '') if jira else '',
+        (getattr(jira, 'acceptance_criteria', '') or '') if jira else '',
+        feature_name or '', condition or '')
     try:
-        _neg_contract = resolve_operation(feature_name, description=condition)
+        _neg_contract = None if _neg_is_mediation else resolve_operation(
+            feature_name, description=condition)
         if _neg_contract is not None:
             _existing_neg = [s.summary for s in steps]
             _ds_neg = build_downstream_verification_steps(

@@ -1,126 +1,155 @@
-# Verification — QMetry-only unmatched TCs become NEW test cases
+# Verification — Feature-class-aware step generation for Mediation/PRR/billing (MWTGPROV-4628)
 
-Feature: **MWTGPROV-4628** (PI-60). All runs via the worktree venv
-`c:\Users\P3314665\Documents\mcp-jira-server\.venv\Scripts\python.exe` from inside the
-worktree `…\.worktrees\tsg-qmetry-newtcs`.
+Branch: `feat/tsg-mediation-steps`
+Worktree: `c:\Users\P3314665\Documents\mcp-jira-server\TestSuiteGenerator\.worktrees\tsg-mediation-steps`
+venv python: `c:\Users\P3314665\Documents\mcp-jira-server\.venv\Scripts\python.exe`
 
-## 1. py_compile
-`python -m py_compile modules/traceability.py modules/grounding_scorer.py
-modules/qmetry_steps_source.py tests/test_qmetry_steps_source.py` → **PY_COMPILE OK**.
+## What changed (root causes fixed)
 
-## 2. Existing hermetic tests (16 QMetry + 11 assertion-grounding) + protected-gate
-`python -m pytest tests/test_qmetry_steps_source.py tests/test_assertion_grounding.py
-tests/test_protected_gate.py -q`
-- Baseline (before edits): **56 passed**.
-- After edits: **61 passed** (56 + 5 new tests). Zero regressions.
-- `tests/test_qmetry_steps_source.py` alone → **21 passed** (16 original + 5 new).
-- `tests/test_assertion_grounding.py` alone → **11 passed**.
+1. **Classification.** `modules/qmetry_pattern_library.py` gained a pure, no-I/O detector
+   `is_mediation_feature(*texts)` (signals: `mediation`, `prr`, `amdocs`, `billing record`,
+   `call_direction_ind`, `mms_type_indicator`, `tmo_prr_processing`, `biller sftp`, and the
+   component tokens `wpamed` / `[med` / `, med` / `med,`). A bare `nslnm` does NOT match.
+   `modules/tc_builder.py::classify_feature` now runs a **RULE 0** mediation check BEFORE the
+   `[NSLNM]→api` rule and returns `classification='batch_file'` for a mediation feature.
+   4628 previously logged `Classification: api (confidence=0.95, api_kw=['NSLNM'])`; it now
+   logs `Classification: batch_file`.
 
-## 3. New unit tests (mock client, no network)
-Added to `tests/test_qmetry_steps_source.py`:
-- `test_unmatched_eligible_tc_added_as_new` — one matched TC (MT→I, tier-1, enriched, NOT
-  re-added) + one unmatched eligible TC (mixed-file "Both MT and MO") → exactly **one** new
-  scenario appended; title/validation = QMetry summary; `category == 'E2E'`; `steps_hint` =
-  authored steps; `_qmetry_expected` = authored last expected; `source.source_type ==
-  'QMetry Test Case'` with `source_id` = TC key; matched scenario not duplicated.
-- `test_matched_tc_not_added_as_new` — both TCs match (tier-1 + tier-2) → **no** new TCs.
-- `test_ineligible_tc_not_added` — wrong story-linkage TC → not enriched AND not added.
-- `test_category_inference` — 'regression'/'no impact'→Regression, 'end to end'/mixed-file
-  →E2E, else→Happy Path.
-- `test_new_tc_builds_through_scenario_pipeline` — a new scenario runs through the engine's
-  own `_build_scenario_tc`: authored steps survive, authored expected lands on the last
-  authored step, non-empty summary, category in `_VALID_CATEGORIES`.
-All pass (part of the 21 above).
+2. **Step template.** `modules/step_templates.py` `get_step_chain` `batch_file` branch now calls
+   a new `_prr_mediation_steps(...)` helper that emits the PRR flow —
+   (1) place/ingest the TMO PRR input file → (2) run `TMO_PRR_Processing_01` mediation flow →
+   (3) retrieve the processed Amdocs TMO billing output record(s) → (4) inspect
+   `call_direction_ind` / the scenario output field and compare against the pre-change baseline.
+   No-impact/regression scenarios (BAU / VZW / CBRS / "unchanged") emit the baseline-compare
+   form (process → retrieve Amdocs → compare field-by-field/byte-for-byte, assert UNCHANGED).
+   A module-private `_BANNED_MEDIATION_PHRASES` frozenset + `_assert_no_banned_mediation()` makes
+   the NSL-provisioning chain **structurally unreachable** for the mediation class (asserts at the
+   end of the batch branch). The obligation path (`_build_obligation_steps`) and the plain
+   fallback path (`_build_scenario_tc`) both route to `batch_file` via `is_mediation_feature`.
+   Both `build_downstream_verification_steps` splice sites (positive ~line 1444 and negative
+   `_build_negative_tc` ~line 1834) are guarded to skip entirely for a mediation feature, so
+   Service Grouping / Century Report / TRANSACTION_HISTORY can never re-append.
 
-## 4. Broader non-cache regression — zero NEW regressions
-Oracle (fast hermetic): `python -m pytest tests/test_titles.py tests/test_determinism.py -q`
-→ **35 passed** (matches the documented baseline of 35 exactly).
+3. **Splitter/humanizer artifact.** `TestStep` gained `authored: bool = False`
+   (`modules/data_models_v8.py`). Authored QMetry steps (`steps_hint`) are now stamped
+   `authored=True` in both builders. `modules/output_sanitizer.py::polish_suite` computes
+   `_lock_summary = authored or _is_imperative(summary)` and suppresses the `'Verify that ' +
+   lower()` prefix/recase on those steps (the `"Verify that let Mediation…"` artifact). Expected-
+   result derivation, char-cleanup and length-trim still apply.
 
-Full runnable suite (ignoring the 28 documented `shared`-import collection-error files from
-`tests/_baseline_failures.txt` and the slow `test_suite_snapshot.py`):
-`python -m pytest tests/ -q -p no:cacheprovider @ignore`
-- With my edits: **35 failed, 239 passed, 4 skipped**.
-- With my 4 edited files git-stashed (baseline): **35 failed, 239 passed, 4 skipped**.
-- `Compare-Object` of the two FAILED node-id lists → **empty** (no `=>` entries): the 35
-  failures are PRE-EXISTING (cache/DB-backed suite builds) and identical before/after. **Zero
-  new regressions.** No snapshots were regenerated.
+## Preserved
+- Obligation assertion steps still emit `Set/Verify <field>=<value>` with `obligation_id`
+  (R2/R5) — verified in the live run (TC1 steps 5-8) and `test_assertion_grounding.py`.
+- QMetry authored steps verbatim (TC2/TC3 and TC10-17) — now WITHOUT the "Verify that" artifact.
+- CHALK-GUARD: live run logged `Chalk coverage OK: 3/3 scenarios -> TCs`; 17 TCs produced,
+  source ordering unchanged (step CONTENT only).
+- Genuine non-mediation NSL features stay `api` (classification test
+  `test_pure_nsl_provisioning_stays_api`).
 
-## 5. Live end-to-end re-run — MWTGPROV-4628 PI-60
-`python run_headless.py MWTGPROV-4628 PI-60` (QMetry session valid; authenticated via
-`MDA-Jira-Dashboard\storage_state.json`; folder resolved id=129316 for MWTGMED-5214;
-read-only export; per-run cache reused).
+## Commands run and results
 
-Note on cache: the clean worktree's `tsg_cache.db` (gitignored, 168 KB) carries no cached
-Jira/Chalk for 4628, so a straight run yields 0 TCs. For this live evidence the main repo's
-`tsg_cache.db` (which DOES hold 4628's Jira+Chalk) was temporarily copied into the worktree
-and the worktree's original restored afterward. `tsg_cache.db` is gitignored, so git stayed
-clean; `CABOT_CHALK_DB.db` (a parent dirty file) was NOT touched — 4628's data lives only in
-`tsg_cache.db`.
+- **py_compile** (all edited modules + 3 new test files): exit 0.
+- **New tests** `tests/test_mediation_classification.py` + `tests/test_mediation_steps_structural.py`
+  + `tests/test_authored_step_verbatim.py`: **8 passed**.
+- **Targeted gate** `test_assertion_grounding.py` + `test_qmetry_steps_source.py` + the 3 new files:
+  **40 passed** (32 baseline + 8 new).
+- **Broad hermetic set** `pytest tests/ -k "not slow and not cache"` (ignoring the 28 documented
+  `shared`-ModuleNotFoundError collection files + the slow/pre-RED `test_suite_snapshot.py`):
+  **250 passed, 1 skipped, 7 failed**.
+  - The 7 failures are all PRE-EXISTING (confirmed by re-running them against a `git stash` of
+    only the 5 edited modules — identical 7 failures on pre-change code):
+    - 6 × `test_contract_bridge_ui_exports.py` → `ModuleNotFoundError: No module named 'shared'`
+      (same environment/path gap as the 28 baseline collection errors; `shared/` lives at the
+      MAIN repo root, absent from the worktree).
+    - 1 × `test_ac_gate.py::TestEnumerationHeaders::test_4349_role_list_survives` — unrelated to
+      this work (AC enumeration-header behaviour for feature 4349).
+  - **ZERO new regressions.** No snapshots were regenerated.
 
-### (a) Previously-dropped mixed-file TC now a NEW test case
-`[QMETRY] TC MWTGMED-TC-1888 — no scenario ≥ similarity threshold 0.60 — dropped` is now
-followed by `[QMETRY] TC MWTGMED-TC-1888 unmatched — added as NEW test case (category=E2E,
-4 steps)`. In the suite it is **TC17 [E2E] Verify_Both_MT_and_MO_records_in_the_same_file_
-convert_correctly**, carrying its 4 authored steps (sensible E2E category).
+## Live headless run — `python run_headless.py MWTGPROV-4628 PI-60`
 
-### (b) MT→I and MO→O are Chalk-derived TCs ENRICHED, NOT duplicated
-`[QMETRY] TC MWTGMED-TC-1887 (value-pair) → scenario "Mediation TMO PRR processing…"
-(4 authored steps)` and `TC MWTGMED-TC-1886 (value-pair) → scenario "…"` — both ENRICH their
-matched Chalk scenarios (tier-1) and are NOT emitted as new TCs. Similarity-skip lines
-(`TC-1890`, `TC-1891` "already has a 5-step hint") confirm matched TCs enrich-only.
+NOTE on data: the worktree's checked-in `tsg_cache.db` (168 KB stub) and
+`CABOT_CHALK_DB.db` (950 KB stub) contain NO 4628 data, so a run against them yields 0 TCs and
+no xlsx (as plan.md warned). To perform a genuine live run entirely inside the worktree, the
+MAIN checkout's caches were COPIED into the worktree (read-only from main; `tsg_cache.db` is
+gitignored). `CABOT_CHALK_DB.db` is git-TRACKED, so after the runs it was restored with
+`git checkout -- CABOT_CHALK_DB.db` and the stub `tsg_cache.db` was restored — neither is part
+of this commit, and the MAIN checkout was never written to.
 
-### (c) CHALK-GUARD full coverage
-`[CHALK-GUARD] Chalk coverage OK: 3/3 scenarios -> TCs` (unchanged, after the additions).
+Result: **17 TCs | 70 steps**, `Classification: batch_file`, `CHALK-GUARD ... 3/3 scenarios -> TCs`.
 
-### (d) No unrelated/other-feature TCs leaked in
-Only TCs story-linked to MWTGMED-5214 (eligible) were considered; the 8 added TCs
-(MWTGMED-TC-1888…1895) all belong to this feature's QMetry folder (id=129316, MWTGMED-5214).
-Ineligible/other-folder TCs were never fetched or added.
+Produced xlsx (AFTER):
+`outputs/MWTGPROV-4628_60.2_-_New_MVNO_-_Update_TMO_MMS_TYPE_INDICATOR_Values_for_Amdocs_call_direction_ind_20261026_154229.xlsx`
+(absolute: the worktree `outputs/` folder; untracked build artifact.)
 
-### (e) No generic-garbage steps on the new TCs
-`[GROUND] Gate threshold=40 — all 17 TCs passed`, suite grounding **99.7%**. Each new TC
-carries its authored QMetry steps (2–4 steps each), not boilerplate.
+### Banned-phrase grep across all 17 TCs (Test Cases sheet)
+`Trigger API`, `NSL processes request with 200 OK`, `Transaction ID generated`,
+`Download Century Report`, `Service Grouping`, `NE Portal`, `TRANSACTION_HISTORY`, `LINE_HISTORY`
 
-### Before / after TC list (source)
-BEFORE (my 4 files git-stashed, same real cache) → **9 TCs**, CHALK-GUARD 3/3:
+- BEFORE (pre-change code, same cache): **61 hits**
+  (`Trigger API`=6, `NSL...200 OK`=5, `Transaction ID generated`=5, `Download Century Report`=5,
+  `Service Grouping`=10, `NE Portal`=10, `TRANSACTION_HISTORY`=10, `LINE_HISTORY`=10)
+- AFTER (this change): **0 hits** — ZERO across all 17 TCs.
+
+PRR-flow verb counts AFTER: ingest=19, mediation=41, tmo_prr_processing=20, amdocs=42,
+call_direction_ind=24, baseline=13.
+
+### TC1 before/after (evidence)
+BEFORE:
 ```
-TC01 [Regression] input_other_absent_output_BAU                (Chalk/AC)
-TC02 [Happy Path] Mediation_TMO_PRR_processing_is_active_01     (Chalk, MO→O enriched)
-TC03 [Happy Path] Mediation_TMO_PRR_processing_is_active        (Chalk, MT→I enriched)
-TC04 [Happy Path] Mediation_processing_active_VZW_and_CBRS       (Chalk/AC)
-TC05 [Happy Path] MMS_TYPE_INDICATOR_value_MT_is_converted_to_I  (Chalk/AC)
-TC06 [Happy Path] No_impact_to_Verizon_or_CBRS_billing_records   (Chalk/AC)
-TC07 [Happy Path] No_loss_of_existing_functionality              (Chalk/AC)
-TC08 [E2E]        The_MT_to_I_conversion_end_to_end_in_the_TMO    (Chalk/AC)
-TC09 [Regression] Unchanged_field_values_elsewhere               (Chalk/AC)
+1 | Trigger API: input=other/absent -> output=BAU | NSL processes request with 200 OK. Transaction ID generated
+2 | Download Century Report (Service Grouping) | SERVICE_GROUPING HTML downloaded
+3 | Verify NE Portal transactions | NE Portal shows transaction completed
+4 | Validate Service Grouping for: input=other/absent -> output=BAU | other/absent value
+5 | Check audit logs (TRANSACTION_HISTORY & LINE_HISTORY) | TRANSACTION_HISTORY and LINE_HISTORY show ...
+6 | Set input = other/absent | Input is set to other/absent.
+7 | Verify output = BAU | output equals BAU in the produced record.
+8 | Set MMS_TYPE_INDICATOR = other/absent | Input MMS_TYPE_INDICATOR is set to other/absent.
+9 | Verify call_direction_ind = BAU | call_direction_ind equals BAU in the produced record.
 ```
-AFTER (with the change) → **17 TCs**, CHALK-GUARD 3/3. TC01–TC09 identical and in the same
-order (Chalk-first preserved; MT→I / MO→O still enriched, not duplicated). The 8 ADD-AS-NEW-TC
-entries, all `source_type = "QMetry Test Case"` with the TC key as locator, follow:
+AFTER:
 ```
-TC10 [Negative]   Negative_malformed_empty_MMS_TYPE_INDICATOR        (QMetry TC MWTGMED-TC-1889)
-TC11 [Regression] Regression_end-to-end_TMO_PRR_processing            (QMetry TC MWTGMED-TC-1890)
-TC12 [Happy Path] Field_position_format_of_call_direction_ind         (QMetry TC MWTGMED-TC-1891/1892)
-TC13 [Happy Path] Case_sensitivity_of_output_value                    (QMetry TC …)
-TC14 [Regression] No_impact_to_CBRS_billing_records                   (QMetry TC …)
-TC15 [Regression] No_impact_to_Verizon_billing_records                (QMetry TC …)
-TC16 [Regression] Non-MMS_other_MMS_TYPE_INDICATOR_values_pass_through (QMetry TC MWTGMED-TC-1894)
-TC17 [E2E]        Both_MT_and_MO_records_in_the_same_file_convert      (QMetry TC MWTGMED-TC-1888)
+1 | Place/ingest the TMO PRR input file containing absent onto the biller SFTP | PRR input file is staged and picked up by Mediation for processing
+2 | Run the TMO_PRR_Processing_01 mediation flow (let Mediation process the file) | Mediation processes the PRR file and emits the Amdocs TMO billing record(s)
+3 | Retrieve the processed Amdocs TMO billing output record(s) for the test data | Amdocs TMO billing output record(s) are produced and available
+4 | Inspect the call_direction_ind field in the Amdocs output and compare against the pre-change baseline | call_direction_ind = output in the Amdocs TMO billing output record; all other fields remain as BAU
+5 | Set input = other/absent | Input is set to other/absent.
+6 | Verify output = BAU | output equals BAU in the produced record.
+7 | Set MMS_TYPE_INDICATOR = other/absent | Input MMS_TYPE_INDICATOR is set to other/absent.
+8 | Verify call_direction_ind = BAU | call_direction_ind equals BAU in the produced record.
 ```
-(The TC10–16 ↔ TC-key mapping is per the `[QMETRY] … added as NEW test case` log lines:
-TC-1889 Happy Path/3, TC-1890 Regression/3, TC-1891 Regression/3, TC-1892 Happy Path/2,
-TC-1893 Happy Path/3, TC-1894 Regression/4, TC-1895 Happy Path/3, TC-1888 E2E/4.)
 
-**De-dup proof:** the engine log shows the matched value-pair TCs (TC-1886, TC-1887) only as
-`→ scenario "…" (enriched)` lines and NOT in the `added as NEW test case` list; the final
-tally `authored steps attached to 2 scenario(s) and 8 new QMetry-only test case(s) added`
-confirms 2 enrich + 8 add, with no overlap.
+### TC8 before/after (evidence)
+BEFORE:
+```
+1 | Trigger API: The 'MT' to 'I' conversion end to end ... | NSL processes request with 200 OK. Transaction ID generated
+2 | Download Century Report (Service Grouping) | SERVICE_GROUPING HTML downloaded
+3 | Verify NE Portal transactions | NE Portal shows transaction completed
+4 | Validate Service Grouping for: The 'MT' to 'I' conversion ... | Validate the 'MT' to 'I' conversion end to end ...
+5 | Check audit logs (TRANSACTION_HISTORY & LINE_HISTORY) | TRANSACTION_HISTORY and LINE_HISTORY show ...
+```
+AFTER:
+```
+1 | Place/ingest the TMO PRR input file containing conversion = end onto the biller SFTP | PRR input file is staged and picked up by Mediation for processing
+2 | Run the TMO_PRR_Processing_01 mediation flow (let Mediation process the file) | Mediation processes the PRR file and emits the Amdocs TMO billing record(s)
+3 | Retrieve the processed Amdocs TMO billing output record(s) for the test data | Amdocs TMO billing output record(s) are produced and available
+4 | Inspect the call_direction_ind field (scenario output) in the Amdocs output and compare against the pre-change baseline | Validate the 'MT' to 'I' conversion end to end in the TMO billing record delivered to Amdocs.
+```
 
-## 6. Fail-safe (bad/empty cookies)
-Method: forced `load_qmetry_cookies` to raise `QMetrySessionError` (exactly how a bad/empty
-`storage_state.json` behaves when no candidate authenticates), then drove
-`enrich_scenarios_with_qmetry` through the engine hook's try/except.
-Result (`_tmp_failsafe.py`): `crashed=False`, hook caught the error, a `[QMETRY] WARNING:
-supplement skipped …` line was logged, **scenarios before == after (no new TCs)**, and the
-seeded scenario was untouched → **FAILSAFE_OK = True**. Normal generation continues.
-(Also covered hermetically by `test_no_session_is_fail_safe`.)
+### Authored QMetry TCs — artifact removed
+TC2 (MO→O) / TC3 (MT→I) step 2 now reads verbatim `Let Mediation run the TMO_PRR_Processing_01
+flow.` — previously `Verify that let Mediation run the TMO_PRR_Processing_01 flow.`. The
+"Verify that let Mediation…" artifact is gone. TC10-17 (QMetry Test Case) are clean and PRR-shaped.
+
+## Known cosmetic imperfections (NOT NSL boilerplate, NOT the reported artifacts)
+- The crude input-field extractor for plain Jira-AC fallback TCs occasionally yields awkward
+  phrases in step 1, e.g. TC7 `...containing loss = of...`, TC8 `...containing conversion = end...`.
+  These are PRR-flow steps (ingest → TMO_PRR_Processing_01 → retrieve Amdocs → baseline) with
+  imperfect value parsing — no banned phrase, no NSL step.
+- TC6 (`No impact to Verizon or CBRS billing records`) routed to a notification-content template
+  (VZW notification-format comparison) rather than the PRR baseline-compare form, because its
+  Jira-AC text matched the notification-content heuristic. Still contains zero banned NSL phrases.
+- A couple of authored steps show expected==summary echo (step 2/3 of TC2/TC3) — an expected-
+  result derivation detail, not the banned summary artifact.
+
+These are reported for the reviewer's judgement; the root-cause mandate (no NSL steps for the
+mediation class, PRR-flow shaped, authored verbatim without the "Verify that" artifact) is met.
