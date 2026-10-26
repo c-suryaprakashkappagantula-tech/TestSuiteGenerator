@@ -78,6 +78,33 @@ _PRR_CONV_RE = re.compile(
     r"['\"]?([A-Za-z0-9]{1,8})['\"]?", re.I)
 
 
+# Field-concept words that are NEVER a real asserted VALUE. When the scenario-field
+# parser returns one of these as out_value (e.g. the "output" token scraped from a title
+# like "input=other/absent -> output=BAU"), it is a LEAKED PLACEHOLDER, not a grounded
+# value — the real value lives on the obligation. Rendering "<field> = output" is a defect.
+_PLACEHOLDER_VALUE_WORDS = frozenset({
+    'output', 'input', 'result', 'value', 'field', 'expected', 'actual', 'outcome',
+})
+
+
+def _is_placeholder_value(value, out_field=''):
+    """True when *value* is not a real asserted value but a field-concept placeholder.
+
+    A value is a placeholder when it is empty, a generic field-concept word
+    ('output'/'result'/'value'/…), or equal to the detected output field name itself —
+    in any of those cases the grounded step must fall back to the obligation's concrete
+    expected_value instead of displaying/asserting the placeholder.
+    """
+    v = (value or '').strip().lower()
+    if not v:
+        return True
+    if v in _PLACEHOLDER_VALUE_WORDS:
+        return True
+    if out_field and v == (out_field or '').strip().lower():
+        return True
+    return False
+
+
 def _prr_scenario_fields(title, validation):
     """Best-effort extraction of (input_descr, output_field, output_value) from a
     PRR/mediation scenario. Returns ('', 'call_direction_ind', '') when nothing is
@@ -166,6 +193,11 @@ def _prr_mediation_steps(sc_title, sc_validation, t, ctx, negative=False, obliga
     _ob = obligation or {}
     _ob_exp_field = (_ob.get('expected_field') or '').strip()
     _ob_exp_value = (_ob.get('expected_value') or '').strip()
+    # If the parser scraped a field-concept PLACEHOLDER as out_value (e.g. 'output' from a
+    # "-> output=BAU" title), discard it and use the obligation's concrete value instead, so
+    # the inspect step both DISPLAYS and ASSERTS the real value ('BAU') — never "= output".
+    if _is_placeholder_value(out_value, out_field) and _ob_exp_value:
+        out_value = _ob_exp_value
     _grounded_field = out_field or _ob_exp_field or 'call_direction_ind'
     _grounded_value = out_value or _ob_exp_value
 
