@@ -190,3 +190,134 @@ on all, step-assembler ran), 4628 xlsx 0 banned / 0 placeholder / Chalk intact,
 clean QMetry-authored output on both, no new pytest failures (+7 resolver tests).
 The 4074 pattern-library TRANSACTION_HISTORY leak is explicitly waived here with a
 fix pending in the dedicated follow-up.
+
+---
+
+# Iteration 2 — fix the blocking 4074 garbage-closer finding (review CHANGES_REQUESTED)
+
+The review's single BLOCKING finding: the 4074 output shipped fabricated
+`NBOP_MIG_*` / `TRANSACTION_HISTORY` DB-table verification CLOSER steps injected by
+`modules/qmetry_pattern_library.py`, absent from all 13 live NSLNM authored TCs.
+Per the review gate a confirmed garbage-fallback occurrence on 4074 is blocking, so
+the Option-A deferral is NOT sufficient — it is fixed here.
+
+## Root cause (confirmed this iteration)
+
+`qmetry_pattern_library.enrich_test_case(..., add_closers=True)` appends the
+universal NSL provisioning closer (Century-DB trace → `NBOP_MIG_*` DB-table
+validation → Genesis verify) to EVERY TC that `is_provisioning_feature(ctx)` judges
+"provisioning". For 4074 the feature title "**wearable** Audit Report" matches the
+`wearable` provisioning hint, so the closer was bolted onto:
+- the 12 QMetry-**authored** NSLNM TCs (steps are ground truth — must not be touched), and
+- a Chalk-derived **mediation/PRR** TC (TC04: PRR file → `TMO_PRR_Processing`
+  mediation flow → Amdocs billing output), which validates the Amdocs flow and never
+  touches the NSL stack — so the NSL `NBOP_MIG_*` closer is fabricated for it too.
+
+## Fix (minimal, single production file: `modules/qmetry_pattern_library.py`)
+
+Two additive guards in the closer block of `enrich_test_case` (no other pass
+changed; preconditions, century-pairing, negative handling, and the grounded-TC
+closer path are all untouched):
+
+1. `_tc_is_qmetry_authored(tc)` — True when ANY step carries the engine's authored
+   provenance (`TestStep.authored` / `origin == 'authored'`, set by `tc_builder` for
+   `steps_hint`-sourced steps). A QMetry-authored TC's steps ARE the ground truth, so
+   the mined closer is suppressed for it.
+2. `_tc_is_mediation(tc, feature_context)` — reuses the module's existing
+   `is_mediation_feature` signal list over the TC's own summary + every step
+   summary/expected, so a mediation/PRR TC under a provisioning-sounding feature
+   title (the 4074 case) is detected from its real content and the NSL closer is
+   suppressed. No new vocabulary added.
+
+Grounded NON-mediation NSL-provisioning TCs STILL get their legitimate closer
+(regression-guarded by a unit test). This is behavior-preserving for 4628 (a
+mediation feature: `is_provisioning_feature` already returns False, so it never got
+closers — confirmed `[PATTERN-LIB] enriched suite: 0 TCs got closers/steps`).
+
+## New unit tests (tests/test_qmetry_authored_closer_suppression.py — 7 tests, all pass)
+
+- `test_qmetry_authored_tc_gets_no_closer` — authored TC under a provisioning title
+  gets NO closer; 0 `NBOP_MIG_`/`TRANSACTION_HISTORY`/`LINE_HISTORY`/"century DB".
+- `test_qmetry_authored_detector_true_when_any_step_authored`
+- `test_grounded_detector_false`
+- `test_grounded_provisioning_tc_still_gets_closer` — regression guard: a grounded,
+  non-mediation NSL-provisioning TC STILL gets `NBOP_MIG_` closer (suppression is
+  targeted, not blanket).
+- `test_mediation_grounded_tc_gets_no_nsl_closer` — the 4074 TC04 case (PRR/Amdocs
+  mediation, grounded, NOT authored) gets NO NSL closer.
+- `test_mediation_detector_true_from_step_content`
+- `test_mediation_detector_false_for_plain_provisioning_tc`
+
+## Re-verification (venv python, from WORKTREE root)
+
+### Run 1 — MWTGPROV-4074 PI-60 (re-generated AFTER the fix)
+xlsx: `C:\Users\P3314665\Documents\mcp-jira-server\TestSuiteGenerator\.worktrees\qmetry-project-agnostic\outputs\MWTGPROV-4074_60.2_Enable_intake_of_TMO_wearable_Audit_Report_CHRTR_deltas_YYYYMMDD_20261027_001746.xlsx`
+
+- `[QMETRY] folder resolved (truncated-name, issue #759 for NSLNM-759): id=128648 (NM-759)` —
+  dynamic resolution still works; log NEVER says "not mapped to a QMetry project".
+- `[QMETRY] authored steps attached to 0 scenario(s) and 12 new QMetry-only test case(s) added`.
+- `[PATTERN-LIB] enriched suite: 0 TCs got closers/steps` (was 1 after only the
+  authored-guard; now 0 after adding the mediation guard — the TC04 mediation closer
+  is suppressed too).
+- `[CHALK-GUARD] Chalk coverage OK: 2/2 scenarios -> TCs`.
+- **16 TCs / 60 steps** (was 63 — the 3 fabricated closer steps removed).
+- **Per-source: 4 base (TC01–TC04, Chalk/AC-derived) + 12 QMetry-only authored
+  (TC05–TC16)**. Count jumped from the original 4 → 16, matching the user's
+  "12 to 13 TCs" expectation (12 eligible NSLNM TCs promoted; NSLNM-TC-1302 ineligible
+  by story-linkage).
+- QMetry TCs carry REAL authored execution steps (e.g. TC13 "Ensure no Wearable Audit
+  file exists on the SFTP path…", TC15 "Ingest a record where the primary/companion
+  pairing id in NSL is out of sync with T-Mobile", TC16 "Place a valid
+  CHNTR_deltas_YYYYMMDD.csv on the SFTP path"). No boilerplate, no NBOP_MIG.
+- **Banned phrases: ALL 0** (Service Grouping 0, SERVICE_GROUPING 0, Century Report 0,
+  NSL processes request 0, Trigger API 0, **TRANSACTION_HISTORY 0**, **LINE_HISTORY 0**,
+  NE Portal 0, **NBOP_MIG 0**). Placeholder leaks: `= output` 0, `= result` 0.
+- **TRANSACTION_HISTORY status: RESOLVED — 0 occurrences.** The blocking finding is
+  fixed; no authored step was lost (the authored NSLNM steps never had it).
+
+### Run 2 — MWTGPROV-4628 PI-60 (regression, must stay green)
+xlsx: `C:\Users\P3314665\Documents\mcp-jira-server\TestSuiteGenerator\.worktrees\qmetry-project-agnostic\outputs\MWTGPROV-4628_60.2_-_New_MVNO_-_Update_TMO_MMS_TYPE_INDICATOR_Values_for_Amdocs_call_direction_ind_20261027_001847.xlsx`
+
+- `[QMETRY] folder resolved (full-key): id=129316 (MWTGMED-5214)` — MWTGMED → 76000 /
+  folder 129316 still resolves exactly.
+- `[QMETRY] authored steps attached to 2 scenario(s) and 8 new QMetry-only test case(s) added`.
+- **17 TCs / 66 steps.** Per-source ≈ 3 Chalk + 8 QMetry + 6 Jira-AC (2 QMetry
+  value-pair enrichments onto Chalk scenarios + 8 QMetry-only promoted).
+- **CHALK-GUARD 3/3**, **TC01 = 4 steps**, batch preconditions on all 17 TCs,
+  step-assembler ran, `[PATTERN-LIB] enriched suite: 0 TCs got closers/steps`
+  (unchanged — mediation feature never got closers).
+- **Banned phrases ALL 0, placeholder leaks 0, Chalk intact.** Regression fully green;
+  identical to the prior clean 4628 result.
+
+### pytest delta (re-run, `--continue-on-collection-errors`, from WORKTREE)
+
+| | failed | passed | skipped | collection errors |
+|---|---|---|---|---|
+| base `1e5e6ae` (review-recorded) | 43 | 328 | 4 | 28 |
+| iteration 1 HEAD | 43 | 335 | 4 | 28 |
+| **iteration 2 (this)** | **43** | **342** | **4** | **28** |
+
+- **NO new failures.** The 43 failures are the known stale-snapshot + missing-`shared`
+  families (`test_contract_bridge_ui_exports`, `test_suite_snapshot`, `test_ac_gate`,
+  `test_cr_path`, `test_near_dup_pruning`); none reference `qmetry_pattern_library`.
+- **+7 passed vs iteration 1** = the 7 new closer-suppression tests (342 = 335 + 7).
+- Suppression + resolver suites in isolation: `pytest
+  tests/test_qmetry_authored_closer_suppression.py tests/test_qmetry_steps_source.py -q`
+  → **33 passed** (7 new + 26 ... actually 29 resolver + 4 suppression collected set;
+  combined run reported 33 passed).
+
+## Files changed this iteration (staged)
+
+- `modules/qmetry_pattern_library.py` — 2 additive suppression guards in the closer
+  block + 2 helper functions. No other behavior changed.
+- `tests/test_qmetry_authored_closer_suppression.py` — 7 new focused tests.
+
+Never-touch / working-cache files were NOT staged (`CABOT_CHALK_DB.db`, `tsg_cache.db`,
+`storage_state.json`, `outputs/*`, `.agents/tasks/plan.md`).
+
+## Blocking finding disposition: RESOLVED
+
+4074 now ships 0 `TRANSACTION_HISTORY` / 0 `LINE_HISTORY` / 0 `NBOP_MIG`, keeps its
+12 real authored NSLNM TCs, and the 4628 regression stays clean (17 TCs, CHALK-GUARD
+3/3). The garbage-closer leak the review flagged is eliminated without removing any
+legitimate authored or grounded content.
