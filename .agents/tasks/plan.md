@@ -1,252 +1,197 @@
-# Implementation Plan — Feature-class-aware step generation for Mediation/PRR/billing (MWTGPROV-4628)
+# Implementation Plan — TSG Mediation PRR step-1 "containing &lt;X&gt;" input-clause fix
 
-## Context (grounded in the worktree)
+Worktree (all paths absolute, under here):
+`c:\Users\P3314665\Documents\mcp-jira-server\TestSuiteGenerator\.worktrees\tsg-mediation-inputfix`
+venv python: `c:\Users\P3314665\Documents\mcp-jira-server\.venv\Scripts\python.exe`
+Run tests from the worktree root. Pytest is configured in `pytest.ini` (`testpaths = tests`).
 
-Worktree: `c:\Users\P3314665\Documents\mcp-jira-server\TestSuiteGenerator\.worktrees\tsg-mediation-steps`
-(branch `feat/tsg-mediation-steps`). venv python:
-`c:\Users\P3314665\Documents\mcp-jira-server\.venv\Scripts\python.exe`.
-Headless run: `python run_headless.py MWTGPROV-4628 PI-60` (run from the worktree root).
-NOTE: stdout is buffered — any ad-hoc probe must be a temp `.py` file that writes a report
-file with `flush=True`, never `python -c`. The worktree `tsg_cache.db` has NO cached Jira/Chalk
-for 4628 (a fresh headless run yields 0 TCs), so correctness is proven by the pytest fixtures
-(the real 4628 AC is already captured in `tests/test_assertion_grounding.py` as
-`FIXTURE_4628_AC` / `FIXTURE_4628_TERSE`), not by a live run.
+## Problem (confirmed by live probe of the exact reported titles)
 
-Pipeline for 4628 (engine_version='8', the only path run_headless uses):
-`run_headless` → `pipeline.block_build_suite_v8` → `data_first_engine.build_test_suite_v8`
-→ Step 0 `tc_builder.classify_feature()` → scenario/obligation TC build in `tc_builder`
-(`_build_scenario_tc`, `_build_obligation_steps`, both calling `step_templates.get_step_chain`
-and `integration_contract.build_downstream_verification_steps`) → Excel generation in
-`excel_generator.generate_excel`, which calls `output_sanitizer.polish_suite()`.
-(`scenario_enricher.enrich_scenarios` and `humanizer.humanize_suite` are V7-only via
-`test_engine` and are NOT on the 4628 path — do not edit them for this task.)
+`modules/step_templates.py::_prr_scenario_fields()` derives the first "containing &lt;X&gt;"
+fragment by title/validation parsing. Its fallback regex `_PRR_INPUT_RE` grabs two arbitrary
+adjacent tokens and renders a fake `"&lt;word&gt; = &lt;word&gt;"` pair whenever there is no real
+field→value. Reproduced against the live titles:
 
-### Three confirmed root-cause sites
-1. **Classification** — `modules/tc_builder.py` `classify_feature()` (lines ~119-165). RULE 1
-   (`_has_nslnm_component and not _has_nbop_component`) returns `classification='api',
-   confidence=0.95, api_keywords_found=['NSLNM']` with no mediation check. This is why 4628 logs
-   `Classification: api (... api_kw=['NSLNM'])`.
-2. **Step templates** — for the mediation class, three emitters must be bypassed/replaced:
-   - `modules/step_templates.py` `get_step_chain()` (line 63): its `feature_type=='batch_file'`
-     branch (lines ~108-146) already emits PRR-ish file-ingestion steps, but 4628 reaches it as
-     `feature_type='api'`, so it falls through to `_api_flow_steps` / `_default_workflow_steps`
-     (lines 1619, 1713) which emit "Trigger API", "Century Report", OAuth token, etc.
-   - `modules/tc_builder.py` `build_downstream_verification_steps(...)` call sites (lines ~1444
-     and ~1834) splice Service Grouping / Century Report / NBOP MIG / Syniverse / TRANSACTION_HISTORY
-     steps via `integration_contract.resolve_operation`.
-   - `modules/scenario_enricher.py` audit-history block (lines ~290-340, `TRANSACTION_HISTORY`,
-     Century Report) — V7 only, NOT on 4628's path, but must stay consistent; no change required
-     unless a test proves otherwise.
-   The existing `_build_scenario_tc` fallback (lines ~1407-1430) and `_build_obligation_steps`
-   (lines ~1052-1066) already try to flip `_ft` to `'batch_file'` from Jira-summary keywords
-   (`'prr file'`, `'sftp'`, `'mediation file'`, …) — but 4628's summary is `[NSLNM...]: ...` and
-   those literal keywords are not reliably present, so the flip does not fire.
-3. **Humanizer/splitter artifact** — `modules/output_sanitizer.py` `polish_suite()`
-   (lines ~565, ~567, ~589, ~638, ~657) rewrites imperative/declarative step summaries to
-   `'Verify that ' + s[0].lower() + s[1:]`. This is the `"Verify that let Mediation run…"`
-   artifact on authored QMetry steps. Authored steps currently carry no marker
-   (`TestStep` has no `authored` field — see `modules/data_models_v8.py` ~line 146).
+| Scenario title | `_prr_scenario_fields` in_descr | step-1 clause (current, WRONG) |
+|---|---|---|
+| "No loss of existing functionality or degradation" (TC7) | `loss = of` | `...containing loss = of onto the biller SFTP` |
+| "Validate the 'MT' to 'I' conversion end to end..." | `Validate = the` | `...containing Validate = the ...` |
+| "input other/absent -&gt; output BAU" (TC1) | `absent` | `...containing absent ...` |
 
-### Preserve (regression gates)
-- Obligation assertion steps: `tc_builder._build_obligation_steps` + `step_templates.assertion_step_texts`
-  must still emit `Set <field>=<value>` / `Verify <field>=<value>` and keep `obligation_id`
-  (R2/R5). Tests A/B/C/E in `tests/test_assertion_grounding.py`.
-- QMetry authored steps verbatim on matched/added TCs: `tests/test_qmetry_steps_source.py`.
-- Chalk-first RULE #1 / 17-TC CHALK-GUARD, source ordering: this task changes STEP CONTENT and
-  the classification label ONLY — never adds/drops/reorders a TC.
-- Genuine NSL-provisioning (NSLNM with NO mediation signal) must still classify `api` and keep
-  NSL/NE-Portal/Service-Grouping/Century steps.
-- Baseline today: `tests/test_assertion_grounding.py` + `tests/test_qmetry_steps_source.py`
-  = 32 passed (confirmed). Keep them green.
+Why TC2/TC3 are correct today (DO NOT regress): the genuine mapping TCs carry **QMetry authored
+steps** (`scenario.steps_hint`) and/or a **real obligation** (`input_field`/`input_value`). When
+`steps_hint` is present, `tc_builder._build_obligation_steps` builds the narrative verbatim from
+the authored lines (`authored=True`) and never calls `_prr_mediation_steps`, so step 1
+("...containing MMS_TYPE_INDICATOR='MT'") is the authored QMetry text. The garbled path is only
+reached for scenarios WITHOUT authored hints (TC1/TC7/TC8 and synthesized-obligation scenarios).
 
-### Decision: single plan, no workflow restructure
-The three fixes share one new primitive (a mediation-class detector) and are verified together by
-the structural test (one produced-step chain must simultaneously drop NSL phrases and gain PRR
-verbs). They do not decompose into independently shippable features, so this is one ordered plan
-for the existing implement-and-review loop. The loop stops when the reviewer writes
-`c:\Users\P3314665\Documents\mcp-jira-server\TMO DashBoard\.agents\tasks\review.json` with
-`verdict == "APPROVED"`.
+## Design decisions (rationale, one line each)
+
+- **Source the value-pair from the obligation, not the title.** `_build_obligation_steps` already
+  has the real `input_field`/`input_value`; thread it into the step chain so `_prr_mediation_steps`
+  uses the authentic pair instead of regex-scraping the title. This is why TC2/TC3 stay right and
+  TC1/TC7/TC8 stop fabricating. Chosen over "tighten the regex" because any title regex will keep
+  mis-firing on prose scenarios (proven: it mangled the MT/MO titles too).
+- **Never emit a `word = word` token in the file clause.** When no real pair exists, pick a clean
+  generic clause by scenario intent (VZW / CBRS / other-absent / generic TMO), with a plain
+  generic fallback. Chosen over dropping the clause so the step still reads as a concrete action.
+- **Authored QMetry step summaries pass through verbatim.** `output_sanitizer.polish_suite`
+  already locks authored/imperative summaries (prior fix; `test_authored_step_verbatim.py` green).
+  Plan verifies this end-to-end and only extends the guard if a live repro shows a leak.
+
+## Exact change sites
+
+- `modules/step_templates.py`
+  - `_PRR_INPUT_RE` — defined ~lines 76–78 (the fabricating fallback regex).
+  - `_prr_scenario_fields(title, validation)` — ~lines 81–100 (returns garbled `in_descr`).
+  - `_prr_mediation_steps(sc_title, sc_validation, t, ctx, negative=False)` — ~lines 103–163:
+    regression branch step 1 ~lines 143–157; positive branch `_input_clause` ~lines 159–162;
+    step-1 text `'Place/ingest the TMO PRR input file %s onto the biller SFTP' % _input_clause`.
+  - `get_step_chain(...)` — ~line 165; batch_file branch calls `_prr_mediation_steps` at the
+    positive site (~line 310 region) and the negative site just above it.
+- `modules/tc_builder.py`
+  - `_build_obligation_steps(...)` — def ~line 1021; the grounded-chain `_get_chain(...)` call
+    at ~line 1090 (obligation path — pass the obligation here).
+  - `_build_scenario_tc(...)` fallback `_get_chain(...)` at ~line 1455 (non-obligation path —
+    pass `obligation=None`).
+- `modules/output_sanitizer.py`
+  - `polish_suite` authored/imperative lock at ~lines 548–553 (`_lock_summary`); `_POL_VERBS`
+    ~lines 367–385 (note: "let" and "retrieve" are NOT imperative verbs — that is why an
+    unflagged authored line could be prefixed).
 
 ---
 
-# Implementation Plan
-
-- [ ] 1. Add a single shared mediation/PRR/billing signal detector so all three fixes agree on
-      one definition. Put it in `modules/qmetry_pattern_library.py` next to the existing
-      `is_file_ingestion_feature` (which already knows `_FILE_INGESTION_HINTS` and
-      `_NON_PROVISIONING_HINTS` incl. 'mediation','cdr','prr file'). Add
-      `is_mediation_feature(*texts: str) -> bool`: case-insensitive, any-of over the concatenated
-      inputs, matching the signals — `mediation`, `prr`, `amdocs`, `billing record`,
-      `call_direction_ind`, `mms_type_indicator`, `tmo_prr_processing`, `biller sftp`, and
-      component tokens `wpamed` / `[med` / `, med` / `med,` and `component == 'Mediation'`.
-      Require a REAL mediation signal — do NOT return True on `nslnm` alone. Keep it pure
-      (no I/O) and accept several strings (title, summary, scope, components, AC/Chalk text).
-      Files: `modules/qmetry_pattern_library.py`
-      Verify: `& "...\.venv\Scripts\python.exe" -m pytest tests/test_qmetry_steps_source.py -q`
-      still passes (import side-effect free); the new unit assertions land in step 7.
-
-- [ ] 2. Make `classify_feature` emit a mediation class BEFORE the NSLNM→api rule. In
-      `modules/tc_builder.py` `classify_feature()` (and only there), add a first check that calls
-      `qmetry_pattern_library.is_mediation_feature(jira_summary, ac_text)`; when true, return
-      `FeatureClassification(classification='batch_file', confidence=0.95,
-      api_keywords_found=[], ui_keywords_found=[])` (reuse the existing `'batch_file'` label that
-      `get_step_chain` already understands — do not invent a new string). Place it above RULE 1 so
-      a `[NSLNM, MED, …]`/mediation-bodied summary never falls through to `api`. A pure
-      `[NSLNM]` summary with no mediation signal is unaffected (still RULE 1 → api). Confirm no
-      other branch of `classify_feature` overrides this (it returns immediately).
-      Files: `modules/tc_builder.py`
-      Verify: `& "...\.venv\Scripts\python.exe" -m pytest tests/test_assertion_grounding.py -q`
-      stays green (no classification dependence there); dedicated assertion added in step 7a.
-
-- [ ] 3. Propagate the mediation class into the obligation path so every obligation TC gets
-      PRR-shaped narrative steps (not NSL). In `modules/tc_builder.py` `_build_obligation_steps`
-      (the `else:` grounded-chain branch, ~lines 1052-1067), replace the brittle Jira-summary
-      keyword flip with: if `feature_type == 'batch_file'` OR
-      `qmetry_pattern_library.is_mediation_feature(<full jira summary>, <description>, <ac>, scenario.validation)`,
-      set `_ft = 'batch_file'`. Keep the authored-`steps_hint` branch above it UNCHANGED (authored
-      steps stay verbatim). Keep the obligation `for ob in …` splice below UNCHANGED so
-      `Set/Verify <field>=<value>` + `obligation_id` still append (R2/R5). The obligation assert
-      wording already uses `call_direction_ind` from the obligation — no change there.
-      Files: `modules/tc_builder.py`
-      Verify: `& "...\.venv\Scripts\python.exe" -m pytest tests/test_assertion_grounding.py -q`
-      — Tests A/B/C/E still pass (obligation_id + expected_value + call_direction_ind intact).
-
-- [ ] 4. Propagate the mediation class into the plain fallback path. In
-      `modules/tc_builder.py` `_build_scenario_tc` (the final `else:` with
-      `from .step_templates import get_step_chain as _get_chain`, ~lines 1407-1430), replace the
-      summary-keyword flip with the same rule as step 3: `_ft = 'batch_file'` when
-      `feature_type == 'batch_file'` OR `is_mediation_feature(...)` over the full jira
-      summary/description/AC + scenario text. This routes QMetry-unmatched Chalk/Jira-AC TCs
-      (the user's TC1/TC4-TC9) to the PRR file-ingestion branch of `get_step_chain` instead of
-      `_api_flow_steps`.
-      Files: `modules/tc_builder.py`
-      Verify: structural test in step 7b (added later) asserts no banned NSL phrases; for now
-      `& "...\.venv\Scripts\python.exe" -m pytest tests/test_assertion_grounding.py -q` stays green.
-
-- [ ] 5. Upgrade the `batch_file` branch of `get_step_chain` into an explicit mediation/PRR
-      step builder and make the NSL-provisioning emitters structurally unreachable for it. In
-      `modules/step_templates.py`:
-      (a) Factor the mediation steps into a new helper `_prr_mediation_steps(title, validation, t,
-          ctx, negative=False)` and call it from the existing `feature_type=='batch_file'` branch
-          (lines ~108-146). The positive chain must be the PRR flow:
-          (1) "Place/ingest the TMO PRR input file containing <scenario input, derived from title/
-          validation — e.g. MMS_TYPE_INDICATOR=MT>"; (2) "Run the TMO_PRR_Processing_01 mediation
-          flow (let Mediation process the file)"; (3) "Retrieve the processed Amdocs TMO billing
-          output record(s)"; (4) "Inspect call_direction_ind (or the scenario's output field) and
-          compare against the pre-change baseline". When the scenario carries a conversion value
-          pair (e.g. MT→I), parameterize step 1 with the input and step 4 with the expected output;
-          otherwise emit the BAU/no-impact/regression form: process the relevant PRR file →
-          retrieve the Amdocs output → compare field-by-field/byte-for-byte against the pre-change
-          baseline and assert UNCHANGED. Keep the existing NBOP-usage append (lines ~140-145) only
-          when `ctx` already names NBOP.
-      (b) Add a module-private frozenset `_BANNED_MEDIATION_PHRASES` =
-          {'trigger api', 'century report', 'service grouping', 'ne portal',
-          'transaction_history', 'line_history', '200 ok', 'transactionid', 'oauth'} and, at the
-          END of the `batch_file` branch, assert none of the produced step summaries/expecteds
-          contains any banned phrase (raise AssertionError in debug/test, or filter-and-log in
-          prod — choose assert so the structural test can rely on it). This makes the banned
-          chain structurally unreachable for the mediation class.
-      Do NOT change any non-`batch_file` branch (genuine NSL features keep their steps).
+- [ ] 1. Add an optional `obligation` parameter to the mediation step builder and the public
+      `get_step_chain`, defaulting to `None`, and thread it to `_prr_mediation_steps`. In
+      `get_step_chain` add `obligation=None` to the signature and pass it into BOTH
+      `_prr_mediation_steps(...)` calls in the `batch_file` branch (positive and, for symmetry,
+      the negative one — the negative branch ignores it). Do not change any other branch's
+      behavior; keep the signature backward compatible (keyword-only default).
       Files: `modules/step_templates.py`
-      Verify: `& "...\.venv\Scripts\python.exe" -m pytest tests/ -q -k "assertion or qmetry"`
-      stays green; structural assertions added in step 7b.
+      Verify: `c:\Users\P3314665\Documents\mcp-jira-server\.venv\Scripts\python.exe -m pytest tests/test_mediation_steps_structural.py tests/test_mediation_classification.py tests/test_assertion_grounding.py -q` — all still pass (no behavior change yet).
 
-- [ ] 6. Prevent the downstream-contract splicer from re-adding NSL steps on the mediation class.
-      In `modules/tc_builder.py`, at both `build_downstream_verification_steps` call sites
-      (~lines 1444 and ~1834), guard the splice with: skip entirely when the effective feature
-      type is `batch_file`/mediation (reuse the step-3/4 `_ft`/`is_mediation_feature` result —
-      thread the resolved `_ft` or recompute via `is_mediation_feature`). `resolve_operation`
-      already returns None for most read-only features, but for mediation we must not rely on that;
-      make the skip explicit. Belt-and-suspenders: this ensures Service Grouping / Century Report /
-      TRANSACTION_HISTORY never append to a mediation TC even if a contract alias matched.
+- [ ] 2. Build the step-1 "containing &lt;X&gt;" clause from a new helper that implements the precise
+      branching rule and NEVER fabricates a `word = word` token. Add a helper, e.g.
+      `_prr_input_file_clause(obligation, sc_title, sc_validation, t)`, and use its result as
+      step-1 text in both the positive and regression branches of `_prr_mediation_steps`.
+      Branching rule (in order):
+        1. **Real value-pair present** — `obligation` has non-empty `input_field` AND `input_value`
+           (e.g. `MMS_TYPE_INDICATOR`/`MT`): clause =
+           `Place/ingest the TMO PRR input file containing &lt;input_field&gt;='&lt;input_value&gt;' onto the biller SFTP.`
+           (Preserves TC2/TC3 wording exactly — these also keep coming from authored hints when present.)
+        2. **No real pair → generic by intent** (match against `t`, the lowercased
+           `title + ' ' + validation`), each verbatim:
+           - VZW/Verizon (`\b(verizon|vzw)\b`):
+             `Place/ingest a Verizon (VZW) PRR input file onto the biller SFTP.`
+           - CBRS (`\bcbrs\b`):
+             `Place/ingest a CBRS PRR input file onto the biller SFTP.`
+           - other/absent or non-MMS pass-through (`other/absent`, `\bother\b`, `absent`,
+             `non-mms`, or `bau`/`output bau` without a value):
+             `Place/ingest a TMO PRR input file containing records with a non-MMS / other MMS_TYPE_INDICATOR value onto the biller SFTP.`
+           - generic TMO (no-loss, e2e, unchanged-fields, regression — e.g. `no loss`,
+             `degradation`, `end to end`, `end-to-end`, `unchanged`, `remains`, `regression`):
+             `Place/ingest a representative TMO PRR input file onto the biller SFTP.`
+        3. **Fallback** (intent unclear):
+           `Place/ingest a representative TMO PRR input file onto the biller SFTP.`
+      Order the VZW and CBRS checks BEFORE the generic-TMO check so a VZW/CBRS regression scenario
+      gets the vendor-specific clause (today the regression branch already special-cases VZW/CBRS —
+      keep that intent). The clause must NEVER contain a `=` unless it is the real
+      `&lt;field&gt;='&lt;value&gt;'` form from branch 1. Keep steps 2–4 of `_prr_mediation_steps`
+      (run flow / retrieve Amdocs / inspect-or-compare) unchanged.
+      Files: `modules/step_templates.py`
+      Verify: `...python.exe -m pytest tests/test_mediation_steps_structural.py -q` — passes; and a
+      scratch probe (delete after) over the three reported titles shows NO `=` in step 1 for the
+      non-mapping titles and the VZW/CBRS/other/generic variants render verbatim.
+
+- [ ] 3. Retire the fabricating fallback in `_prr_scenario_fields`. Keep `_PRR_CONV_RE`
+      (genuine `X -&gt; Y` / "converts to" conversion detection) for `out_value`, but remove the
+      `_PRR_INPUT_RE` `in_descr` fabrication so `in_descr` is only ever a real pair or empty —
+      step-1 wording now comes solely from the step-2 helper. `_prr_scenario_fields` may still
+      return `out_field`/`out_value` for the inspect step; just stop returning a scraped
+      `"&lt;word&gt; = &lt;word&gt;"` as `in_descr`. If `_PRR_INPUT_RE` becomes unused, delete it.
+      Files: `modules/step_templates.py`
+      Verify: `...python.exe -m pytest tests/test_mediation_steps_structural.py tests/test_assertion_grounding.py -q` — passes; grep-free confirmation via the Step-5 unit test below.
+
+- [ ] 4. Pass the real obligation into the chain from the obligation builder. In
+      `tc_builder._build_obligation_steps`, at the `_get_chain(...)` call (~line 1090), pass the
+      scenario's first obligation (e.g. `obligation=(scenario.obligations or [None])[0]`) so the
+      mediation builder can render `&lt;input_field&gt;='&lt;input_value&gt;'`. In
+      `_build_scenario_tc`'s fallback `_get_chain(...)` call (~line 1455) pass `obligation=None`
+      explicitly. Do not change the authored-hint branch (steps_hint present) — it must keep
+      building verbatim authored steps and never calls the chain.
       Files: `modules/tc_builder.py`
-      Verify: `& "...\.venv\Scripts\python.exe" -m pytest tests/ -q -k "assertion or qmetry"`
-      stays green; covered structurally by step 7b.
+      Verify: `...python.exe -m pytest tests/test_mediation_steps_structural.py tests/test_assertion_grounding.py -q` — passes, including
+      `test_obligation_mt_to_i_is_prr_flow_no_nsl` (obligation_id / expected_field / `call_direction_ind` preserved).
 
-- [ ] 7. Fix the "Verify that " prefix + re-casing on authored/imperative steps. Two coordinated
-      edits:
-      (a) Add `authored: bool = False` to `TestStep` in `modules/data_models_v8.py` (defaults keep
-          zero behavioural change). In the authored-`steps_hint` branches that build steps verbatim
-          — `tc_builder._build_obligation_steps` (the `if getattr(scenario,'steps_hint',...)` loop)
-          and `_build_scenario_tc` (the `elif scenario.steps_hint:` loop) — set `authored=True` on
-          each `TestStep` built from an authored hint. (Authored = sourced from QMetry `steps_hint`.)
-      (b) In `modules/output_sanitizer.py` `polish_suite()`, at the start of the per-step loop
-          (`for st in steps:`), compute `_authored = bool(getattr(st, 'authored', False))`. When
-          `_authored` is True OR the summary is already imperative (reuse the module's
-          `_is_imperative`/`_POL_CHECK_VERB_RE`), do NOT apply any `'Verify that ' + s[0].lower()…`
-          rewrite — leave the summary verbatim (still allow char-cleanup `_fix_body`, length trim,
-          and expected-result derivation, but never the prefix/recase). This touches the four rewrite
-          sites (~565-567, ~589, ~638, ~657): gate each on `not _authored and not _is_imperative(s)`.
-      Files: `modules/data_models_v8.py`, `modules/tc_builder.py`, `modules/output_sanitizer.py`
-      Verify: `& "...\.venv\Scripts\python.exe" -m pytest tests/test_qmetry_steps_source.py -q`
-      stays green; humanizer passthrough asserted in step 7c.
+- [ ] 5. Add unit tests for the new input-clause rule in a new file
+      `tests/test_mediation_input_clause.py`. Cover, using `step_templates.get_step_chain` /
+      `_prr_mediation_steps` and `tc_builder._build_scenario_tc` (pattern: reuse the `_Jira` and
+      `FIXTURE_4628_AC` helpers from `tests/test_mediation_steps_structural.py`):
+        - Real value-pair (obligation `MMS_TYPE_INDICATOR`/`MT`) → step 1 contains
+          `MMS_TYPE_INDICATOR='MT'` and the clause has exactly one `=` of the `field='value'` form.
+        - Real value-pair `MO` → `MMS_TYPE_INDICATOR='MO'` (TC2 wording intact).
+        - "No loss of existing functionality or degradation" → step 1 ==
+          `Place/ingest a representative TMO PRR input file onto the biller SFTP.` and contains no `=`.
+        - "Validate the 'MT' to 'I' conversion end to end..." with NO obligation → step 1 contains
+          no fabricated `Validate = the`; it is the generic TMO clause (no `=`).
+        - "input other/absent -&gt; output BAU" → the non-MMS/other-value clause (no fabricated `=`).
+        - VZW title → the `Verizon (VZW)` clause; CBRS title → the `CBRS` clause.
+        - Negative/assertion: for EVERY produced step, assert there is no standalone `"&lt;word&gt; = &lt;word&gt;"`
+          fabricated token in a file clause (regex `\b[a-z]+\s*=\s*[a-z]+\b` must not match step 1
+          unless it is the `field='value'` form).
+      Files: `tests/test_mediation_input_clause.py`
+      Verify: `...python.exe -m pytest tests/test_mediation_input_clause.py -q` — all new tests pass.
 
-- [ ] 7a. Add the classification test. New file `tests/test_mediation_classification.py`: assert
-      `classify_feature('[NSLNM, INTG]: ... MMS_TYPE_INDICATOR ... call_direction_ind ... Amdocs
-      TMO billing record', FIXTURE_4628_AC).classification == 'batch_file'`; assert a synthetic
-      `[WPAMED]: Mediation PRR ...` summary classifies `batch_file`; assert a synthetic pure-NSL
-      `[NSLNM]: New MVNO - Retrieve device (GET/POST)` (no mediation signal) STILL classifies
-      `api`. Reuse `FIXTURE_4628_AC` by importing from `tests/test_assertion_grounding.py` or
-      inlining the same AC text. Follow the hermetic, no-DB pattern used by
-      `test_assertion_grounding.py` (import from `modules.tc_builder`, `sys.path` to worktree root).
-      Files: `tests/test_mediation_classification.py`
-      Verify: `& "...\.venv\Scripts\python.exe" -m pytest tests/test_mediation_classification.py -q`
-      — all pass.
+- [ ] 6. Verify-and-fix the authored-step "Verify that let Mediation run..." / "Verify that
+      retrieve..." artifact. First REPRODUCE: write a scratch test that builds a TC whose
+      `steps_hint` includes `"Let Mediation run the TMO_PRR_Processing_01 flow"` and
+      `"Retrieve the processed Amdocs TMO billing output record"` (mirroring the live 4628 authored
+      lines, `authored=True`) and run it through the FULL post-processing actually applied to a
+      generated suite (at minimum `output_sanitizer.polish_suite`; if the live pipeline applies
+      other passes to step summaries, include them). If any pass prefixes "Verify that " or
+      re-cases the first word, fix THAT pass to honor `authored=True` (and already-imperative
+      summaries) exactly as `polish_suite` does at lines 548–553 — do not special-case "let"/
+      "retrieve"; respect the authored flag. If no pass reproduces the artifact (i.e. the prior
+      fix already removed it and the authored flag is intact end-to-end), record that finding in
+      the step report and extend `tests/test_authored_step_verbatim.py` with the two live-exact
+      lines ("Let Mediation run the TMO_PRR_Processing_01 flow", "Retrieve the processed Amdocs
+      TMO billing output record") to lock the behavior permanently.
+      Files: `modules/output_sanitizer.py` (only if a leak is reproduced), `tests/test_authored_step_verbatim.py`
+      Verify: `...python.exe -m pytest tests/test_authored_step_verbatim.py -q` — passes, including the
+      new live-exact cases; the summaries stay byte-for-byte (no "Verify that", no re-casing).
 
-- [ ] 7b. Add the structural step test. New file `tests/test_mediation_steps_structural.py`:
-      build a mediation scenario (obligation MT→I and a BAU/no-impact scenario) via
-      `_synthesize_obligation_scenario` / a hand-built `ExtractedScenario`, call `_build_scenario_tc`
-      and `_build_obligation_steps` with a `_Jira('MWTGPROV-4628')` whose summary carries a
-      mediation signal, and assert over the concatenated step summaries+expecteds: (i) contains
-      NONE of `_BANNED_MEDIATION_PHRASES` (trigger api, century report, service grouping, ne portal,
-      transaction_history, line_history, 200 ok, transactionid, oauth); (ii) DOES contain the PRR
-      verbs — at least one of `ingest`/`place`, `mediation`, `tmo_prr_processing`, `amdocs`
-      (billing), and `call_direction_ind` (or the scenario's output field). Also assert the
-      obligation TC STILL has a step with `obligation_id` set and `expected_field=='call_direction_ind'`
-      (preserve R2/R5).
-      Files: `tests/test_mediation_steps_structural.py`
-      Verify: `& "...\.venv\Scripts\python.exe" -m pytest tests/test_mediation_steps_structural.py -q`
-      — all pass.
+- [ ] 7. Full regression + banned-phrase gate. Run the complete fast test suite and confirm the
+      preserve-list holds.
+      Files: (none — verification only)
+      Verify: `c:\Users\P3314665\Documents\mcp-jira-server\.venv\Scripts\python.exe -m pytest -q -m "not slow"` from the worktree root — all pass
+      (baseline before changes: the four targeted files are 19 passed). Confirm
+      `test_mediation_steps_structural.py` banned-phrase asserts stay green and
+      `test_mediation_classification.py` 17-TC / 3→TC chalk-guard is unchanged.
 
-- [ ] 7c. Add the humanizer passthrough test. New file `tests/test_authored_step_verbatim.py`:
-      build a `TestCase` whose steps include an authored imperative step
-      `TestStep(summary='Let Mediation process the PRR file', authored=True, ...)` and a wrapping
-      `TestSuite`, run `output_sanitizer.polish_suite(suite)`, and assert the step summary is
-      byte-for-byte unchanged — no `'Verify that '` prefix, no lowercasing of 'Let'. Add a second
-      step with `authored=False` but already imperative and assert it is likewise not
-      "Verify that"-prefixed. Follow the hermetic pattern (build data_models_v8 objects directly).
-      Files: `tests/test_authored_step_verbatim.py`
-      Verify: `& "...\.venv\Scripts\python.exe" -m pytest tests/test_authored_step_verbatim.py -q`
-      — all pass.
+## Acceptance criteria (preserve-list — must all hold)
 
-- [ ] 8. Full regression gate. Run the targeted suite and confirm no regressions, then confirm the
-      previously-green baseline plus the three new test files all pass together.
-      Files: none (verification only)
-      Verify: `& "c:\Users\P3314665\Documents\mcp-jira-server\.venv\Scripts\python.exe" -m pytest
-      tests/test_assertion_grounding.py tests/test_qmetry_steps_source.py
-      tests/test_mediation_classification.py tests/test_mediation_steps_structural.py
-      tests/test_authored_step_verbatim.py -q` — all pass (expected ≥ 35: the 32 baseline + new).
-      Then a broader `-m pytest tests/ -q -k "not slow and not cache"` shows no NEW failures versus
-      `tests/_baseline_failures.txt` (28 pre-existing `shared` collection errors are expected and
-      unrelated).
-
-- [ ] 9. Confirm no stray temp files or debug scripts were left in the worktree root
-      (`git status` clean except the intended edits + new test files). Do NOT commit any `_probe_*`
-      or `*.db` changes. Stage only the edited modules and the three new test files.
-      Files: none (hygiene only)
-      Verify: `git status --short` lists only `modules/qmetry_pattern_library.py`,
-      `modules/tc_builder.py`, `modules/step_templates.py`, `modules/output_sanitizer.py`,
-      `modules/data_models_v8.py`, and the three new `tests/test_*.py` files.
+- No banned NSL phrases anywhere in mediation chains: Trigger API, NSL 200, Download Century
+  Report, Service Grouping, NE Portal, TRANSACTION_HISTORY, LINE_HISTORY. The structural
+  banned-phrase assert (`_assert_no_banned_mediation` / `tests/test_mediation_steps_structural.py`)
+  stays green.
+- TC2 (MO) and TC3 (MT) keep `containing MMS_TYPE_INDICATOR='MO'` / `='MT'` and their obligation
+  Set/Verify assertion steps with `obligation_id` intact (R2/R5).
+- No step-1 file clause ever contains a fabricated `"&lt;word&gt; = &lt;word&gt;"` token; the only `=`
+  allowed is the real `&lt;input_field&gt;='&lt;input_value&gt;'` form.
+- The four generic variants render verbatim as specified (VZW, CBRS, other/non-MMS, generic TMO),
+  with the plain generic as fallback.
+- Authored QMetry step summaries (TC2/TC3 and TC10–TC17) pass through verbatim: no "Verify that "
+  prefix, no first-word re-casing.
+- Chalk-first RULE #1 / CHALK-GUARD unchanged: 17 TCs, 3/3 scenarios→TCs.
+- Genuine NSL-provisioning (non-mediation) features unaffected (only the `batch_file`/mediation
+  branch changes; all other `get_step_chain` branches are byte-for-byte unchanged).
+- All existing tests stay green: 11 assertion-grounding + the mediation structural/classification
+  tests + authored-verbatim tests + QMetry tests, plus the new `test_mediation_input_clause.py`.
 
 ## Notes / assumptions
-- Reusing the existing `'batch_file'` classification label (already understood by
-  `get_step_chain`) rather than inventing a `'mediation'` string keeps the blast radius minimal
-  and leverages the PRR branch that already exists. If a reviewer prefers a distinct `'mediation'`
-  label, it is a rename across steps 2-6 only.
-- `scenario_enricher.py` and `humanizer.py` are V7-only and not on the 4628 (V8/run_headless)
-  path, so they are intentionally untouched. If a future V7 run of a mediation feature is in
-  scope, the same `is_mediation_feature` gate would be added to
-  `scenario_enricher.enrich_scenarios` — out of scope here.
-- The real 4628 run cannot be reproduced in this worktree (empty cache); correctness rests on the
-  fixtures that already encode the real AC. This is called out so the implementer does not burn
-  time chasing a live run.
+
+- `get_step_chain` gains a keyword-only `obligation=None` param; all existing callers that omit it
+  keep today's behavior. Only the mediation (`batch_file`) branch consumes it.
+- Step 6 is written defensively because the prior fix's `test_authored_step_verbatim.py` is green,
+  yet the user reports the artifact live on 4628. The step requires an explicit reproduce-or-prove
+  before any sanitizer edit, so we neither skip a real bug nor edit a path that is already correct.
