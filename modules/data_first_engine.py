@@ -312,6 +312,22 @@ def build_test_suite_v8(
     except Exception:
         pass
 
+    # ── QMetry authored-steps supplement (fail-safe, gated) ──
+    # Placed after the Step 1a-0 title-sanitize block and the Step 1a
+    # structural-dimension-drop block, and before the Step 1b custom-instructions
+    # call. For a feature whose QA already authored steps in QMetry, pull them and
+    # inject them as the steps_hint of the matching ExtractedScenario so tc_builder
+    # emits the real QA steps. SUPPLEMENT only — never creates/drops/reorders a
+    # scenario; obligations are never cleared; CHALK-GUARD is unaffected. Any
+    # auth/network/export/parse failure logs one warning and continues generation.
+    if dimension_set.scenarios:                    # nothing to enrich → skip the fetch
+        try:
+            from .qmetry_steps_source import enrich_scenarios_with_qmetry
+            enrich_scenarios_with_qmetry(dimension_set.scenarios, jira, options, log)
+        except Exception as _qe:                   # import/auth/network/parse — never break a run
+            log('[QMETRY] WARNING: supplement skipped (%s) — continuing with generated steps'
+                % str(_qe)[:200])
+
     # ── Step 1b: Apply custom instructions to dimensions ──
     custom_text = options.get('custom_instructions', '')
     if custom_text and custom_text.strip():

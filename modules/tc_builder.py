@@ -1023,35 +1023,60 @@ def _build_obligation_steps(scenario, api_context, jira=None, feature_name='', f
     n = 0
     _src_id = getattr(getattr(scenario, 'source', None), 'source_id', '') or ''
 
-    # ── Grounded chain first (same machinery as the non-obligation path) ──
-    # Resolve feature_type exactly as the fallback branch in _build_scenario_tc does so a
-    # PRR/file-ingestion feature (4503) gets SFTP ingest + NBOP usage steps, and a pure-UI
-    # feature gets the navigation path — not bare asserts.
-    try:
-        _ctx = ((feature_name or '') + ' ' + (scenario.validation or '')).lower()
-        _ft = feature_type
-        _full_summary = ((getattr(jira, 'summary', '') or '') if jira else '').lower()
-        if _ft != 'ui' and any(kw in _full_summary for kw in (
-                'prr file', 'prr usage', 'batch file', 'sftp', 'file ingestion',
-                'batch ingest', 'usage file', 'mediation file')):
-            _ft = 'batch_file'
-        if _ft == 'batch_file' and jira and 'nbop' not in _ctx and 'nbop' in (
-                '%s %s %s' % (_full_summary, getattr(jira, 'description', '') or '',
-                              getattr(jira, 'acceptance_criteria', '') or '')).lower():
-            _ctx += ' nbop'
-        _chain = _get_chain(scenario.title, scenario.validation, _ctx, feature_type=_ft)
-        for (_s, _e) in (_chain or []):
+    # ── Base narrative steps ──
+    # QMetry authored steps (steps_hint) are ground truth when present: build the
+    # narrative from them instead of the generated grounded chain, then splice the
+    # obligation set/assert pairs on (the `for ob` loop below is unchanged, so
+    # obligation_id / expected_value still land on the assert step). When there is
+    # no authored hint, build the grounded chain exactly as before.
+    if getattr(scenario, 'steps_hint', None):
+        _authored_expected = getattr(scenario, '_qmetry_expected', '') or ''
+        _hints = scenario.steps_hint
+        _neg = (getattr(scenario, 'category', '') == 'Negative')
+        for _i, _h in enumerate(_hints, 1):
+            _h = _STEP_NUM_PREFIX_RE.sub('', (_h or '').strip()).strip() or _h
+            _is_last = (_i == len(_hints))
+            if _is_last and _authored_expected:
+                _exp = _authored_expected
+            else:
+                _exp = _expected_from_step_text(_h, negative=_neg)
             n += 1
             steps.append(TestStep(
                 step_num=n,
-                summary=_s,
-                expected=_e,
+                summary=_h,
+                expected=_exp,
                 data_reference=_src_id,
             ))
-    except Exception:
-        # Grounding must never break obligation TC generation — fall through with whatever
-        # grounded steps were built (possibly none) and still emit the assertions below.
-        pass
+    else:
+        # ── Grounded chain first (same machinery as the non-obligation path) ──
+        # Resolve feature_type exactly as the fallback branch in _build_scenario_tc does so a
+        # PRR/file-ingestion feature (4503) gets SFTP ingest + NBOP usage steps, and a pure-UI
+        # feature gets the navigation path — not bare asserts.
+        try:
+            _ctx = ((feature_name or '') + ' ' + (scenario.validation or '')).lower()
+            _ft = feature_type
+            _full_summary = ((getattr(jira, 'summary', '') or '') if jira else '').lower()
+            if _ft != 'ui' and any(kw in _full_summary for kw in (
+                    'prr file', 'prr usage', 'batch file', 'sftp', 'file ingestion',
+                    'batch ingest', 'usage file', 'mediation file')):
+                _ft = 'batch_file'
+            if _ft == 'batch_file' and jira and 'nbop' not in _ctx and 'nbop' in (
+                    '%s %s %s' % (_full_summary, getattr(jira, 'description', '') or '',
+                                  getattr(jira, 'acceptance_criteria', '') or '')).lower():
+                _ctx += ' nbop'
+            _chain = _get_chain(scenario.title, scenario.validation, _ctx, feature_type=_ft)
+            for (_s, _e) in (_chain or []):
+                n += 1
+                steps.append(TestStep(
+                    step_num=n,
+                    summary=_s,
+                    expected=_e,
+                    data_reference=_src_id,
+                ))
+        except Exception:
+            # Grounding must never break obligation TC generation — fall through with whatever
+            # grounded steps were built (possibly none) and still emit the assertions below.
+            pass
 
     for ob in (scenario.obligations or []):
         exp_val = (ob.get('expected_value') or '').strip()
@@ -1105,6 +1130,7 @@ def _build_scenario_tc(
             scenario, api_context, jira=jira,
             feature_name=feature_name, feature_type=feature_type)
     elif scenario.steps_hint:
+        _n_authored = len(scenario.steps_hint)   # authored-step count, captured BEFORE the loop
         _is_negative = scenario.category == 'Negative'
         _rejection_msg = (scenario.validation or 'Operation rejected with appropriate error')
         _success_msg = (scenario.validation or 'Operation completes successfully')
@@ -1229,6 +1255,12 @@ def _build_scenario_tc(
                         expected=_trim_title(_val_clean, 200),
                         data_reference=scenario.source.source_id,
                     ))
+        # QMetry authored Expected Result (if this scenario was enriched via tier-2/3)
+        # overrides the heuristic expected on the LAST AUTHORED step — index
+        # _n_authored-1, never steps[-1], so a trailing generated "Verify:" filler
+        # never receives the authored expected. No-op for non-enriched scenarios.
+        if getattr(scenario, '_qmetry_expected', '') and _n_authored:
+            steps[_n_authored - 1].expected = scenario._qmetry_expected
     elif scenario.api_spec:
         # Build steps from API spec
         spec = scenario.api_spec
