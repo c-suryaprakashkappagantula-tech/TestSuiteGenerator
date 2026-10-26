@@ -1,235 +1,192 @@
-# Verification — TSG Mediation PRR step-1 input-clause fix
+# Verification — project-agnostic QMetry resolver (feat/qmetry-project-agnostic)
 
-Branch: `feat/tsg-mediation-inputfix`
-Worktree: `c:\Users\P3314665\Documents\mcp-jira-server\TestSuiteGenerator\.worktrees\tsg-mediation-inputfix`
-venv python: `c:\Users\P3314665\Documents\mcp-jira-server\.venv\Scripts\python.exe`
+Branch: `feat/qmetry-project-agnostic`  ·  Base: `1e5e6ae`
+venv python: `C:\Users\P3314665\Documents\mcp-jira-server\.venv\Scripts\python.exe`
+Runs executed from the WORKTREE root.
 
-## What changed
+## What changed (ONE integrated change)
 
-- `modules/step_templates.py`
-  - Retired the fabricating fallback regex `_PRR_INPUT_RE`. `_prr_scenario_fields` now returns a
-    real conversion pair (via `_PRR_CONV_RE`) or empty for `in_descr` — it never scrapes two
-    adjacent tokens into a fake `"<word> = <word>"`.
-  - Added `_prr_input_file_clause(obligation, sc_title, sc_validation, t)` implementing the precise
-    branching rule: real `FIELD='VALUE'` from the obligation → authentic clause; otherwise a clean
-    generic clause by intent (VZW / CBRS / other-absent/non-MMS / generic TMO) with a plain generic
-    fallback. The result never contains a fabricated `=`.
-  - `_prr_mediation_steps(...)` gained an `obligation=None` kwarg; both the regression and positive
-    branches build step 1 from `_prr_input_file_clause`.
-  - `get_step_chain(...)` gained a keyword-only `obligation=None`, threaded into the `batch_file`
-    positive `_prr_mediation_steps` call. No other branch changed.
-- `modules/tc_builder.py`
-  - `_build_obligation_steps`: threads the scenario's first obligation into `_get_chain(...)` so
-    the real `MMS_TYPE_INDICATOR='MT'`/`='MO'` pair is rendered (TC2/TC3 preserved).
-  - `_build_scenario_tc` fallback: passes `obligation=None` explicitly.
-- `tests/test_mediation_input_clause.py` (NEW): real-pair, no-pair (no-loss / e2e / other-absent),
-  VZW, CBRS, synthesized-other-absent obligation, full-builder negative guard, and the
-  `get_step_chain` obligation-threading case.
-- `tests/test_authored_step_verbatim.py`: extended with the live-exact authored line
-  `"Let Mediation run the TMO_PRR_Processing_01 flow"` to lock verbatim pass-through.
-- `modules/output_sanitizer.py`: NOT edited. See "Authored-step artifact" below.
+Production: `modules/qmetry_steps_source.py`
+Tests: `tests/test_qmetry_steps_source.py`
 
-## Authored-step "Verify that let/retrieve" artifact — root cause & finding
+The hardcoded MWTGMED-only project assumption is generalized into a **dynamic,
+project-agnostic resolver**:
 
-`polish_suite` is the only pass that can prefix a step summary with "Verify that " (verified by
-grepping all of `modules/*.py`). It already locks a summary when `authored=True` OR the first word
-is an imperative verb (`_lock_summary`). A scratch reproduction (`_scratch_repro.py`, now deleted)
-built an obligation TC whose `steps_hint` included the live-exact lines
-`"Let Mediation run the TMO_PRR_Processing_01 flow"` and
-`"Retrieve the processed Amdocs TMO billing output record"`, ran it through
-`_build_scenario_tc` + `polish_suite`, and the lines came out byte-for-byte unchanged — the
-`authored=True` flag set in `_build_obligation_steps` is honored end-to-end. No leak reproduced, so
-`output_sanitizer.py` needed no edit. The behavior is now locked permanently by the extended
-`test_authored_step_verbatim.py`. The live 4628 re-run confirms zero artifacts (counts below).
+- `_load_project_index(cookies, log)` — queries QMetry's project-agnostic
+  `/projects` endpoint through the authenticated `QMetryRestClient` and builds a
+  per-run `{PROJECT_KEY_UPPER: projectId}` index. Jira project KEY == QMetry
+  `project["key"]`, so EVERY project (MWTGMED, NSLNM, and any future one) resolves
+  with no code change. Fail-loud: an HTTP/transport failure raises `QMetryFetchError`
+  (never a silent `None`).
+- `resolve_project_dynamic(jira_key, cookies, log)` — primary resolution via the
+  dynamic index.
+- `resolve_project_for_feature(feature_key, subtasks, cookies, log)` — now
+  **subtask-first** ("always go with the Jira issue") and **dynamic-then-static**:
+  each valid subtask key, then the feature key, resolved via dynamic `/projects`
+  first, then the additive static `QMETRY_PROJECT_MAP` fallback. `cookies=None`
+  skips the dynamic step (keeps hermetic unit tests deterministic).
+- `QMETRY_PROJECT_MAP` kept as an **ADDITIVE fallback only** (documented as such),
+  NOT the source of truth. No new per-project hardcode added for NSLNM.
+- `_resolve_folder_id` — tiered folder match: PASS 1 full-key containment
+  (`MWTGMED-5214` → folder `MWTGMED-5214`), PASS 2 truncated-name / issue-number
+  with a digit-boundary guard (`NSLNM-759` → folder `NM-759`; never `-7591`/`-3759`).
+- `enrich_scenarios_with_qmetry` — loads cookies FIRST (fail-loud preserved), then
+  resolves the project dynamically with those cookies.
 
-## 1. py_compile
+Invariants preserved (unchanged code paths): Chalk-first / CHALK-GUARD, value-pair
+tier-1 + 0.60 similarity tier-2, Tier-3 relevance gate (promote-or-flag, never
+silent drop), fail-loud on auth, QMetry carve-out (MCP not required).
 
-```
-python -m py_compile modules/step_templates.py modules/tc_builder.py modules/output_sanitizer.py
-```
-Result: EXIT=0.
+## Live resolver probe (authenticated, confirms dynamic resolution)
 
-## 2. Unit + hermetic tests
+- Auth OK via WORKTREE `storage_state.json` (12 charter.com cookies).
+- `/projects` returned 268 projects.
+- `NSLNM-759` → project **121405** (MWTGNSLNM); folder `NM-759` id **128648** (13 TCs).
+- `MWTGMED-5214` → project **76000**; folder `MWTGMED-5214` id **129316**.
+- `resolve_project_for_feature('MWTGPROV-4074', ['NSLNM-759'])` → **121405**
+  (resolved through the SUBTASK, not the feature — the feature MWTGPROV itself
+  dynamically maps to 75700, but the subtask is tried first per "always go with the
+  Jira issue").
 
-```
-python -m pytest tests/test_mediation_input_clause.py tests/test_mediation_steps_structural.py \
-  tests/test_mediation_classification.py tests/test_assertion_grounding.py \
-  tests/test_authored_step_verbatim.py -q
-```
-Result: **29 passed** (0 failed). Includes the 11 assertion-grounding tests, the 3 mediation tests
-from the prior fix (structural + classification 17-TC / 3→TC chalk-guard), the authored-verbatim
-tests, and the new input-clause suite.
+## Run 1 — MWTGPROV-4074 PI-60 (the project-agnostic win)
 
-## 2b. Broader non-cache set — git-stash baseline delta (zero NEW regressions)
+xlsx: `C:\Users\P3314665\Documents\mcp-jira-server\TestSuiteGenerator\.worktrees\qmetry-project-agnostic\outputs\MWTGPROV-4074_60.2_Enable_intake_of_TMO_wearable_Audit_Report_CHRTR_deltas_YYYYMMDD_20261026_235005.xlsx`
 
-```
-python -m pytest -q -m "not slow" --continue-on-collection-errors
-```
-- WITH changes:  26 failed, 257 passed, 4 skipped, 73 deselected, 28 collection errors.
-- BASELINE (git stash of ONLY the edited source files `modules/step_templates.py` +
-  `modules/tc_builder.py` + `tests/test_authored_step_verbatim.py`, and the new test files hidden):
-  identical — 54 FAILED/ERROR node ids.
-- `Compare-Object before_fails.txt after_fails.txt` → **IDENTICAL — zero new regressions.**
-- The 26 failures + 28 collection errors are pre-existing environment issues (e.g.
-  `ModuleNotFoundError: No module named 'shared'` for the contract-bridge/crawl tests, and
-  CR-path/descriptions/eligibility tests that need live DB fixtures). They fail the same way on the
-  clean baseline. No snapshots were regenerated to mask anything.
+- Log NO LONGER says "not mapped to a QMetry project". It resolves
+  `folder resolved (truncated-name, issue #759 for NSLNM-759): id=128648 (NM-759)`
+  and exports **13 Test Cases from project 'MWTGNSLNM' (121405)**.
+- **Before: 4 TCs. After: 16 TCs** (12 QMetry-only TCs promoted; 1 ineligible —
+  `NSLNM-TC-1302` not story-linked to this feature; the engine's Chalk-derived TCs
+  make up the rest). Per-source: 4 Chalk/AC-derived + 12 QMetry-only authored.
+- QMetry TCs carry REAL authored execution steps (e.g. "Open the applicable NSL
+  process specification", "Verify the SFTP path and file naming convention are
+  documented", 2–4 authored steps each).
 
-## 3. Live re-run (real generator)
+### TRANSACTION_HISTORY status on 4074 (reported, NOT hidden)
 
-Caches `tsg_cache.db` and `CABOT_CHALK_DB.db` were copied READ-ONLY from
-`...\TestSuiteGenerator` into the worktree, then removed/restored afterward (worktree left clean —
-`git status` shows only the four intended edits + the new test file).
+`TRANSACTION_HISTORY` appears **9 times** on 4074 (TC04/05/08/09 Chalk-derived +
+TC10/11/12/14/16), as the step "Verify the transaction update in the following NSL
+DB tables happen successfully: NBOP_MIG_DEVICE / NBOP_MIG_SIM / NBOP_MIG_LINE /
+NBOP_MIG_TRANSACTION_HISTORY".
 
-```
-python run_headless.py MWTGPROV-4628 PI-60
-```
-Produced: `outputs/MWTGPROV-4628_60.2_-_New_MVNO_-_Update_TMO_MMS_TYPE_INDICATOR_Values_for_Amdocs_call_direction_ind_20261026_165322.xlsx`
-Result line: `[RESULT] 17 TCs generated (70 steps total)`; `[PIPELINE] Chalk DB Scenarios ... 3 items`
-→ **17 TCs, CHALK-GUARD 3/3 scenarios→TCs. Unchanged.**
+**Provenance determination (cross-checked against the live QMetry export):**
+- The NSLNM authored QMetry steps contain `TRANSACTION_HISTORY`/`NBOP_MIG` in
+  **0 of 13** TCs (verified by pulling folder 128648 and scanning every authored
+  step summary/test-data/expected). So it is **NOT** a legitimate QMetry authored
+  step.
+- Source is the engine log line `[PATTERN-LIB] enriched suite: 9 TCs got
+  closers/steps` → `modules/qmetry_pattern_library.py`, which injects canonical
+  `NBOP_MIG_*` DB-table verification CLOSER steps (corpus-derived) for
+  device/sim/line-type features. The 4074 wearable/device-pairing feature triggers
+  this; the 4628 feature does not (its xlsx is clean).
+- Verdict: this is a **GENERATED FALLBACK (garbage per the task's definition), not
+  an authored step.** `qmetry_pattern_library.py` is UNCHANGED from base `1e5e6ae`
+  — this closer injection is pre-existing engine behavior, entirely independent of
+  the QMetry project-agnostic resolver (my change touches only
+  `qmetry_steps_source.py` + its tests).
 
-### Acceptance checks read from the produced xlsx
+**DECISION (user, Option A) — DEFERRED to a dedicated follow-up; NOT fixed here.**
+Removing these NBOP_MIG closers means altering `qmetry_pattern_library.py`, which
+changes what every device/sim/line feature's TCs show (including Chalk-derived TCs)
+— a cross-feature product/behavior change outside this task's single-file resolver
+scope. The user confirmed Option A: keep `qmetry_pattern_library.py` UNTOUCHED in
+this task and track the 4074 `TRANSACTION_HISTORY`/`LINE_HISTORY` leak as a
+separately-tracked PRE-EXISTING garbage item (same class as the pre-existing
+snapshot test failures).
 
-- **Banned NSL phrases:** trigger api=0, nsl 200=0, download century report=0, service grouping=0,
-  ne portal=0, transaction_history=0, line_history=0 → **TOTAL 0 hits.**
-- **"Verify that let" = 0, "Verify that retrieve" = 0** → artifact gone.
-- **Fabricated `<word> = <word>` in any Place/ingest step = 0.**
-- **TC2/TC3 clause:** `containing MMS_TYPE_INDICATOR='MT'` present (2), `='MO'` present (2) — kept,
-  with the obligation Set/Verify assertion steps intact.
-- Distinct Place/ingest step-1 texts produced (all clean):
-  - `Place/ingest the TMO PRR input file containing MMS_TYPE_INDICATOR='MO'.`
-  - `Place/ingest the TMO PRR input file containing MMS_TYPE_INDICATOR='MT'.`
-  - `Place/ingest a Verizon (VZW) PRR input file onto the biller SFTP.`
-  - `Place/ingest a TMO PRR input file containing records with a non-MMS / other MMS_TYPE_INDICATOR value onto the biller SFTP.`
-  - `Place/ingest a representative TMO PRR input file onto the biller SFTP.`
+This phrase is confirmed GARBAGE (a generated fallback, absent from all 13 real
+QMetry authored steps) and is NOT acceptable long-term — a dedicated follow-up will
+fix the NBOP_MIG closer injection PROPERLY, with per-step "real/grounded vs
+fabricated" scrutiny rather than a blanket strip that would also kill legitimate
+Chalk-derived DB-verification steps. That cross-feature decision belongs in its own
+task with its own verification, not inside this resolver loop.
 
-### Per-TC step-1 evidence (AFTER). BEFORE = the fabricated artifact from the prior live 4628.
+**Honest status of 4074:** 4074's QMetry-AUTHORED steps are CLEAN (the resolver
+pulled real authored steps from folder 128648). 4074 is NOT fully banned-phrase
+clean, however — the pre-existing pattern-library closers still leak
+`TRANSACTION_HISTORY`/`LINE_HISTORY` into 9 TCs. **Fix pending** in the dedicated
+follow-up. See the "WAIVABLE / deferred item" note below.
 
-| TC | BEFORE (prior build, fabricated) | AFTER (this build) |
-|---|---|---|
-| TC01 (input other/absent → BAU) | `...containing absent ...` | `Place/ingest a TMO PRR input file containing records with a non-MMS / other MMS_TYPE_INDICATOR value onto the biller SFTP.` |
-| TC04 (VZW/CBRS processing active) | `...the VZW/CBRS PRR input file (...)` | `Place/ingest a Verizon (VZW) PRR input file onto the biller SFTP.` |
-| TC07 (No loss of existing functionality) | `...containing loss = of ...` | `Place/ingest a representative TMO PRR input file onto the biller SFTP.` |
-| TC08 (MT→I conversion end to end) | `...containing conversion = end ...` (a.k.a. `Validate = the`) | `Place/ingest a representative TMO PRR input file onto the biller SFTP.` |
+## Run 2 — MWTGPROV-4628 PI-60 (regression, must stay green)
 
-QMetry-authored TC10–TC17 step-1 lines pass through verbatim and clean (e.g. TC14
-`Process a CBRS PRR file.`, TC15 `Process a Verizon PRR file through the VZW processing flow.`,
-TC10 `Ingest the TMO PRR file with the malformed record.`). No fabricated pairs, no
-"Verify that" prefixes.
+xlsx: `C:\Users\P3314665\Documents\mcp-jira-server\TestSuiteGenerator\.worktrees\qmetry-project-agnostic\outputs\MWTGPROV-4628_60.2_-_New_MVNO_-_Update_TMO_MMS_TYPE_INDICATOR_Values_for_Amdocs_call_direction_ind_20261026_235428.xlsx`
 
-## Cleanup
+- `folder resolved (full-key): id=129316 (MWTGMED-5214)` — MWTGMED → 76000 /
+  folder 129316 still resolves exactly (full-key PASS 1).
+- **17 TCs** total. Per-source: **3 Chalk + 8 QMetry + 6 Jira-AC** (provenance tally
+  Chalk 4 / Jira-AC 5 / QMetry 8 ≈ 17; 2 QMetry value-pair TCs enriched Chalk
+  scenarios + 8 QMetry-only promoted).
+- **CHALK-GUARD: 3/3 scenarios → TCs OK.**
+- **TC01 = 4 steps.**
+- **Batch preconditions present on ALL 17 TCs** (0 without a precondition).
+- Step-assembler ran: `[STEP-ASSEMBLER] reconciled suite`.
 
-- Copied read-only caches removed; `CABOT_CHALK_DB.db` restored to the committed version;
-  gitignored `tsg_cache.db` restored from backup; run-created `outputs/` artifacts and all
-  `_scratch_*` probes deleted. `git status` shows only: `modules/step_templates.py`,
-  `modules/tc_builder.py`, `tests/test_authored_step_verbatim.py`, `tests/test_mediation_input_clause.py`
-  (plus a pre-existing, untouched `.agents/tasks/plan.md` modification that is not part of this fix).
+## Banned / placeholder / Chalk checks (both xlsx)
 
----
+Banned set checked: Service Grouping, SERVICE_GROUPING, Century Report, "NSL
+processes request", Trigger API, TRANSACTION_HISTORY, LINE_HISTORY, NE Portal.
+Placeholder set: "= output", "= result".
 
-# Cross-FEAT Integration Verification — Step-Assembly (Iteration 1)
+- **4628:** banned phrases **0**, placeholders **0**, Chalk coverage intact (3/3).
+- **4074:** placeholders **0**, Chalk coverage intact. Banned:
+  `TRANSACTION_HISTORY`×9 (+`LINE_HISTORY` in the same NBOP_MIG closer) — origin
+  established above (pre-existing `qmetry_pattern_library.py` generated closer, NOT
+  the QMetry authored steps, NOT introduced by this change).
 
-Branch: `feat/step-assembler` · Worktree: `.worktrees/step-assembler`
-FEAT commits under test (all present on top of base merge `42ef69b`):
-`b3d0f46` FEAT-001, `014308a` FEAT-002, `b936078` FEAT-003.
-venv: `C:\Users\P3314665\Documents\mcp-jira-server\.venv\Scripts\python.exe`
+## New unit tests added (tests/test_qmetry_steps_source.py)
 
-## Environment prep (verification-only, not committed)
-- Copied `tsg_cache.db`, `tsg_data.db` into the worktree root. `CABOT_CHALK_DB.db` was already
-  present and is a never-touch file — left untouched and never staged.
-- Installed the pinned dev dependency the suite needs: `hypothesis==6.112.2`
-  (declared in `requirements-dev.txt`, missing from the shared venv).
-- Ran pytest with `PYTHONPATH=C:\Users\P3314665\Documents\mcp-jira-server` so the `shared`
-  package (imported by `modules/contract_bridge.py`) resolves. The TSG app puts that repo root
-  on `sys.path` at runtime; PYTHONPATH reproduces it for the test process.
+- `test_resolve_project_dynamic_nslnm` — NSLNM-759 → 121405, MWTGMED-5214 → 76000
+  dynamically; unknown prefix → None.
+- `test_resolve_project_for_feature_subtask_first` — MWTGPROV-4074 resolves via
+  subtask NSLNM-759 → 121405.
+- `test_mwtgmed_still_resolves_static_when_no_cookies` — cookies=None → 76000 from
+  the static fallback.
+- `test_mwtgmed_still_resolves_dynamic` — MWTGMED-5214 → 76000 via the dynamic path.
+- `test_folder_resolution_truncated_name` — NM-759 → 128648 for NSLNM-759.
+- `test_folder_resolution_full_key_mwtgmed` — MWTGMED-5214 → 129316 (full-key).
+- `test_numeric_folder_match_no_false_positive` — NSLNM-759 does NOT match
+  MWTGMED-3759 / NM-7591.
+- `test_unknown_project_skips` updated to stay hermetic under cookies-first ordering.
 
-## Commands + results
-```
-python -m pytest -q
-=> 37 failed, 561 passed, 7 skipped, 34 warnings
-```
-```
-python -m pytest tests/test_step_assembler.py tests/test_mediation_steps_structural.py \
-  tests/test_assertion_grounding.py tests/test_qmetry_steps_source.py tests/test_degraded_runs.py -q
-=> 65 passed    (the step-assembly deliverable's own tests)
-```
-```
-python run_headless.py MWTGPROV-4628 PI-60
-```
-Regenerated workbook (absolute path):
-```
-...\.worktrees\step-assembler\outputs\MWTGPROV-4628_60.2_-_New_MVNO_-_Update_TMO_MMS_TYPE_INDICATOR_Values_for_Amdocs_call_direction_ind_20261026_203950.xlsx
-```
+## pytest new-vs-pre-existing failure delta
 
-## openpyxl confirmations (concrete numbers)
-- **TC01 dedup — PASS.** TC01 = **4 steps** (grounded PRR chain only); redundant steps 5-8 gone.
-  Log: `[STEP-ASSEMBLER] reconciled suite: 6 redundant step(s) collapsed`.
-- **Batch/SFTP preconditions on EVERY scenario TC — PASS: 9/9** carry SFTP/PRR/batch
-  preconditions (was 3/17). Log: `9 precondition(s) set from classification (batch_file=True)`.
-- **0 banned mediation phrases — PASS** across all step summaries + expected results.
-- **Fabricated FIELD='VALUE' pairs — 0 genuine.** Raw regex flagged `MMS_TYPE_INDICATOR='MO'`
-  and `='MT'`, but both are real grounded obligation values (MT proven a genuine obligation by
-  `test_mediation_steps_structural`). No placeholder `input = word` fabrications. Genuine count: 0.
-- **Chalk coverage — PASS 3/3.** Log: `[CHALK-GUARD] Chalk coverage OK: 3/3 scenarios -> TCs`.
-- **Fail-loud QMetry skip — PASS.** Summary sheet carries the visible
-  `[QMETRY] QMetry supplement skipped — authored QMetry test cases were NOT added. Reason: No
-  QMetry session authenticated…` warning (FEAT-003).
+Run with `--continue-on-collection-errors` from the WORKTREE:
 
-## Two gate items NOT fixable by FEAT seams (escalated)
+| | failed | passed | skipped | collection errors |
+|---|---|---|---|---|
+| base `1e5e6ae` (both files reverted via stash) | 43 | 328 | 4 | 28 |
+| this branch | 43 | 335 | 4 | 28 |
 
-### A. TC count = 9, not ~17 — QMetry TC10-TC17 unfetchable (environment blocker)
-All candidate `storage_state.json` files failed the live QMetry auth probe
-(`… did not authenticate → trying next` ×3, then `supplement skipped (No QMetry session
-authenticated…)`). This is the findings §7 UI-vs-headless divergence: the 8 QMetry-only TCs
-require a live authenticated QMetry REST session this headless environment does not have. The
-prior `feat/tsg-mediation-inputfix` live run above (timestamp `165322`) got 17 TCs because a
-valid session existed then — confirming the current 9 is a session-expiry environment issue,
-not a FEAT regression. No code change can mint valid cookies.
+- **NO new failures** — identical 43 failures and identical 28 collection errors at
+  base and on the branch. The 28 collection errors are the known missing-`shared`-
+  module family; the 43 failures are the known stale-snapshot set.
+- **+7 passed** on the branch = the 7 new resolver unit tests.
+- Module suite in isolation: `pytest tests/test_qmetry_steps_source.py -q` →
+  **29 passed** (22 pre-existing + 7 new).
 
-### B. 37 pytest failures are PRE-EXISTING drift, not FEAT regressions (proven)
-All 37 failures are in `test_suite_snapshot.py`, `test_ac_gate.py`, `test_cr_path.py`,
-`test_near_dup_pruning.py` — none touched by the FEATs.
-- Base commit `42ef69b` vs FEAT branch over all 16 snapshot features: **byte-identical TC
-  counts AND titles** (`TOTAL BASE-vs-FEAT DIFFS: 0`). e.g. MWTGPROV-3969 = 6 TCs on both;
-  committed `expected_suites.json` expects 9.
-- Running the 4 modules at the base commit reproduces the **same 37 failures**
-  (`37 failed, 78 passed, 3 skipped`).
-So `expected_suites.json` is stale against its own base branch. Regenerating a committed
-regression fixture changes what the guard pins — a product decision escalated rather than taken
-inside the loop.
+## WAIVABLE / deferred item (user-confirmed Option A)
 
-## Net
-FEAT-001/002/003 integrate cleanly (65 deliverable tests pass; output byte-identical to base for
-the 16 snapshot features, so zero regression). Every real-xlsx check that does not depend on a
-live QMetry session holds. Items A (QMetry auth / ~17 count) and B (stale snapshot fixture) each
-need a human decision.
+- **Phrase:** `TRANSACTION_HISTORY` (and `LINE_HISTORY` in the same step).
+- **Occurrences on 4074:** 9 TCs — TC04, TC05, TC08, TC09 (Chalk-derived) and
+  TC10, TC11, TC12, TC14, TC16 (QMetry-only).
+- **Originating step text:** "Verify the transaction update in the following NSL DB
+  tables happen successfully: NBOP_MIG_DEVICE / NBOP_MIG_SIM / NBOP_MIG_LINE /
+  NBOP_MIG_TRANSACTION_HISTORY".
+- **Origin:** `modules/qmetry_pattern_library.py` NBOP_MIG closer injection
+  (engine log: `[PATTERN-LIB] enriched suite: 9 TCs got closers/steps`). UNCHANGED
+  from base `1e5e6ae`; independent of this resolver change.
+- **Provenance:** NOT a QMetry authored step — present in 0 of 13 live NSLNM
+  authored TCs (folder 128648). It is a generated fallback (garbage).
+- **Disposition:** DEFERRED to a dedicated follow-up task that will fix the closer
+  injection properly (per-step grounded-vs-fabricated scrutiny, not a blanket strip
+  that would also remove legitimate Chalk-derived DB-verification steps). Tracked
+  separately as pre-existing garbage, like the snapshot test failures. NOT fixed in
+  this single-file resolver task.
 
-## Parent decision (both items resolved — proceed to finalize)
-The workflow owner WAIVED both items for this headless environment:
-- **A — WAIVED:** 9-vs-17 is the findings §7 UI-vs-headless divergence (QMetry 401 / no
-  authenticated session), an environment limitation, not a regression. In-scope correct behavior
-  for THIS change is fail-loud + Summary-sheet warning + `suite.warnings`, which is verified.
-  Acceptance is verified on the **9-TC headless output only**; full 17 requires a live QMetry
-  session.
-- **B — KNOWN PRE-EXISTING, leave as-is:** the 37 failures fail identically at base `42ef69b`
-  with byte-identical counts/titles (diff=0) → zero NEW regressions. `expected_suites.json` is
-  NOT regenerated inside this loop (repinning a committed regression guard is a separate product
-  decision not requested). The `shared`-module collection errors are the same pre-existing
-  environment gap.
-
-## Final acceptance on the 9-TC headless output (all PASS)
-Workbook: `outputs\MWTGPROV-4628_60.2_..._20261026_203950.xlsx`
-- **TC01 = 4 steps, asserts `call_direction_ind = BAU`** (expected text:
-  "call_direction_ind = BAU in the Amdocs TMO billing output record; all other fields …"). PASS.
-- **0 leaked placeholder values** — no `= output`, `= result`, `= value` anywhere. PASS.
-- **Grounding intact** — all 9 TCs report **100%** grounding (no TC regressed below its prior
-  gate). PASS.
-- **Batch/SFTP preconditions on 9/9 scenario TCs.** PASS.
-- **0 banned mediation phrases; 0 genuine fabricated FIELD='VALUE' pairs** (MO/MT are real
-  obligation values). PASS.
-- **Chalk coverage 3/3.** PASS.
-- **QMetry-skip warning visible** in the Summary sheet + `suite.warnings` (fail-loud). PASS.
-
-Acceptance bar for this change — "zero NEW regressions + real-xlsx acceptance on the 9-TC
-output" — is MET. The ~17 / TC10-TC17 path is explicitly WAIVED here (verified on 9-TC headless
-output; full 17 requires a live QMetry session — environment limitation, not a regression).
+**This task's acceptance gate is MET:** dynamic resolution path exercised end-to-end
+(NSLNM resolved live to 121405 / folder 128648, 4→16 with real authored steps),
+MWTGMED regression green (17 TCs, CHALK-GUARD 3/3, TC01=4 steps, batch preconditions
+on all, step-assembler ran), 4628 xlsx 0 banned / 0 placeholder / Chalk intact,
+clean QMetry-authored output on both, no new pytest failures (+7 resolver tests).
+The 4074 pattern-library TRANSACTION_HISTORY leak is explicitly waived here with a
+fix pending in the dedicated follow-up.

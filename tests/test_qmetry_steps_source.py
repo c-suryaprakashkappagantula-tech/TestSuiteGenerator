@@ -450,13 +450,121 @@ def test_shared_linkage_no_positional_assignment():
 
 # ─── 9. unknown project skips ───────────────────────────────────────
 
-def test_unknown_project_skips():
+def test_unknown_project_skips(monkeypatch):
+    # Hermetic: cookies load first (fail-loud ordering), so stub the loader and the
+    # dynamic /projects index — neither FOO-1 nor FOO-2 resolves dynamically or via
+    # the static table, so the feature is skipped gracefully (n == 0, untouched).
     assert resolve_project_id('FOO-1') is None
+    monkeypatch.setattr(qss, 'load_qmetry_cookies', lambda log=None: {'ok': '1'})
+    monkeypatch.setattr(qss, '_load_project_index',
+                        lambda cookies, log=print: {'NSLNM': '121405', 'MWTGMED': '76000'})
     sc = _scenario('untouched', steps_hint=[])
     jira = _Jira('FOO-1')
     jira.subtasks = [{'key': 'FOO-2'}]
     n = enrich_scenarios_with_qmetry([sc], jira, {}, log=lambda *a: None)
     assert n == 0 and sc.steps_hint == []
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 9z. PROJECT-AGNOSTIC RESOLVER — dynamic /projects + static fallback
+# ═══════════════════════════════════════════════════════════════════
+
+from modules.qmetry_steps_source import (  # noqa: E402  (grouped with the new tests)
+    resolve_project_dynamic, resolve_project_for_feature, _resolve_folder_id,
+)
+
+# A live-verified /projects shape: the Jira project KEY is the QMetry project key.
+_PROJECT_RECORDS = [
+    {'id': 121405, 'key': 'NSLNM', 'name': 'MWTGNSLNM'},
+    {'id': 76000, 'key': 'MWTGMED', 'name': 'WPAMED-Mediation'},
+    {'id': 999, 'key': 'OTHER', 'name': 'Other'},
+]
+
+
+def _stub_project_index(monkeypatch):
+    """Stub the dynamic index so the resolver is hermetic (no /projects HTTP call)."""
+    index = {str(r['key']).upper(): str(r['id']) for r in _PROJECT_RECORDS}
+    qss._PROJECT_INDEX = None
+    monkeypatch.setattr(qss, '_load_project_index', lambda cookies, log=print: dict(index))
+    return index
+
+
+def test_resolve_project_dynamic_nslnm(monkeypatch):
+    # Non-MWTGMED project resolves DYNAMICALLY from /projects — no hardcode.
+    _stub_project_index(monkeypatch)
+    assert resolve_project_dynamic('NSLNM-759', cookies={}, log=lambda *a: None) == '121405'
+    assert resolve_project_dynamic('MWTGMED-5214', cookies={}, log=lambda *a: None) == '76000'
+    # a project absent from /projects → None (graceful skip, not an error)
+    assert resolve_project_dynamic('ZZZ-1', cookies={}, log=lambda *a: None) is None
+
+
+def test_resolve_project_for_feature_subtask_first(monkeypatch):
+    # Feature MWTGPROV-4074 (not a QMetry project) resolves via its subtask NSLNM-759.
+    _stub_project_index(monkeypatch)
+    pid = resolve_project_for_feature('MWTGPROV-4074', ['NSLNM-759'],
+                                      cookies={}, log=lambda *a: None)
+    assert pid == '121405'   # resolved through the SUBTASK, not the feature
+
+
+def test_mwtgmed_still_resolves_static_when_no_cookies():
+    # With cookies=None the dynamic step is skipped; MWTGMED-5214 still resolves 76000
+    # from the additive static table (regression safety net preserved).
+    pid = resolve_project_for_feature('MWTGPROV-4628', ['MWTGMED-5214'],
+                                      cookies=None, log=lambda *a: None)
+    assert pid == '76000'
+
+
+def test_mwtgmed_still_resolves_dynamic(monkeypatch):
+    # And MWTGMED keeps resolving 76000 under the dynamic path too.
+    _stub_project_index(monkeypatch)
+    pid = resolve_project_for_feature('MWTGPROV-4628', ['MWTGMED-5214'],
+                                      cookies={}, log=lambda *a: None)
+    assert pid == '76000'
+
+
+# ─── folder resolution: truncated-name vs full-key, no false positives ──
+
+class _FolderClient:
+    """Fake client returning a fixed testcase-folder tree (no network)."""
+    def __init__(self, tree):
+        self._tree = tree
+
+    def get_testcase_folders(self):
+        return self._tree
+
+
+# NSLNM tree: a Wearables parent with the TRUNCATED 'NM-759' child (live id 128648).
+_NSLNM_TREE = [{
+    'id': 52952, 'name': 'Wearables', 'children': [
+        {'id': 126061, 'name': 'NSLNM-752 - TMO - Wearables Activation', 'children': []},
+        {'id': 128648, 'name': 'NM-759', 'children': []},
+    ],
+}]
+
+# MWTGMED tree: an exact full-key folder (live id 129316).
+_MWTGMED_TREE = [{'id': 129316, 'name': 'MWTGMED-5214', 'children': []}]
+
+
+def test_folder_resolution_truncated_name():
+    client = _FolderClient(_NSLNM_TREE)
+    fid = _resolve_folder_id(client, '121405', ['NSLNM-759'], log=lambda *a: None)
+    assert fid == '128648'   # NM-759 resolved for NSLNM-759 via the numeric pass
+
+
+def test_folder_resolution_full_key_mwtgmed():
+    client = _FolderClient(_MWTGMED_TREE)
+    fid = _resolve_folder_id(client, '76000', ['MWTGMED-5214'], log=lambda *a: None)
+    assert fid == '129316'   # full-key pass wins
+
+
+def test_numeric_folder_match_no_false_positive():
+    # NSLNM-759 must NOT match 'MWTGMED-3759' nor 'NM-7591' (digit-boundary guard).
+    tree = [
+        {'id': 1, 'name': 'MWTGMED-3759', 'children': []},
+        {'id': 2, 'name': 'NM-7591', 'children': []},
+    ]
+    client = _FolderClient(tree)
+    assert _resolve_folder_id(client, '121405', ['NSLNM-759'], log=lambda *a: None) is None
 
 
 # ─── 9b. blank subtask key never drives a match ─────────────────────

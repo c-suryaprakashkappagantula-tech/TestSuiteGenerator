@@ -66,21 +66,33 @@ class QMetryFetchError(Exception):
 # PROJECT RESOLVER
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Jira project prefix / component  →  QMetry projectId. Single onboarding point
-# for a new project. NEVER hardcode MDA's own 127207 here.
+# ADDITIVE FALLBACK ONLY — consulted *only* when the dynamic ``/projects`` lookup
+# cannot resolve a key (e.g. the QMetry session cannot list projects, or a QMetry
+# project whose ``key`` differs from the Jira prefix). The PRIMARY, project-agnostic
+# mechanism is ``resolve_project_dynamic`` below, which queries QMetry's ``/projects``
+# endpoint and matches the Jira project prefix against each project's ``key`` — so
+# MWTGMED, NSLNM, and every FUTURE project are picked up with NO code change here.
+# This table is NOT the source of truth; it is a safety net kept easy to extend
+# (one line per entry). NEVER hardcode MDA's own 127207 here.
 QMETRY_PROJECT_MAP = {
     'MWTGMED': '76000',          # Mediation features (MWTGMED-*)
-    'WPAMED-Mediation': '76000',
+    'WPAMED-Mediation': '76000',  # alias: QMetry project NAME for the same 76000
 }
 DEFAULT_QMETRY_PROJECT = None     # unknown → skip gracefully
 
+# Per-run cache of the dynamic {PROJECT_KEY_UPPER: projectId} index built from
+# QMetry's ``/projects`` endpoint. ``None`` = not yet loaded this run.
+_PROJECT_INDEX: Optional[Dict[str, str]] = None
+
 
 def resolve_project_id(feature_key: str) -> Optional[str]:
-    """Map a Jira feature key to a QMetry projectId, or ``None`` when unknown.
+    """Map a Jira feature key to a QMetry projectId via the STATIC fallback table.
 
     Matches the component prefix (the token before the first ``-``) against
     ``QMETRY_PROJECT_MAP``, plus the explicit ``WPAMED-Mediation`` alias. ``None``
-    means "not a known QMetry project → supplement skipped, not an error".
+    means "not in the fallback table". This is the additive fallback consulted only
+    after the dynamic ``/projects`` resolver (``resolve_project_dynamic``) cannot
+    answer — it is NOT the primary resolution path.
     """
     fk = (feature_key or '').strip()
     if not fk:
@@ -92,20 +104,104 @@ def resolve_project_id(feature_key: str) -> Optional[str]:
     return QMETRY_PROJECT_MAP.get(prefix, DEFAULT_QMETRY_PROJECT)
 
 
-def resolve_project_for_feature(feature_key: str, subtask_keys=None) -> Optional[str]:
-    """Resolve the QMetry projectId for a feature, considering its subtask keys.
+def _key_prefix(jira_key: str) -> str:
+    """Return the uppercased Jira project prefix (token before the first ``-``)."""
+    return (jira_key or '').strip().split('-', 1)[0].upper()
 
-    A Mediation feature often carries a non-QMetry feature key (e.g.
-    ``MWTGPROV-4628``) while the authored QMetry test cases live under a subtask in
-    a QMetry-mapped project (e.g. ``MWTGMED-5214`` → 76000). Resolution order:
-      1. the feature key itself (``resolve_project_id``),
-      2. then each VALID subtask key, in order.
-    Returns the first mapped projectId, else ``None`` (skip, not an error).
+
+def _load_project_index(cookies, log=print) -> Dict[str, str]:
+    """Build (and cache for the run) ``{PROJECT_KEY_UPPER: projectId}`` from QMetry's
+    project-agnostic ``/projects`` endpoint.
+
+    The Jira project KEY returned per QMetry project (e.g. ``{"id": 121405,
+    "key": "NSLNM", ...}``, ``{"id": 76000, "key": "MWTGMED", ...}``) is exactly the
+    prefix of a subtask key, so this index resolves ANY project dynamically with no
+    hardcoding. Constructed through the same authenticated ``QMetryRestClient`` the
+    fetcher uses; any mapped/placeholder projectId is fine because ``/projects`` is
+    itself project-agnostic (NEVER MDA's default 127207 — we pass a mapped id).
+
+    FAIL-LOUD (design D5): an HTTP / transport failure raises ``QMetryFetchError``
+    rather than silently returning an empty index, so a dead session surfaces as a
+    visible skip warning via the engine hook instead of a silent wrong answer.
     """
-    pid = resolve_project_id(feature_key)
-    if pid is not None:
-        return pid
-    for k in _valid_keys(subtask_keys or []):
+    global _PROJECT_INDEX
+    if _PROJECT_INDEX is not None:
+        return _PROJECT_INDEX
+
+    try:
+        from qmetry_rest_client import QMetryRestClient
+    except Exception as exc:
+        raise QMetryFetchError('QMetryRestClient import failed: %s' % exc)
+
+    # Any mapped placeholder pid is fine — /projects ignores the project id.
+    pid = next(iter(QMETRY_PROJECT_MAP.values()), '76000')
+    try:
+        client = QMetryRestClient(base_url=_QMETRY_BASE_URL, cookies=(cookies or {}),
+                                  project_id=str(pid), logger=log)
+    except Exception as exc:
+        raise QMetryFetchError('QMetry client construction failed: %s' % exc)
+
+    try:
+        resp = client.session.get(client._url('/projects'), timeout=client.timeout)
+        resp.raise_for_status()
+        records = resp.json()
+    except Exception as exc:
+        raise QMetryFetchError('project list (/projects) failed: %s' % exc)
+
+    if isinstance(records, dict):
+        records = records.get('data', records.get('projects', [])) or []
+    index: Dict[str, str] = {}
+    for rec in (records or []):
+        if not isinstance(rec, dict):
+            continue
+        key = rec.get('key')
+        pid_val = rec.get('id')
+        if key is None or pid_val is None:
+            continue
+        index[str(key).strip().upper()] = str(pid_val)
+
+    log('[QMETRY] dynamic project index loaded: %d project(s) from /projects' % len(index))
+    _PROJECT_INDEX = index
+    return index
+
+
+def resolve_project_dynamic(jira_key: str, cookies, log=print) -> Optional[str]:
+    """Resolve a Jira key's project to a QMetry projectId via the dynamic ``/projects``
+    index (primary path). Returns the projectId or ``None`` when the prefix has no
+    matching QMetry project. Raises ``QMetryFetchError`` (fail-loud) if ``/projects``
+    cannot be reached.
+    """
+    prefix = _key_prefix(jira_key)
+    if not prefix:
+        return None
+    return _load_project_index(cookies, log).get(prefix)
+
+
+def resolve_project_for_feature(feature_key: str, subtask_keys=None,
+                                cookies=None, log=print) -> Optional[str]:
+    """Resolve the QMetry projectId for a feature — SUBTASK-FIRST and DYNAMIC-first.
+
+    "Always go with the Jira issue": the authored QMetry test cases live under a
+    feature's linked SUBTASK (e.g. ``MWTGPROV-4074`` → subtask ``NSLNM-759`` →
+    QMetry project 121405; ``MWTGPROV-4628`` → subtask ``MWTGMED-5214`` → 76000),
+    so each valid subtask key is tried BEFORE the feature key.
+
+    Per-key resolution order (D2): dynamic ``/projects`` key-match first, then the
+    static ``QMETRY_PROJECT_MAP`` fallback. Returns the first hit, else ``None``
+    (skip, not an error).
+
+    When ``cookies`` is ``None`` the dynamic step is skipped and only the static
+    table is consulted — this keeps hermetic unit tests (that do not exercise the
+    network) deterministic.
+    """
+    ordered = list(_valid_keys(subtask_keys or [])) + [feature_key]
+    for k in ordered:
+        if not k:
+            continue
+        if cookies is not None:
+            pid = resolve_project_dynamic(k, cookies, log)
+            if pid is not None:
+                return pid
         pid = resolve_project_id(k)
         if pid is not None:
             return pid
@@ -433,23 +529,60 @@ def _iter_folders(nodes):
 
 
 def _resolve_folder_id(client, project_id, candidate_keys, log) -> Optional[str]:
-    """Return the id of the folder whose name CONTAINS one validated candidate key."""
+    """Resolve the QMetry folder id for a subtask within the (already-resolved) project.
+
+    Matching is TIERED so a truncated QMetry folder name still resolves (D4). The
+    project id is already pinned to the correct QMetry project before this runs, so
+    the numeric pass is safely scoped and cannot collide across projects:
+
+      PASS 1 — full-key containment: a folder whose name contains a full validated
+        candidate key (e.g. ``MWTGMED-5214`` → folder ``MWTGMED-5214`` id 129316).
+      PASS 2 — truncated-name / issue-number match: for a candidate of shape
+        ``<PREFIX>-<NUM>``, a folder whose name contains ``<NUM>`` with a non-digit
+        boundary (e.g. ``NSLNM-759`` → folder ``NM-759`` id 128648). The digit
+        boundary prevents matching ``-7591`` or a different number embedded in
+        another key. Scoped to the resolved project, so ``MWTGMED-3759`` in another
+        project can never be reached here.
+
+    PASS 1 runs first, so an exact full-key folder always wins and MWTGMED keeps
+    resolving its ``MWTGMED-5214`` folder exactly.
+    """
     try:
         folders = client.get_testcase_folders()
     except Exception as exc:
         raise QMetryFetchError('folder list failed: %s' % exc)
     flist = folders if isinstance(folders, list) else (folders.get('data', folders)
                                                        if isinstance(folders, dict) else [])
+    nodes = [n for n in _iter_folders(flist) if str(n.get('name', '') or '')]
+
+    # PASS 1 — full-key containment (exact behavior preserved; MWTGMED-5214 wins here).
     keys_lower = [k.lower() for k in candidate_keys]
-    for node in _iter_folders(flist):
+    for node in nodes:
         name = str(node.get('name', '') or '').lower()
-        if not name:
-            continue
         if any(k in name for k in keys_lower):
             fid = node.get('id')
             if fid is not None:
-                log('[QMETRY] folder resolved: id=%s (%s)' % (fid, node.get('name')))
+                log('[QMETRY] folder resolved (full-key): id=%s (%s)'
+                    % (fid, node.get('name')))
                 return str(fid)
+
+    # PASS 2 — truncated folder name: match the issue NUMBER with a digit boundary so
+    # a folder like "NM-759" resolves for "NSLNM-759" without matching "-7591".
+    num_res = []
+    for k in candidate_keys:
+        m = re.match(r'^[A-Z][A-Z0-9]+-(\d+)$', k)
+        if m:
+            num = m.group(1)
+            num_res.append((k, num, re.compile(r'(?<!\d)' + re.escape(num) + r'(?!\d)')))
+    for node in nodes:
+        name = str(node.get('name', '') or '')
+        for key, num, pat in num_res:
+            if pat.search(name):
+                fid = node.get('id')
+                if fid is not None:
+                    log('[QMETRY] folder resolved (truncated-name, issue #%s for %s): '
+                        'id=%s (%s)' % (num, key, fid, node.get('name')))
+                    return str(fid)
     return None
 
 
@@ -899,13 +1032,17 @@ def enrich_scenarios_with_qmetry(scenarios, jira, options, log=print) -> int:
     subtask_keys = [k for st in (getattr(jira, 'subtasks', None) or [])
                     if isinstance(st, dict) and (k := (st.get('key') or '').strip())]
 
-    pid = resolve_project_for_feature(feature_key, subtask_keys)
+    # Load the authenticated cookies FIRST (before any project decision) so a dead
+    # session fails LOUD via QMetrySessionError (preserved fail-loud), and so the
+    # dynamic /projects resolver below runs through the same authenticated session.
+    cookies = load_qmetry_cookies(log=log)   # raises QMetrySessionError if none authenticate
+
+    pid = resolve_project_for_feature(feature_key, subtask_keys, cookies=cookies, log=log)
     if pid is None:
         log('[QMETRY] feature %s (subtasks %s) not mapped to a QMetry project — skipping'
             % (feature_key, subtask_keys))
         return 0
 
-    cookies = load_qmetry_cookies(log=log)   # raises QMetrySessionError if none authenticate
     authored = fetch_authored_steps(pid, feature_key, subtask_keys, cookies=cookies, log=log)
 
     n, new_scenarios = attach_steps_to_scenarios(
