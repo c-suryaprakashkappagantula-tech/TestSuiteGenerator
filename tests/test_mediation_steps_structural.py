@@ -10,7 +10,9 @@ from modules.dimension_extractor import (
 from modules.tc_builder import _build_scenario_tc
 from modules.data_models_v8 import ExtractedScenario
 from modules.traceability import create_traceability
-from modules.step_templates import _BANNED_MEDIATION_PHRASES
+from modules.step_templates import (
+    _BANNED_MEDIATION_PHRASES, _is_placeholder_value, _prr_mediation_steps,
+)
 
 from tests.test_assertion_grounding import FIXTURE_4628_AC
 
@@ -84,3 +86,38 @@ def test_bau_no_impact_regression_is_baseline_compare_no_nsl():
     # baseline-compare / unchanged assertion for a no-impact scenario
     assert 'baseline' in blob
     assert ('unchanged' in blob or 'byte-for-byte' in blob or 'field-by-field' in blob)
+
+
+# ── placeholder-value guard (FEAT-002 fix): a field-concept word scraped as the output
+#    value must never be displayed/stamped; the grounded step falls back to the obligation's
+#    concrete expected_value so TC01's assert can collapse by meaning. ──
+
+def test_is_placeholder_value_recognises_field_concept_words():
+    assert _is_placeholder_value('output')
+    assert _is_placeholder_value('result')
+    assert _is_placeholder_value('')
+    assert _is_placeholder_value('call_direction_ind', out_field='call_direction_ind')
+    # a real asserted value is NOT a placeholder
+    assert not _is_placeholder_value('BAU')
+    assert not _is_placeholder_value('I', out_field='call_direction_ind')
+
+
+def test_prr_assert_uses_obligation_value_not_leaked_output_placeholder():
+    """A TC01-shaped title ('... -> output=BAU') makes the scenario-field parser scrape the
+    placeholder 'output' as the output value. The builder must substitute the obligation's
+    concrete expected_value ('BAU') so the grounded step DISPLAYS and STAMPS BAU, not the
+    literal 'output'."""
+    ob = {'input_field': 'MMS_TYPE_INDICATOR', 'input_value': 'other/absent',
+          'expected_field': 'call_direction_ind', 'expected_value': 'BAU',
+          'obligation_id': 'MMS_TYPE_INDICATOR:other/absent'}
+    meta = {}
+    steps = _prr_mediation_steps(
+        'Verify input=other/absent -> output=BAU', 'other/absent value',
+        'verify input other absent output bau', '', obligation=ob, meta=meta)
+    blob = ' '.join('%s %s' % (s, e) for s, e in steps).lower()
+    # the leaked placeholder is gone; the real value is present
+    assert '= output' not in blob
+    assert 'bau' in blob
+    # the assembler-support meta carries the concrete value for semantic dedup
+    assert meta.get('expected_value') == 'BAU'
+    assert meta.get('expected_field') == 'call_direction_ind'

@@ -795,6 +795,9 @@ def attach_steps_to_scenarios(scenarios, authored, log=print, validated_keys=Non
     #    (not in matched_tc_keys) becomes its own new scenario, built from its authored
     #    summary + steps, returned for the caller to append AFTER the existing scenarios
     #    (keeps Chalk-first ordering). Ineligible TCs never reach here (dropped above). ──
+    # Build the feature's content vocabulary from the EXISTING (Chalk-derived) scenarios so
+    # the relevance gate can require a positive overlap before promoting a TC (decision 6).
+    feature_vocab = _feature_vocabulary(scenarios)
     new_scenarios = []
     for tc_key, tc in eligible:
         if tc_key in matched_tc_keys:
@@ -802,12 +805,86 @@ def attach_steps_to_scenarios(scenarios, authored, log=print, validated_keys=Non
         if ExtractedScenario is None or create_traceability is None:
             log('[QMETRY] TC %s unmatched but new-TC builder unavailable — skipped' % tc_key)
             continue
+        verdict, score = _tier3_relevance(tc, feature_vocab)
         new_sc = _build_new_scenario_from_tc(tc_key, tc)
+        if verdict == 'flag':
+            setattr(new_sc, 'needs_review', True)
+            setattr(new_sc, 'review_reason',
+                    'QMetry-only TC: low relevance to feature scope '
+                    '(overlap=%.2f) — kept, flagged for review' % score)
+            log('[QMETRY] TC %s unmatched, low relevance (overlap=%.2f) — '
+                'FLAGGED FOR REVIEW, kept as NEW test case' % (tc_key, score))
+        else:
+            log('[QMETRY] TC %s unmatched, relevant (overlap=%.2f) — added as NEW test case '
+                '(category=%s, %d steps)'
+                % (tc_key, score, new_sc.category, len(new_sc.steps_hint)))
         new_scenarios.append(new_sc)
-        log('[QMETRY] TC %s unmatched — added as NEW test case (category=%s, %d steps)'
-            % (tc_key, new_sc.category, len(new_sc.steps_hint)))
 
     return count, new_scenarios
+
+
+# ── Tier-3 relevance gate (decision 6) ─────────────────────────────────────────
+
+# Thresholds tuned so the 4628 QMetry-only set (TC10-TC17) survives: these QMetry TCs
+# share the mediation vocabulary (PRR, MMS_TYPE_INDICATOR, call_direction_ind, Amdocs,
+# BAU, VZW/CBRS), so even a loose overlap clears the KEEP bar. Provenance plus authored
+# steps still PROMOTE the TC — the gate NEVER silently drops an eligible TC (design §9:
+# default to flag-for-review, not hard-drop). A low-overlap/off-topic TC is kept as a NEW
+# test case BUT flagged needs_review so a human decides, instead of being promoted silently.
+_TIER3_KEEP = 0.12    # >= keep outright (relevant); below this = keep but flag for review
+
+_STOPWORDS = frozenset((
+    'the', 'a', 'an', 'and', 'or', 'of', 'to', 'in', 'for', 'is', 'are', 'be', 'with',
+    'that', 'this', 'it', 'as', 'on', 'at', 'by', 'from', 'verify', 'validate', 'check',
+    'confirm', 'ensure', 'test', 'case', 'tc', 'when', 'then', 'should', 'must', 'will',
+    'value', 'values', 'field', 'fields', 'record', 'records', 'file', 'files', 'tmo',
+))
+
+
+def _content_tokens(text: str) -> set:
+    toks = re.sub(r'[^a-z0-9_]', ' ', (text or '').lower()).split()
+    return {t for t in toks if len(t) > 2 and t not in _STOPWORDS}
+
+
+def _feature_vocabulary(scenarios) -> set:
+    """Collect content tokens the feature is 'about' from its Chalk-derived scenarios:
+    titles, validations and every obligation field/value. Used by the relevance gate.
+    """
+    vocab = set()
+    for sc in (scenarios or []):
+        vocab |= _content_tokens(getattr(sc, 'title', '') or '')
+        vocab |= _content_tokens(getattr(sc, 'validation', '') or '')
+        for ob in (getattr(sc, 'obligations', None) or []):
+            for k in ('input_field', 'input_value', 'expected_field', 'expected_value',
+                      'condition'):
+                vocab |= _content_tokens(ob.get(k) if isinstance(ob, dict) else '')
+    return vocab
+
+
+def _tier3_relevance(tc: Dict[str, Any], feature_vocab: set):
+    """Return (verdict, overlap_score) for promoting an unmatched eligible QMetry TC.
+
+    overlap_score = |candidate_tokens ∩ feature_vocab| / |candidate_tokens|, computed over
+    the TC summary + authored step summaries. verdict: 'keep' | 'flag'.
+
+    The gate NEVER drops: an eligible-but-unmatched TC is always promoted as a NEW test
+    case (provenance + authored steps earned it a place). An on-topic TC (overlap at/above
+    the KEEP bar) is promoted cleanly; a low-overlap or off-topic TC is still promoted but
+    tagged 'flag' so it carries a needs_review marker for a human to confirm — relevance is
+    advisory, not a silent delete (design §9). When the feature exposes no vocabulary the
+    gate cannot judge, so it also defaults to 'flag'.
+    """
+    cand = _content_tokens(tc.get('summary', '') or '')
+    for s in (tc.get('step_summaries') or []):
+        cand |= _content_tokens(s or '')
+    if not cand:
+        return 'flag', 0.0
+    if not feature_vocab:
+        return 'flag', 0.0
+    overlap = len(cand & feature_vocab) / len(cand)
+    if overlap >= _TIER3_KEEP:
+        return 'keep', overlap
+    return 'flag', overlap
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

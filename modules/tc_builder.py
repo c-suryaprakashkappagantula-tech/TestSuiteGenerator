@@ -1038,6 +1038,7 @@ def _build_obligation_steps(scenario, api_context, jira=None, feature_name='', f
     steps = []
     n = 0
     _src_id = getattr(getattr(scenario, 'source', None), 'source_id', '') or ''
+    _prr_meta = {}   # out-dict: get_step_chain stamps the grounded PRR assert step here
 
     # ── Base narrative steps ──
     # QMetry authored steps (steps_hint) are ground truth when present: build the
@@ -1063,6 +1064,7 @@ def _build_obligation_steps(scenario, api_context, jira=None, feature_name='', f
                 expected=_exp,
                 data_reference=_src_id,
                 authored=True,
+                origin='authored',
             ))
     else:
         # ── Grounded chain first (same machinery as the non-obligation path) ──
@@ -1092,7 +1094,8 @@ def _build_obligation_steps(scenario, api_context, jira=None, feature_name='', f
             # of fabricating one. Non-mediation branches ignore the obligation kwarg.
             _ob = (scenario.obligations or [None])[0]
             _chain = _get_chain(scenario.title, scenario.validation, _ctx,
-                                feature_type=_ft, obligation=_ob)
+                                feature_type=_ft, obligation=_ob, meta=_prr_meta)
+            _grounded_base = n
             for (_s, _e) in (_chain or []):
                 n += 1
                 steps.append(TestStep(
@@ -1100,13 +1103,22 @@ def _build_obligation_steps(scenario, api_context, jira=None, feature_name='', f
                     summary=_s,
                     expected=_e,
                     data_reference=_src_id,
+                    origin='grounded',
                 ))
+            # Stamp the grounded PRR assert step with its (expected_field, expected_value)
+            # so StepAssembler.reconcile() can collapse the redundant spliced restatement.
+            _ai = _prr_meta.get('assert_index')
+            if _ai is not None:
+                _gi = _grounded_base + _ai
+                if 0 <= _gi < len(steps):
+                    steps[_gi].expected_field = _prr_meta.get('expected_field') or ''
+                    steps[_gi].expected_value = _prr_meta.get('expected_value') or ''
         except Exception:
             # Grounding must never break obligation TC generation — fall through with whatever
             # grounded steps were built (possibly none) and still emit the assertions below.
             pass
 
-    for ob in (scenario.obligations or []):
+    for ob in _dedup_obligations(scenario.obligations or []):
         exp_val = (ob.get('expected_value') or '').strip()
         if not exp_val:
             continue  # defensive — nothing to assert
@@ -1122,6 +1134,7 @@ def _build_obligation_steps(scenario, api_context, jira=None, feature_name='', f
             input_value=ob.get('input_value') or '',
             obligation_id=oid,
             data_reference=ob.get('source_ref') or _src_id,
+            origin='obligation',
         ))
         n += 1
         steps.append(TestStep(
@@ -1132,8 +1145,69 @@ def _build_obligation_steps(scenario, api_context, jira=None, feature_name='', f
             expected_value=exp_val,
             obligation_id=oid,
             data_reference=ob.get('source_ref') or _src_id,
+            origin='obligation',
         ))
     return steps
+
+
+def _dedup_obligations(obligations):
+    """Collapse duplicate obligations BEFORE splicing per-obligation set/assert pairs.
+
+    Per the step-assembly design (Section 8.3.2): two obligations are the SAME rule when
+    they share (normalized input_value, expected_value) and one of them is abstract — its
+    `input_field` is the literal default ``'input'`` (or its `expected_field` is the default
+    ``'output'``). Keep the CONCRETE one. This eliminates TC01's redundant
+    ``input:other/absent`` vs ``MMS_TYPE_INDICATOR:other/absent`` pair at the source, so only
+    one Set/Verify pair is spliced instead of two.
+
+    Order-preserving, deterministic. Obligations that are not duplicates pass through
+    unchanged. Pure — never mutates the input dicts.
+    """
+    obs = list(obligations or [])
+    if len(obs) < 2:
+        return obs
+
+    def _norm(v):
+        return re.sub(r'\s+', ' ', (v or '').strip().lower())
+
+    def _is_abstract(ob):
+        return ((ob.get('input_field') or 'input') == 'input'
+                or (ob.get('expected_field') or 'output') == 'output')
+
+    def _concreteness(ob):
+        # Higher = more concrete (preferred). A real input_field AND expected_field wins.
+        score = 0
+        if (ob.get('input_field') or 'input') != 'input':
+            score += 2
+        if (ob.get('expected_field') or 'output') != 'output':
+            score += 1
+        return score
+
+    # Group by the semantic key (normalized input_value, expected_value).
+    groups = {}
+    order = []
+    for ob in obs:
+        key = (_norm(ob.get('input_value')), _norm(ob.get('expected_value')))
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(ob)
+
+    out = []
+    for key in order:
+        members = groups[key]
+        if len(members) == 1:
+            out.append(members[0])
+            continue
+        # Only collapse when at least one member is abstract (default field). Otherwise two
+        # genuinely-different concrete obligations keep BOTH pairs (e.g. MT->I and MO->O never
+        # share a key so this branch never touches them).
+        if any(_is_abstract(m) for m in members):
+            best = max(members, key=_concreteness)
+            out.append(best)
+        else:
+            out.extend(members)
+    return out
 
 
 def _build_scenario_tc(
@@ -1633,21 +1707,15 @@ def _build_scenario_tc(
         )
         # Rule #1: a Chalk-authored precondition must never be replaced by enrichment.
         setattr(_tc, 'precond_from_chalk', True)
+        _carry_review_flag(scenario, _tc)
         return _tc
 
-    # Detect batch/PRR file-ingestion features — they need entirely different preconditions.
-    _feature_name_lower = (feature_name or '').lower()
-    _is_file_ingestion = any(kw in _feature_name_lower for kw in (
-        'prr', 'batch file', 'sftp', 'file ingest', 'usage file', 'differential report',
-        'batch report', 'data volume', 'mediation file'))
-
-    if _is_file_ingestion:
-        preconditions = '\n'.join([
-            '1. SIT environment is ready and SFTP server is accessible.',
-            '2. Valid PRR/batch test file prepared with correct format and field lengths.',
-            '3. Subscriber line exists in NSL DB with matching MDN for file processing.',
-        ])
-    elif scenario.source.source_type == 'Subtask AC':
+    # NOTE: batch/PRR file-ingestion preconditions are no longer guessed per-TC here.
+    # The feature-level classification (batch_file / mediation) is the single source of
+    # truth, applied once by StepAssembler.reconcile() after the full pipeline has run
+    # (see modules/step_assembler.py). The branches below only build the DEFAULT grounded
+    # precondition for a non-batch feature; the assembler overwrites them for batch_file.
+    if scenario.source.source_type == 'Subtask AC':
         preconditions = '\n'.join([
             '1. Active TMO MDN available in SIT environment',
             '2. User logged into NBOP' if 'nbop' in (scenario.source.source_id or '').lower() or 'ui' in (scenario.source.source_id or '').lower() else '2. API endpoint accessible',
@@ -1686,7 +1754,7 @@ def _build_scenario_tc(
         _pc.append('%d.\tLine Status: Active' % _n)
         preconditions = '\n'.join(_pc)
 
-    return TestCase(
+    _tc = TestCase(
         summary=summary,
         description=description,
         preconditions=preconditions,
@@ -1700,6 +1768,19 @@ def _build_scenario_tc(
         user_requested=getattr(scenario, 'user_requested', False),
         obligation_ids=_obligation_ids,
     )
+    _carry_review_flag(scenario, _tc)
+    return _tc
+
+
+def _carry_review_flag(scenario, tc) -> None:
+    """Propagate a QMetry Tier-3 'needs_review' flag from the scenario onto the TC so a
+    reviewer can see a borderline-relevance QMetry-only TC was kept and marked, not dropped
+    (decision 6 — borderline = flag for review, never silent).
+    """
+    if getattr(scenario, 'needs_review', False):
+        setattr(tc, 'needs_review', True)
+        setattr(tc, 'review_reason', getattr(scenario, 'review_reason', '') or
+                'Borderline relevance to feature scope — flagged for review.')
 
 
 # ================================================================

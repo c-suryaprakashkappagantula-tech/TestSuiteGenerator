@@ -387,7 +387,11 @@ def test_valuepair_binding_no_positional():
                  'step_summaries': ['x']}}, log=lambda *a: None,
         validated_keys=['MWTGMED-5214'])
     assert n2 == 0 and other.steps_hint == []   # existing scenario untouched
+    # FEAT-003 relevance gate: TC_X is eligible + unmatched, so it is still PROMOTED as a new
+    # TC (never silently dropped), but it is off-topic to the 'unrelated' feature vocabulary,
+    # so it is kept-and-flagged for review rather than promoted silently.
     assert len(new2) == 1 and new2[0].steps_hint == ['x']   # TC_X added as new
+    assert getattr(new2[0], 'needs_review', False) is True   # off-topic → flagged, not silent
 
 
 # ─── 8b. NO positional fallback: shared-linkage, N scenarios, M TCs ──
@@ -436,7 +440,12 @@ def test_shared_linkage_no_positional_assignment():
     # noise scenario positionally; instead it is added as its OWN new test case.
     assert noise_sc.steps_hint == []
     assert n == 3
+    # FEAT-003 relevance gate: the off-topic "other subsystem" regression TC shares no
+    # content vocabulary with the mediation feature, so it is still PROMOTED (eligibility +
+    # authored steps earned it a slot — never a silent drop) but FLAGGED needs_review so a
+    # human confirms it instead of it landing silently.
     assert len(new) == 1 and new[0].steps_hint == ['vzw'] and new[0].category == 'Regression'
+    assert getattr(new[0], 'needs_review', False) is True   # off-topic → flagged for review
 
 
 # ─── 9. unknown project skips ───────────────────────────────────────
@@ -651,3 +660,58 @@ def test_new_tc_builds_through_scenario_pipeline():
     assert tc.summary
     from modules.qmetry_steps_source import ExtractedScenario as _ES  # sanity: import OK
     assert tc.category in {'Happy Path', 'Negative', 'Edge Case', 'E2E', 'Regression', 'Rollback'}
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 12. FEAT-003 Tier-3 relevance gate — mark vs unmark (never drop)
+# ═══════════════════════════════════════════════════════════════════
+
+def test_relevance_gate_marks_offtopic_but_not_relevant():
+    """A clearly feature-related unmatched TC is promoted UNMARKED; a clearly
+    off-topic unmatched TC is promoted but carries the needs_review marker.
+    In BOTH cases the TC is kept (never a silent drop) and len(new) is unchanged.
+    """
+    # Feature vocabulary comes from the existing Chalk-derived scenario: a mediation
+    # feature about MMS_TYPE_INDICATOR → call_direction_ind conversions.
+    ob = make_obligation(input_field='MMS_TYPE_INDICATOR', input_value='MT',
+                         expected_field='call_direction_ind', expected_value='I')
+    feature_sc = _scenario("MMS_TYPE_INDICATOR value 'MT' is converted to 'I'",
+                           obligations=[ob])
+
+    # (a) A clearly RELATED unmatched TC — shares the mediation vocabulary but matches no
+    #     obligation value-pair (MO→O is a different obligation absent from the scenario
+    #     set) and no similarity scenario → promoted as a NEW TC, UNMARKED.
+    related = {
+        'TC_REL': {
+            'summary': 'MMS_TYPE_INDICATOR value MO maps to O in the call_direction_ind '
+                       'Amdocs PRR mediation output',
+            'story_linkages': ['MWTGMED-5214'],
+            'steps': [{'summary': 'Inspect call_direction_ind on the Amdocs PRR output',
+                       'test_data': '', 'expected': 'O'}],
+            'step_summaries': ['Inspect call_direction_ind on the Amdocs PRR output'],
+        }
+    }
+    n, new = attach_steps_to_scenarios([feature_sc], related, log=lambda *a: None,
+                                       validated_keys=['MWTGMED-5214'])
+    assert n == 0                                   # enriched no obligation
+    assert len(new) == 1                            # still promoted
+    assert getattr(new[0], 'needs_review', False) is False   # relevant → NOT flagged
+
+    # (b) A clearly OFF-TOPIC unmatched TC — no shared vocabulary → promoted but FLAGGED.
+    offtopic = {
+        'TC_OFF': {
+            'summary': 'Regression sweep for some other subsystem entirely',
+            'story_linkages': ['MWTGMED-5214'],
+            'steps': [{'summary': 'run unrelated subsystem regression',
+                       'test_data': '', 'expected': 'ok'}],
+            'step_summaries': ['run unrelated subsystem regression'],
+        }
+    }
+    feature_sc2 = _scenario("MMS_TYPE_INDICATOR value 'MT' is converted to 'I'",
+                            obligations=[ob])
+    n2, new2 = attach_steps_to_scenarios([feature_sc2], offtopic, log=lambda *a: None,
+                                         validated_keys=['MWTGMED-5214'])
+    assert n2 == 0
+    assert len(new2) == 1                           # still promoted — never dropped
+    assert getattr(new2[0], 'needs_review', False) is True   # off-topic → flagged
+    assert getattr(new2[0], 'review_reason', '')             # carries a human-readable reason

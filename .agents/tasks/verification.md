@@ -124,3 +124,112 @@ TC10 `Ingest the TMO PRR file with the malformed record.`). No fabricated pairs,
   `_scratch_*` probes deleted. `git status` shows only: `modules/step_templates.py`,
   `modules/tc_builder.py`, `tests/test_authored_step_verbatim.py`, `tests/test_mediation_input_clause.py`
   (plus a pre-existing, untouched `.agents/tasks/plan.md` modification that is not part of this fix).
+
+---
+
+# Cross-FEAT Integration Verification — Step-Assembly (Iteration 1)
+
+Branch: `feat/step-assembler` · Worktree: `.worktrees/step-assembler`
+FEAT commits under test (all present on top of base merge `42ef69b`):
+`b3d0f46` FEAT-001, `014308a` FEAT-002, `b936078` FEAT-003.
+venv: `C:\Users\P3314665\Documents\mcp-jira-server\.venv\Scripts\python.exe`
+
+## Environment prep (verification-only, not committed)
+- Copied `tsg_cache.db`, `tsg_data.db` into the worktree root. `CABOT_CHALK_DB.db` was already
+  present and is a never-touch file — left untouched and never staged.
+- Installed the pinned dev dependency the suite needs: `hypothesis==6.112.2`
+  (declared in `requirements-dev.txt`, missing from the shared venv).
+- Ran pytest with `PYTHONPATH=C:\Users\P3314665\Documents\mcp-jira-server` so the `shared`
+  package (imported by `modules/contract_bridge.py`) resolves. The TSG app puts that repo root
+  on `sys.path` at runtime; PYTHONPATH reproduces it for the test process.
+
+## Commands + results
+```
+python -m pytest -q
+=> 37 failed, 561 passed, 7 skipped, 34 warnings
+```
+```
+python -m pytest tests/test_step_assembler.py tests/test_mediation_steps_structural.py \
+  tests/test_assertion_grounding.py tests/test_qmetry_steps_source.py tests/test_degraded_runs.py -q
+=> 65 passed    (the step-assembly deliverable's own tests)
+```
+```
+python run_headless.py MWTGPROV-4628 PI-60
+```
+Regenerated workbook (absolute path):
+```
+...\.worktrees\step-assembler\outputs\MWTGPROV-4628_60.2_-_New_MVNO_-_Update_TMO_MMS_TYPE_INDICATOR_Values_for_Amdocs_call_direction_ind_20261026_203950.xlsx
+```
+
+## openpyxl confirmations (concrete numbers)
+- **TC01 dedup — PASS.** TC01 = **4 steps** (grounded PRR chain only); redundant steps 5-8 gone.
+  Log: `[STEP-ASSEMBLER] reconciled suite: 6 redundant step(s) collapsed`.
+- **Batch/SFTP preconditions on EVERY scenario TC — PASS: 9/9** carry SFTP/PRR/batch
+  preconditions (was 3/17). Log: `9 precondition(s) set from classification (batch_file=True)`.
+- **0 banned mediation phrases — PASS** across all step summaries + expected results.
+- **Fabricated FIELD='VALUE' pairs — 0 genuine.** Raw regex flagged `MMS_TYPE_INDICATOR='MO'`
+  and `='MT'`, but both are real grounded obligation values (MT proven a genuine obligation by
+  `test_mediation_steps_structural`). No placeholder `input = word` fabrications. Genuine count: 0.
+- **Chalk coverage — PASS 3/3.** Log: `[CHALK-GUARD] Chalk coverage OK: 3/3 scenarios -> TCs`.
+- **Fail-loud QMetry skip — PASS.** Summary sheet carries the visible
+  `[QMETRY] QMetry supplement skipped — authored QMetry test cases were NOT added. Reason: No
+  QMetry session authenticated…` warning (FEAT-003).
+
+## Two gate items NOT fixable by FEAT seams (escalated)
+
+### A. TC count = 9, not ~17 — QMetry TC10-TC17 unfetchable (environment blocker)
+All candidate `storage_state.json` files failed the live QMetry auth probe
+(`… did not authenticate → trying next` ×3, then `supplement skipped (No QMetry session
+authenticated…)`). This is the findings §7 UI-vs-headless divergence: the 8 QMetry-only TCs
+require a live authenticated QMetry REST session this headless environment does not have. The
+prior `feat/tsg-mediation-inputfix` live run above (timestamp `165322`) got 17 TCs because a
+valid session existed then — confirming the current 9 is a session-expiry environment issue,
+not a FEAT regression. No code change can mint valid cookies.
+
+### B. 37 pytest failures are PRE-EXISTING drift, not FEAT regressions (proven)
+All 37 failures are in `test_suite_snapshot.py`, `test_ac_gate.py`, `test_cr_path.py`,
+`test_near_dup_pruning.py` — none touched by the FEATs.
+- Base commit `42ef69b` vs FEAT branch over all 16 snapshot features: **byte-identical TC
+  counts AND titles** (`TOTAL BASE-vs-FEAT DIFFS: 0`). e.g. MWTGPROV-3969 = 6 TCs on both;
+  committed `expected_suites.json` expects 9.
+- Running the 4 modules at the base commit reproduces the **same 37 failures**
+  (`37 failed, 78 passed, 3 skipped`).
+So `expected_suites.json` is stale against its own base branch. Regenerating a committed
+regression fixture changes what the guard pins — a product decision escalated rather than taken
+inside the loop.
+
+## Net
+FEAT-001/002/003 integrate cleanly (65 deliverable tests pass; output byte-identical to base for
+the 16 snapshot features, so zero regression). Every real-xlsx check that does not depend on a
+live QMetry session holds. Items A (QMetry auth / ~17 count) and B (stale snapshot fixture) each
+need a human decision.
+
+## Parent decision (both items resolved — proceed to finalize)
+The workflow owner WAIVED both items for this headless environment:
+- **A — WAIVED:** 9-vs-17 is the findings §7 UI-vs-headless divergence (QMetry 401 / no
+  authenticated session), an environment limitation, not a regression. In-scope correct behavior
+  for THIS change is fail-loud + Summary-sheet warning + `suite.warnings`, which is verified.
+  Acceptance is verified on the **9-TC headless output only**; full 17 requires a live QMetry
+  session.
+- **B — KNOWN PRE-EXISTING, leave as-is:** the 37 failures fail identically at base `42ef69b`
+  with byte-identical counts/titles (diff=0) → zero NEW regressions. `expected_suites.json` is
+  NOT regenerated inside this loop (repinning a committed regression guard is a separate product
+  decision not requested). The `shared`-module collection errors are the same pre-existing
+  environment gap.
+
+## Final acceptance on the 9-TC headless output (all PASS)
+Workbook: `outputs\MWTGPROV-4628_60.2_..._20261026_203950.xlsx`
+- **TC01 = 4 steps, asserts `call_direction_ind = BAU`** (expected text:
+  "call_direction_ind = BAU in the Amdocs TMO billing output record; all other fields …"). PASS.
+- **0 leaked placeholder values** — no `= output`, `= result`, `= value` anywhere. PASS.
+- **Grounding intact** — all 9 TCs report **100%** grounding (no TC regressed below its prior
+  gate). PASS.
+- **Batch/SFTP preconditions on 9/9 scenario TCs.** PASS.
+- **0 banned mediation phrases; 0 genuine fabricated FIELD='VALUE' pairs** (MO/MT are real
+  obligation values). PASS.
+- **Chalk coverage 3/3.** PASS.
+- **QMetry-skip warning visible** in the Summary sheet + `suite.warnings` (fail-loud). PASS.
+
+Acceptance bar for this change — "zero NEW regressions + real-xlsx acceptance on the 9-TC
+output" — is MET. The ~17 / TC10-TC17 path is explicitly WAIVED here (verified on 9-TC headless
+output; full 17 requires a live QMetry session — environment limitation, not a regression).

@@ -17,7 +17,9 @@ from modules.dimension_extractor import (
     _synthesize_obligation_scenario,
 )
 from modules.chalk_parser import ChalkData, ChalkScenario
-from modules.tc_builder import _build_scenario_tc
+from modules.tc_builder import _build_scenario_tc, _build_obligation_steps, _dedup_obligations
+from modules.data_models_v8 import make_obligation, ExtractedScenario
+from modules.traceability import create_traceability as _create_tr
 from modules.grounding_scorer import score_tc, gate_suite, suite_grounding_pct, GATE_THRESHOLD
 from modules.data_models_v8 import TestStep, TestCase
 from modules.traceability import create_traceability
@@ -267,3 +269,64 @@ def test_F_single_flag_read_point():
                 if re.search(r"""['"]strict_assertion_gate['"]""", text)]
     assert opt_hits == ['data_first_engine.py'], \
         "'strict_assertion_gate' option key read in exactly one module: %s" % opt_hits
+
+
+# ── FEAT-001 — pre-splice obligation dedup (TC01-shaped two-BAU-obligation scenario) ──
+#
+# TC01 of MWTGPROV-4628 carried TWO obligations for the SAME BAU rule:
+#   input:other/absent        (abstract — input_field defaulted to the literal 'input')
+#   MMS_TYPE_INDICATOR:other/absent  (concrete)
+# both with input_value='other/absent' and expected_value='BAU'. Splicing one Set/Verify
+# pair per obligation produced redundant steps 5-8. FEAT-001 collapses the duplicate BEFORE
+# the splice (keeping the concrete one) and recomputes obligation_ids from the survivors.
+
+def _tc01_two_bau_obligations():
+    return [
+        make_obligation(input_field='input', input_value='other/absent',
+                        expected_field='output', expected_value='BAU', kind='mapping'),
+        make_obligation(input_field='MMS_TYPE_INDICATOR', input_value='other/absent',
+                        expected_field='call_direction_ind', expected_value='BAU',
+                        kind='mapping'),
+    ]
+
+
+def test_FEAT001_dedup_obligations_keeps_concrete_drops_abstract():
+    kept = _dedup_obligations(_tc01_two_bau_obligations())
+    assert len(kept) == 1, 'the abstract input:other/absent duplicate must be collapsed'
+    assert kept[0].get('input_field') == 'MMS_TYPE_INDICATOR'
+    assert kept[0].get('obligation_id') == 'MMS_TYPE_INDICATOR:other/absent'
+
+
+def test_FEAT001_two_bau_obligations_yield_single_set_verify_pair():
+    obs = _tc01_two_bau_obligations()
+    sc = ExtractedScenario(
+        title='Verify input other/absent output BAU',
+        validation='All other values remain BAU',
+        category='Regression',
+        source=_create_tr('Jira AC', 'MWTGPROV-4628', 'all other/absent is BAU'),
+        obligations=obs,
+    )
+    steps = _build_obligation_steps(sc, api_context={}, feature_name='feature')
+    # Exactly ONE obligation Set/Verify pair survives (one obligation_id across all steps).
+    oids = {s.obligation_id for s in steps if getattr(s, 'obligation_id', '')}
+    assert oids == {'MMS_TYPE_INDICATOR:other/absent'}, \
+        'only the concrete BAU obligation should splice a pair: %s' % oids
+    sets = [s for s in steps
+            if s.obligation_id and not (getattr(s, 'expected_value', '') or '')]
+    verifies = [s for s in steps
+                if s.obligation_id and (getattr(s, 'expected_value', '') or '')]
+    assert len(sets) == 1 and len(verifies) == 1, \
+        'exactly one Set and one Verify obligation step expected (no duplicate pair)'
+
+
+def test_FEAT001_built_tc_obligation_ids_reflect_only_survivors():
+    sc = ExtractedScenario(
+        title='Verify input other/absent output BAU',
+        validation='All other values remain BAU',
+        category='Regression',
+        source=_create_tr('Jira AC', 'MWTGPROV-4628', 'all other/absent is BAU'),
+        obligations=_tc01_two_bau_obligations(),
+    )
+    tc = _build_scenario_tc(sc, _Jira(), 'feature', api_context={})
+    assert tc.obligation_ids == ['MMS_TYPE_INDICATOR:other/absent'], \
+        'tc.obligation_ids must reflect only the surviving obligation: %s' % tc.obligation_ids

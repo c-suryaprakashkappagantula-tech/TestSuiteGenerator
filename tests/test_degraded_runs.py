@@ -190,3 +190,25 @@ class TestTheEngineReportsItsOwnDegradation:
         assert len(degraded.test_cases) == len(healthy), (
             'the failed pass changed the test-case count: %d -> %d'
             % (len(healthy), len(degraded.test_cases)))
+
+    def test_a_qmetry_session_failure_is_a_visible_suite_warning(self, monkeypatch):
+        """FEAT-003 fail-loud: when the QMetry supplement cannot authenticate, the skip
+        reason must reach suite.warnings (not only a CLI log line), and generation must
+        continue. A silent QMetry skip is exactly how a short suite looked complete.
+        """
+        from modules import qmetry_steps_source as qss
+
+        def _boom(*a, **k):
+            raise qss.QMetrySessionError('no session (simulated)')
+
+        # The engine hook imports enrich_scenarios_with_qmetry from this module, calls it,
+        # swallows the QMetrySessionError, stashes the reason, and promotes it to a visible
+        # suite.warnings entry after the suite is built.
+        monkeypatch.setattr(qss, 'enrich_scenarios_with_qmetry', _boom)
+
+        suite = self._build()
+        qm_warnings = [w for w in (suite.warnings or []) if 'QMETRY' in str(w).upper()]
+        assert qm_warnings, 'a swallowed QMetry session failure produced no visible warning'
+        assert 'skipped' in qm_warnings[0].lower()
+        # Generation continued — the suite still has its (non-QMetry) test cases.
+        assert suite.test_cases
