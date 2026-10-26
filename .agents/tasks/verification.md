@@ -1,126 +1,126 @@
-# Verification — QMetry-only unmatched TCs become NEW test cases
+# Verification — TSG Mediation PRR step-1 input-clause fix
 
-Feature: **MWTGPROV-4628** (PI-60). All runs via the worktree venv
-`c:\Users\P3314665\Documents\mcp-jira-server\.venv\Scripts\python.exe` from inside the
-worktree `…\.worktrees\tsg-qmetry-newtcs`.
+Branch: `feat/tsg-mediation-inputfix`
+Worktree: `c:\Users\P3314665\Documents\mcp-jira-server\TestSuiteGenerator\.worktrees\tsg-mediation-inputfix`
+venv python: `c:\Users\P3314665\Documents\mcp-jira-server\.venv\Scripts\python.exe`
+
+## What changed
+
+- `modules/step_templates.py`
+  - Retired the fabricating fallback regex `_PRR_INPUT_RE`. `_prr_scenario_fields` now returns a
+    real conversion pair (via `_PRR_CONV_RE`) or empty for `in_descr` — it never scrapes two
+    adjacent tokens into a fake `"<word> = <word>"`.
+  - Added `_prr_input_file_clause(obligation, sc_title, sc_validation, t)` implementing the precise
+    branching rule: real `FIELD='VALUE'` from the obligation → authentic clause; otherwise a clean
+    generic clause by intent (VZW / CBRS / other-absent/non-MMS / generic TMO) with a plain generic
+    fallback. The result never contains a fabricated `=`.
+  - `_prr_mediation_steps(...)` gained an `obligation=None` kwarg; both the regression and positive
+    branches build step 1 from `_prr_input_file_clause`.
+  - `get_step_chain(...)` gained a keyword-only `obligation=None`, threaded into the `batch_file`
+    positive `_prr_mediation_steps` call. No other branch changed.
+- `modules/tc_builder.py`
+  - `_build_obligation_steps`: threads the scenario's first obligation into `_get_chain(...)` so
+    the real `MMS_TYPE_INDICATOR='MT'`/`='MO'` pair is rendered (TC2/TC3 preserved).
+  - `_build_scenario_tc` fallback: passes `obligation=None` explicitly.
+- `tests/test_mediation_input_clause.py` (NEW): real-pair, no-pair (no-loss / e2e / other-absent),
+  VZW, CBRS, synthesized-other-absent obligation, full-builder negative guard, and the
+  `get_step_chain` obligation-threading case.
+- `tests/test_authored_step_verbatim.py`: extended with the live-exact authored line
+  `"Let Mediation run the TMO_PRR_Processing_01 flow"` to lock verbatim pass-through.
+- `modules/output_sanitizer.py`: NOT edited. See "Authored-step artifact" below.
+
+## Authored-step "Verify that let/retrieve" artifact — root cause & finding
+
+`polish_suite` is the only pass that can prefix a step summary with "Verify that " (verified by
+grepping all of `modules/*.py`). It already locks a summary when `authored=True` OR the first word
+is an imperative verb (`_lock_summary`). A scratch reproduction (`_scratch_repro.py`, now deleted)
+built an obligation TC whose `steps_hint` included the live-exact lines
+`"Let Mediation run the TMO_PRR_Processing_01 flow"` and
+`"Retrieve the processed Amdocs TMO billing output record"`, ran it through
+`_build_scenario_tc` + `polish_suite`, and the lines came out byte-for-byte unchanged — the
+`authored=True` flag set in `_build_obligation_steps` is honored end-to-end. No leak reproduced, so
+`output_sanitizer.py` needed no edit. The behavior is now locked permanently by the extended
+`test_authored_step_verbatim.py`. The live 4628 re-run confirms zero artifacts (counts below).
 
 ## 1. py_compile
-`python -m py_compile modules/traceability.py modules/grounding_scorer.py
-modules/qmetry_steps_source.py tests/test_qmetry_steps_source.py` → **PY_COMPILE OK**.
 
-## 2. Existing hermetic tests (16 QMetry + 11 assertion-grounding) + protected-gate
-`python -m pytest tests/test_qmetry_steps_source.py tests/test_assertion_grounding.py
-tests/test_protected_gate.py -q`
-- Baseline (before edits): **56 passed**.
-- After edits: **61 passed** (56 + 5 new tests). Zero regressions.
-- `tests/test_qmetry_steps_source.py` alone → **21 passed** (16 original + 5 new).
-- `tests/test_assertion_grounding.py` alone → **11 passed**.
-
-## 3. New unit tests (mock client, no network)
-Added to `tests/test_qmetry_steps_source.py`:
-- `test_unmatched_eligible_tc_added_as_new` — one matched TC (MT→I, tier-1, enriched, NOT
-  re-added) + one unmatched eligible TC (mixed-file "Both MT and MO") → exactly **one** new
-  scenario appended; title/validation = QMetry summary; `category == 'E2E'`; `steps_hint` =
-  authored steps; `_qmetry_expected` = authored last expected; `source.source_type ==
-  'QMetry Test Case'` with `source_id` = TC key; matched scenario not duplicated.
-- `test_matched_tc_not_added_as_new` — both TCs match (tier-1 + tier-2) → **no** new TCs.
-- `test_ineligible_tc_not_added` — wrong story-linkage TC → not enriched AND not added.
-- `test_category_inference` — 'regression'/'no impact'→Regression, 'end to end'/mixed-file
-  →E2E, else→Happy Path.
-- `test_new_tc_builds_through_scenario_pipeline` — a new scenario runs through the engine's
-  own `_build_scenario_tc`: authored steps survive, authored expected lands on the last
-  authored step, non-empty summary, category in `_VALID_CATEGORIES`.
-All pass (part of the 21 above).
-
-## 4. Broader non-cache regression — zero NEW regressions
-Oracle (fast hermetic): `python -m pytest tests/test_titles.py tests/test_determinism.py -q`
-→ **35 passed** (matches the documented baseline of 35 exactly).
-
-Full runnable suite (ignoring the 28 documented `shared`-import collection-error files from
-`tests/_baseline_failures.txt` and the slow `test_suite_snapshot.py`):
-`python -m pytest tests/ -q -p no:cacheprovider @ignore`
-- With my edits: **35 failed, 239 passed, 4 skipped**.
-- With my 4 edited files git-stashed (baseline): **35 failed, 239 passed, 4 skipped**.
-- `Compare-Object` of the two FAILED node-id lists → **empty** (no `=>` entries): the 35
-  failures are PRE-EXISTING (cache/DB-backed suite builds) and identical before/after. **Zero
-  new regressions.** No snapshots were regenerated.
-
-## 5. Live end-to-end re-run — MWTGPROV-4628 PI-60
-`python run_headless.py MWTGPROV-4628 PI-60` (QMetry session valid; authenticated via
-`MDA-Jira-Dashboard\storage_state.json`; folder resolved id=129316 for MWTGMED-5214;
-read-only export; per-run cache reused).
-
-Note on cache: the clean worktree's `tsg_cache.db` (gitignored, 168 KB) carries no cached
-Jira/Chalk for 4628, so a straight run yields 0 TCs. For this live evidence the main repo's
-`tsg_cache.db` (which DOES hold 4628's Jira+Chalk) was temporarily copied into the worktree
-and the worktree's original restored afterward. `tsg_cache.db` is gitignored, so git stayed
-clean; `CABOT_CHALK_DB.db` (a parent dirty file) was NOT touched — 4628's data lives only in
-`tsg_cache.db`.
-
-### (a) Previously-dropped mixed-file TC now a NEW test case
-`[QMETRY] TC MWTGMED-TC-1888 — no scenario ≥ similarity threshold 0.60 — dropped` is now
-followed by `[QMETRY] TC MWTGMED-TC-1888 unmatched — added as NEW test case (category=E2E,
-4 steps)`. In the suite it is **TC17 [E2E] Verify_Both_MT_and_MO_records_in_the_same_file_
-convert_correctly**, carrying its 4 authored steps (sensible E2E category).
-
-### (b) MT→I and MO→O are Chalk-derived TCs ENRICHED, NOT duplicated
-`[QMETRY] TC MWTGMED-TC-1887 (value-pair) → scenario "Mediation TMO PRR processing…"
-(4 authored steps)` and `TC MWTGMED-TC-1886 (value-pair) → scenario "…"` — both ENRICH their
-matched Chalk scenarios (tier-1) and are NOT emitted as new TCs. Similarity-skip lines
-(`TC-1890`, `TC-1891` "already has a 5-step hint") confirm matched TCs enrich-only.
-
-### (c) CHALK-GUARD full coverage
-`[CHALK-GUARD] Chalk coverage OK: 3/3 scenarios -> TCs` (unchanged, after the additions).
-
-### (d) No unrelated/other-feature TCs leaked in
-Only TCs story-linked to MWTGMED-5214 (eligible) were considered; the 8 added TCs
-(MWTGMED-TC-1888…1895) all belong to this feature's QMetry folder (id=129316, MWTGMED-5214).
-Ineligible/other-folder TCs were never fetched or added.
-
-### (e) No generic-garbage steps on the new TCs
-`[GROUND] Gate threshold=40 — all 17 TCs passed`, suite grounding **99.7%**. Each new TC
-carries its authored QMetry steps (2–4 steps each), not boilerplate.
-
-### Before / after TC list (source)
-BEFORE (my 4 files git-stashed, same real cache) → **9 TCs**, CHALK-GUARD 3/3:
 ```
-TC01 [Regression] input_other_absent_output_BAU                (Chalk/AC)
-TC02 [Happy Path] Mediation_TMO_PRR_processing_is_active_01     (Chalk, MO→O enriched)
-TC03 [Happy Path] Mediation_TMO_PRR_processing_is_active        (Chalk, MT→I enriched)
-TC04 [Happy Path] Mediation_processing_active_VZW_and_CBRS       (Chalk/AC)
-TC05 [Happy Path] MMS_TYPE_INDICATOR_value_MT_is_converted_to_I  (Chalk/AC)
-TC06 [Happy Path] No_impact_to_Verizon_or_CBRS_billing_records   (Chalk/AC)
-TC07 [Happy Path] No_loss_of_existing_functionality              (Chalk/AC)
-TC08 [E2E]        The_MT_to_I_conversion_end_to_end_in_the_TMO    (Chalk/AC)
-TC09 [Regression] Unchanged_field_values_elsewhere               (Chalk/AC)
+python -m py_compile modules/step_templates.py modules/tc_builder.py modules/output_sanitizer.py
 ```
-AFTER (with the change) → **17 TCs**, CHALK-GUARD 3/3. TC01–TC09 identical and in the same
-order (Chalk-first preserved; MT→I / MO→O still enriched, not duplicated). The 8 ADD-AS-NEW-TC
-entries, all `source_type = "QMetry Test Case"` with the TC key as locator, follow:
-```
-TC10 [Negative]   Negative_malformed_empty_MMS_TYPE_INDICATOR        (QMetry TC MWTGMED-TC-1889)
-TC11 [Regression] Regression_end-to-end_TMO_PRR_processing            (QMetry TC MWTGMED-TC-1890)
-TC12 [Happy Path] Field_position_format_of_call_direction_ind         (QMetry TC MWTGMED-TC-1891/1892)
-TC13 [Happy Path] Case_sensitivity_of_output_value                    (QMetry TC …)
-TC14 [Regression] No_impact_to_CBRS_billing_records                   (QMetry TC …)
-TC15 [Regression] No_impact_to_Verizon_billing_records                (QMetry TC …)
-TC16 [Regression] Non-MMS_other_MMS_TYPE_INDICATOR_values_pass_through (QMetry TC MWTGMED-TC-1894)
-TC17 [E2E]        Both_MT_and_MO_records_in_the_same_file_convert      (QMetry TC MWTGMED-TC-1888)
-```
-(The TC10–16 ↔ TC-key mapping is per the `[QMETRY] … added as NEW test case` log lines:
-TC-1889 Happy Path/3, TC-1890 Regression/3, TC-1891 Regression/3, TC-1892 Happy Path/2,
-TC-1893 Happy Path/3, TC-1894 Regression/4, TC-1895 Happy Path/3, TC-1888 E2E/4.)
+Result: EXIT=0.
 
-**De-dup proof:** the engine log shows the matched value-pair TCs (TC-1886, TC-1887) only as
-`→ scenario "…" (enriched)` lines and NOT in the `added as NEW test case` list; the final
-tally `authored steps attached to 2 scenario(s) and 8 new QMetry-only test case(s) added`
-confirms 2 enrich + 8 add, with no overlap.
+## 2. Unit + hermetic tests
 
-## 6. Fail-safe (bad/empty cookies)
-Method: forced `load_qmetry_cookies` to raise `QMetrySessionError` (exactly how a bad/empty
-`storage_state.json` behaves when no candidate authenticates), then drove
-`enrich_scenarios_with_qmetry` through the engine hook's try/except.
-Result (`_tmp_failsafe.py`): `crashed=False`, hook caught the error, a `[QMETRY] WARNING:
-supplement skipped …` line was logged, **scenarios before == after (no new TCs)**, and the
-seeded scenario was untouched → **FAILSAFE_OK = True**. Normal generation continues.
-(Also covered hermetically by `test_no_session_is_fail_safe`.)
+```
+python -m pytest tests/test_mediation_input_clause.py tests/test_mediation_steps_structural.py \
+  tests/test_mediation_classification.py tests/test_assertion_grounding.py \
+  tests/test_authored_step_verbatim.py -q
+```
+Result: **29 passed** (0 failed). Includes the 11 assertion-grounding tests, the 3 mediation tests
+from the prior fix (structural + classification 17-TC / 3→TC chalk-guard), the authored-verbatim
+tests, and the new input-clause suite.
+
+## 2b. Broader non-cache set — git-stash baseline delta (zero NEW regressions)
+
+```
+python -m pytest -q -m "not slow" --continue-on-collection-errors
+```
+- WITH changes:  26 failed, 257 passed, 4 skipped, 73 deselected, 28 collection errors.
+- BASELINE (git stash of ONLY the edited source files `modules/step_templates.py` +
+  `modules/tc_builder.py` + `tests/test_authored_step_verbatim.py`, and the new test files hidden):
+  identical — 54 FAILED/ERROR node ids.
+- `Compare-Object before_fails.txt after_fails.txt` → **IDENTICAL — zero new regressions.**
+- The 26 failures + 28 collection errors are pre-existing environment issues (e.g.
+  `ModuleNotFoundError: No module named 'shared'` for the contract-bridge/crawl tests, and
+  CR-path/descriptions/eligibility tests that need live DB fixtures). They fail the same way on the
+  clean baseline. No snapshots were regenerated to mask anything.
+
+## 3. Live re-run (real generator)
+
+Caches `tsg_cache.db` and `CABOT_CHALK_DB.db` were copied READ-ONLY from
+`...\TestSuiteGenerator` into the worktree, then removed/restored afterward (worktree left clean —
+`git status` shows only the four intended edits + the new test file).
+
+```
+python run_headless.py MWTGPROV-4628 PI-60
+```
+Produced: `outputs/MWTGPROV-4628_60.2_-_New_MVNO_-_Update_TMO_MMS_TYPE_INDICATOR_Values_for_Amdocs_call_direction_ind_20261026_165322.xlsx`
+Result line: `[RESULT] 17 TCs generated (70 steps total)`; `[PIPELINE] Chalk DB Scenarios ... 3 items`
+→ **17 TCs, CHALK-GUARD 3/3 scenarios→TCs. Unchanged.**
+
+### Acceptance checks read from the produced xlsx
+
+- **Banned NSL phrases:** trigger api=0, nsl 200=0, download century report=0, service grouping=0,
+  ne portal=0, transaction_history=0, line_history=0 → **TOTAL 0 hits.**
+- **"Verify that let" = 0, "Verify that retrieve" = 0** → artifact gone.
+- **Fabricated `<word> = <word>` in any Place/ingest step = 0.**
+- **TC2/TC3 clause:** `containing MMS_TYPE_INDICATOR='MT'` present (2), `='MO'` present (2) — kept,
+  with the obligation Set/Verify assertion steps intact.
+- Distinct Place/ingest step-1 texts produced (all clean):
+  - `Place/ingest the TMO PRR input file containing MMS_TYPE_INDICATOR='MO'.`
+  - `Place/ingest the TMO PRR input file containing MMS_TYPE_INDICATOR='MT'.`
+  - `Place/ingest a Verizon (VZW) PRR input file onto the biller SFTP.`
+  - `Place/ingest a TMO PRR input file containing records with a non-MMS / other MMS_TYPE_INDICATOR value onto the biller SFTP.`
+  - `Place/ingest a representative TMO PRR input file onto the biller SFTP.`
+
+### Per-TC step-1 evidence (AFTER). BEFORE = the fabricated artifact from the prior live 4628.
+
+| TC | BEFORE (prior build, fabricated) | AFTER (this build) |
+|---|---|---|
+| TC01 (input other/absent → BAU) | `...containing absent ...` | `Place/ingest a TMO PRR input file containing records with a non-MMS / other MMS_TYPE_INDICATOR value onto the biller SFTP.` |
+| TC04 (VZW/CBRS processing active) | `...the VZW/CBRS PRR input file (...)` | `Place/ingest a Verizon (VZW) PRR input file onto the biller SFTP.` |
+| TC07 (No loss of existing functionality) | `...containing loss = of ...` | `Place/ingest a representative TMO PRR input file onto the biller SFTP.` |
+| TC08 (MT→I conversion end to end) | `...containing conversion = end ...` (a.k.a. `Validate = the`) | `Place/ingest a representative TMO PRR input file onto the biller SFTP.` |
+
+QMetry-authored TC10–TC17 step-1 lines pass through verbatim and clean (e.g. TC14
+`Process a CBRS PRR file.`, TC15 `Process a Verizon PRR file through the VZW processing flow.`,
+TC10 `Ingest the TMO PRR file with the malformed record.`). No fabricated pairs, no
+"Verify that" prefixes.
+
+## Cleanup
+
+- Copied read-only caches removed; `CABOT_CHALK_DB.db` restored to the committed version;
+  gitignored `tsg_cache.db` restored from backup; run-created `outputs/` artifacts and all
+  `_scratch_*` probes deleted. `git status` shows only: `modules/step_templates.py`,
+  `modules/tc_builder.py`, `tests/test_authored_step_verbatim.py`, `tests/test_mediation_input_clause.py`
+  (plus a pre-existing, untouched `.agents/tasks/plan.md` modification that is not part of this fix).

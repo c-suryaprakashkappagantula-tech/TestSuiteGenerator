@@ -213,6 +213,34 @@ def is_file_ingestion_feature(feature_context: str) -> bool:
     return any(h in t for h in _FILE_INGESTION_HINTS)
 
 
+# ── Mediation / PRR / billing signal detector ─────────────────────────────────
+# Any-of, case-insensitive, over the concatenated inputs (title, summary, scope,
+# components, AC/Chalk text). Require a REAL mediation/PRR/billing signal — an
+# NSLNM-only feature with no mediation signal must NOT match (it stays api/NSL).
+_MEDIATION_SIGNALS = (
+    'mediation', 'prr', 'amdocs', 'billing record', 'call_direction_ind',
+    'mms_type_indicator', 'tmo_prr_processing', 'biller sftp',
+    # component tokens for a Mediation/WPAMED component prefix like [WPAMED, ...]
+    'wpamed', '[med', ', med', 'med,',
+)
+
+
+def is_mediation_feature(*texts: str) -> bool:
+    """True when ANY input carries a real Mediation/PRR/billing signal.
+
+    Case-insensitive, any-of over the concatenated inputs. Accepts several strings
+    (feature title, Jira summary, scope, components, AC/Chalk text). Pure — no I/O.
+
+    Deliberately requires a concrete mediation/PRR/billing signal: a bare 'NSLNM'
+    component (pure NSL provisioning, no mediation) does NOT match, so such features
+    continue to classify as api and keep their NSL/NE-Portal/Service-Grouping steps.
+    """
+    blob = ' '.join(t for t in texts if t).lower()
+    if not blob:
+        return False
+    return any(sig in blob for sig in _MEDIATION_SIGNALS)
+
+
 def file_ingestion_precondition(context_text: str = '') -> str:
     """Return preconditions appropriate for PRR/batch file-ingestion TCs."""
     picks = list(_FILE_INGESTION_PRECON)

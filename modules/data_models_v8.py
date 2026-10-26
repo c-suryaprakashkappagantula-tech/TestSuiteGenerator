@@ -162,6 +162,7 @@ class TestStep:
     expected_field: str = ''                     # e.g. 'call_direction_ind'
     expected_value: str = ''                     # e.g. 'I' | 'O' | 'BAU' | 'HTTP 400 + ERR333'
     obligation_id: str = ''                      # stable link to the obligation this step covers
+    authored: bool = False                       # True when sourced verbatim from QMetry authored steps
 
 
 @dataclass
