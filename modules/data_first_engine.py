@@ -325,8 +325,18 @@ def build_test_suite_v8(
             from .qmetry_steps_source import enrich_scenarios_with_qmetry
             enrich_scenarios_with_qmetry(dimension_set.scenarios, jira, options, log)
         except Exception as _qe:                   # import/auth/network/parse — never break a run
+            _qe_msg = str(_qe)[:200]
             log('[QMETRY] WARNING: supplement skipped (%s) — continuing with generated steps'
-                % str(_qe)[:200])
+                % _qe_msg)
+            # Fail-loud: stash the skip reason so the engine can promote it to a visible
+            # suite-level warning after the suite is built (decision 5 — do NOT silently
+            # continue without a warning the dashboard/caller can see).
+            try:
+                options['_qmetry_skip_warning'] = (
+                    'QMetry supplement skipped — authored QMetry test cases were NOT added. '
+                    'Reason: %s' % _qe_msg)
+            except Exception:
+                pass
 
     # ── Step 1b: Apply custom instructions to dimensions ──
     custom_text = options.get('custom_instructions', '')
@@ -733,6 +743,32 @@ def build_test_suite_v8(
     except Exception as _ql_err:
         log('[V8-ENGINE]   WARNING: QMetry pattern enrichment failed: %s — continuing' % str(_ql_err)[:100])
         _record_degraded('QMetry pattern enrichment', _ql_err)
+
+    # ── Step-assembly reconciliation (single owner of the final step list + preconditions) ──
+    # Runs AFTER every additive producer and AFTER qmetry_pattern_library.enrich_suite, and
+    # BEFORE tc_name_polish / api_step_grounder / the export sanitizer and BEFORE the final
+    # _assert_chalk_coverage call — so the semantic dedup collapses redundant restatements
+    # and the feature classification (batch_file/mediation) sets preconditions once, and
+    # Chalk coverage is re-verified on the reconciled suite. See modules/step_assembler.py.
+    try:
+        from .step_assembler import StepAssembler
+        StepAssembler(log=log).reconcile(suite, classification, log=log)
+    except Exception as _sa_err:
+        log('[V8-ENGINE]   WARNING: step-assembly reconciliation failed: %s — continuing' % str(_sa_err)[:100])
+        _record_degraded('step-assembly reconciliation', _sa_err)
+
+    # ── Surface a swallowed QMetry skip as a VISIBLE suite-level warning (fail-loud) ──
+    # When load_qmetry_cookies could not authenticate, the Step-1 enrichment logged a
+    # warning and continued silently. Promote that reason to suite.warnings so the dashboard
+    # shows it instead of the user discovering missing QMetry TCs only by counting.
+    try:
+        _qmsg = options.get('_qmetry_skip_warning')
+        if _qmsg:
+            _wtext = '[QMETRY] %s' % _qmsg
+            if _wtext not in (suite.warnings or []):
+                suite.warnings.append(_wtext)
+    except Exception:
+        pass
 
     # ── TC-name polish: strip implementation detail (VARCHAR(45), (regression))
     #    and prefix bare-data-field titles with the feature's subject entity,
@@ -1378,6 +1414,9 @@ def _inject_operation_negatives(suite, jira, chalk, classification, log: Callabl
     def _add(token, summary, desc, pre, steps):
         if token in existing:
             return
+        for _st in (steps or []):   # FEAT-001: tag negative-path steps for the assembler tie-break
+            if hasattr(_st, 'origin'):
+                _st.origin = 'negative'
         tc = TestCase(summary=summary, description=desc, preconditions=pre,
                       steps=steps, story_linkage=fid, label=fid, category='Negative')
         try:
@@ -1504,6 +1543,9 @@ def _inject_eligibility_negatives(suite, jira, chalk, classification, log: Calla
     def _add(token_guard, summary, description, preconditions, steps):
         if token_guard in existing:
             return
+        for _st in (steps or []):   # FEAT-001: tag negative-path steps for the assembler tie-break
+            if hasattr(_st, 'origin'):
+                _st.origin = 'negative'
         tc = TestCase(
             summary=summary, description=description, preconditions=preconditions,
             steps=steps, story_linkage=feature_id, label=feature_id, category='Negative')
@@ -1787,6 +1829,9 @@ def _inject_silence_assertions(suite, jira, log: Callable = print):
         for tc in suite.test_cases[-_injected:]:
             _max_sno += 1
             tc.sno = str(_max_sno)
+            for _st in (tc.steps or []):   # FEAT-001: tag negative-path steps
+                if hasattr(_st, 'origin'):
+                    _st.origin = 'negative'
         log('[V8-ENGINE]   Injected %d constraint-rule TC(s) (silence/autoRenew/keep-deprioritized)' % _injected)
 
     # ── E2E lifecycle TC for notification-driven features ──

@@ -445,14 +445,15 @@ def enrich_test_case(tc, feature_context: str = '',
     category = (getattr(tc, 'category', '') or '').lower()
     ctx = (feature_context + ' ' + summary).strip()
 
-    # 1. Preconditions — never touch one authored in Chalk (ground truth, Rule #1)
+    # 1. Preconditions — never touch one authored in Chalk (ground truth, Rule #1).
+    #    The batch/PRR/file-ingestion keyword guess has been removed: batch-feature
+    #    preconditions are now owned solely by StepAssembler.reconcile() from the feature
+    #    classification. Here we only ground generic filler for NON-batch features; the
+    #    assembler runs AFTER enrichment and overwrites batch_file TCs authoritatively.
     if fix_preconditions and not getattr(tc, 'precond_from_chalk', False):
         pre = getattr(tc, 'preconditions', '') or ''
-        if is_filler_precondition(pre):
-            if is_file_ingestion_feature(ctx):
-                tc.preconditions = file_ingestion_precondition(ctx)
-            else:
-                tc.preconditions = grounded_precondition(ctx, n=2)
+        if is_filler_precondition(pre) and not is_file_ingestion_feature(ctx):
+            tc.preconditions = grounded_precondition(ctx, n=2)
             changed.append('preconditions')
 
     # 2. Century pairing (rebuild the step list with paired validations)
@@ -470,7 +471,10 @@ def enrich_test_case(tc, feature_context: str = '',
         start = len(steps)
         op = operation_label(ctx)
         for j, (s, e) in enumerate(provisioning_closer(feature_context, op), 1):
-            steps.append(_make_step(start + j, s, e))
+            _cl = _make_step(start + j, s, e)
+            if hasattr(_cl, 'origin'):
+                _cl.origin = 'closer'
+            steps.append(_cl)
         if len(steps) > start:
             changed.append('closers')
 

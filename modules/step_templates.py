@@ -139,7 +139,8 @@ def _prr_input_file_clause(obligation, sc_title, sc_validation, t):
     return 'Place/ingest a representative TMO PRR input file onto the biller SFTP.'
 
 
-def _prr_mediation_steps(sc_title, sc_validation, t, ctx, negative=False, obligation=None):
+def _prr_mediation_steps(sc_title, sc_validation, t, ctx, negative=False, obligation=None,
+                         meta=None):
     """PRR/mediation flow steps (NO NSL-provisioning steps).
 
     Positive mapping scenario (e.g. MMS_TYPE_INDICATOR MT -> call_direction_ind I):
@@ -158,6 +159,16 @@ def _prr_mediation_steps(sc_title, sc_validation, t, ctx, negative=False, obliga
         r'\s+(?:as\s+)?(?:bau|the\s+same)|bau|verizon|vzw|cbrs|byte[- ]for[- ]byte)\b',
         t))
 
+    # ── Step-assembler support: when the obligation names a concrete expected field/value,
+    #    fall back to it so the grounded inspect/compare step carries the SAME
+    #    (expected_field, expected_value) a spliced obligation assert would — letting
+    #    StepAssembler.reconcile() collapse the redundant restatement at step level. ──
+    _ob = obligation or {}
+    _ob_exp_field = (_ob.get('expected_field') or '').strip()
+    _ob_exp_value = (_ob.get('expected_value') or '').strip()
+    _grounded_field = out_field or _ob_exp_field or 'call_direction_ind'
+    _grounded_value = out_value or _ob_exp_value
+
     if _regression and not out_value:
         _file_clause = _prr_input_file_clause(obligation, sc_title, sc_validation, t)
         steps = [
@@ -172,6 +183,10 @@ def _prr_mediation_steps(sc_title, sc_validation, t, ctx, negative=False, obliga
              sc_validation or 'Output records match the pre-change baseline exactly — '
              'no unintended change (BAU preserved)'),
         ]
+        # Stamp the grounded compare step (last step) so the assembler can dedup against a
+        # spliced BAU assert. For a regression scenario the asserted value is the obligation's
+        # expected_value (e.g. 'BAU') when present.
+        _stamp_prr_assert_meta(meta, len(steps) - 1, _grounded_field, _grounded_value)
         return steps
 
     # Positive / mapping flow
@@ -195,7 +210,23 @@ def _prr_mediation_steps(sc_title, sc_validation, t, ctx, negative=False, obliga
          'Amdocs TMO billing output record(s) are produced and available'),
         (_inspect, _inspect_exp),
     ]
+    # Stamp the grounded inspect step (last step) with its asserted field/value so the
+    # assembler can collapse a redundant spliced "Verify <field> = <value>" restatement.
+    _stamp_prr_assert_meta(meta, len(steps) - 1, _grounded_field, _grounded_value)
     return steps
+
+
+def _stamp_prr_assert_meta(meta, index, expected_field, expected_value):
+    """Record which grounded PRR step is the assert step and what it asserts.
+
+    `meta` is an optional caller-provided dict (out-param). No-op when `meta` is None, so
+    every existing 2-tuple caller of the PRR builder is byte-for-byte unaffected.
+    """
+    if meta is None:
+        return
+    meta['assert_index'] = index
+    meta['expected_field'] = expected_field or ''
+    meta['expected_value'] = expected_value or ''
 
 
 def _assert_no_banned_mediation(steps):
@@ -213,12 +244,17 @@ def _assert_no_banned_mediation(steps):
     return steps
 
 
-def get_step_chain(sc_title, sc_validation, feature_context, feature_type='', obligation=None):
+def get_step_chain(sc_title, sc_validation, feature_context, feature_type='', obligation=None,
+                   meta=None):
     """Return list of (step_summary, expected_result) tuples based on scenario type.
 
     When feature_type='ui_portal', ALL scenarios route to UI step templates.
     This prevents API steps (OAuth, Century Report, APOLLO_NE) from leaking
     into pure NBOP UI features like Change BCD, Remove Hotline, etc.
+
+    `meta` is an optional out-dict the step-assembler uses to learn which PRR grounded
+    step is the assert step and what (expected_field, expected_value) it carries. It is
+    only populated on the batch_file/PRR positive+regression path; None everywhere else.
     """
     t = (sc_title + ' ' + (sc_validation or '')).lower()
     ctx = feature_context.lower()
@@ -271,7 +307,7 @@ def get_step_chain(sc_title, sc_validation, feature_context, feature_type='', ob
             ]
             return _assert_no_banned_mediation(steps)
         steps = _prr_mediation_steps(sc_title, sc_validation, t, ctx, negative=False,
-                                     obligation=obligation)
+                                     obligation=obligation, meta=meta)
         # Regression-style scenario on a feature whose context names NBOP as the usage view:
         # also confirm the downstream NBOP view is unchanged.
         if 'nbop' in ctx and re.search(
