@@ -425,6 +425,42 @@ def _tc_has_db_closer(tc) -> bool:
     return False
 
 
+def _tc_is_qmetry_authored(tc) -> bool:
+    """True when this TC's steps come VERBATIM from QMetry-authored test cases.
+
+    The engine (tc_builder) tags every step it builds from a scenario's authored
+    ``steps_hint`` with ``authored=True`` / ``origin='authored'``. When ANY step
+    carries that provenance, the TC's step list IS the QMetry ground truth — the
+    universal provisioning CLOSER (Century-DB trace → NBOP_MIG_* DB-table validation
+    → Genesis verify) must NOT be bolted on, because those closers are mined house-
+    style boilerplate, not authored content, and injecting them fabricates DB-table
+    verification steps (NBOP_MIG_*/*_HISTORY) that are absent from the authored suite.
+    Only grounded (generated-from-Chalk) provisioning TCs keep their closers.
+    """
+    for st in (getattr(tc, 'steps', []) or []):
+        if getattr(st, 'authored', False) or (getattr(st, 'origin', '') == 'authored'):
+            return True
+    return False
+
+
+def _tc_is_mediation(tc, feature_context: str = '') -> bool:
+    """True when THIS TC is a Mediation/PRR/billing test (per its own step content).
+
+    A mediation TC validates the Amdocs billing-output / PRR-processing flow — it
+    never touches the NSL provisioning stack, so the universal NSL provisioning
+    CLOSER (Century-DB trace → NBOP_MIG_* DB-table validation → Genesis verify) is
+    fabricated boilerplate for it and must be suppressed. The feature title alone can
+    hide the signal (e.g. a "wearable Audit Report" feature whose TCs are PRR/Amdocs
+    mediation), so the detector reads the TC summary + every step summary/expected —
+    reusing the module's own ``is_mediation_feature`` signal list (no new vocabulary).
+    """
+    parts = [feature_context or '', getattr(tc, 'summary', '') or '']
+    for st in (getattr(tc, 'steps', []) or []):
+        parts.append(getattr(st, 'summary', '') or '')
+        parts.append(getattr(st, 'expected', '') or '')
+    return is_mediation_feature(*parts)
+
+
 def enrich_test_case(tc, feature_context: str = '',
                      add_closers: bool = True,
                      fix_preconditions: bool = True,
@@ -465,9 +501,21 @@ def enrich_test_case(tc, feature_context: str = '',
             steps = [_make_step(i, s, e) for i, (s, e) in enumerate(paired, 1)]
             changed.append('century-pairing')
 
-    # 3. Closers — skip negatives and non-provisioning features
+    # 3. Closers — skip negatives, non-provisioning features, QMetry-authored TCs,
+    #    AND Mediation/PRR TCs.
+    #    - A QMetry-authored TC's steps ARE the ground truth (authored verbatim from the
+    #      linked subtask's QMetry folder); appending the mined NBOP_MIG_*/Century/Genesis
+    #      closer would fabricate DB-table verification steps (NBOP_MIG_*, *_HISTORY) that
+    #      are absent from the authored suite.
+    #    - A Mediation/PRR TC validates the Amdocs billing/PRR flow, not the NSL
+    #      provisioning stack, so the NSL closer is fabricated for it too (a "wearable
+    #      Audit Report" feature title matches a provisioning hint even though its TCs are
+    #      PRR/Amdocs mediation). Detected from the TC's own step content.
+    #    Only grounded (Chalk-generated) NSL-provisioning TCs get the house-style closer.
     if (add_closers and 'negative' not in category
-            and is_provisioning_feature(ctx) and not _tc_has_db_closer(tc)):
+            and is_provisioning_feature(ctx) and not _tc_has_db_closer(tc)
+            and not _tc_is_qmetry_authored(tc)
+            and not _tc_is_mediation(tc, feature_context)):
         start = len(steps)
         op = operation_label(ctx)
         for j, (s, e) in enumerate(provisioning_closer(feature_context, op), 1):
