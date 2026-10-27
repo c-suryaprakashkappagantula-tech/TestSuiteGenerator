@@ -1100,6 +1100,47 @@ def _build_cr_suite_v8(jira, chalk, parsed_docs, options, deep_mine_result, log,
         open_item_coverage=getattr(v7_suite, 'open_item_coverage', None) or {},
     )
 
+    # ── QMetry authored-steps supplement (fail-safe, gated) — CR path ──
+    #
+    # The narrow-CR branch returns before the main V8 path's QMetry hook (Step 1a) is ever
+    # reached, so a pasted/CR feature whose subtask carries authored QMetry test cases never
+    # pulled them. This mirrors that main-path supplement for the CR path. The CR path has no
+    # ExtractedScenario list and no scenario→TC build step afterward, so seed an EMPTY
+    # scenarios list: Tier-1/Tier-2 matching finds nothing (expected), every eligible authored
+    # TC flows through Tier-3 ADD-AS-NEW-TC, and each returned ExtractedScenario is converted
+    # to a TestCase with the SAME converter the main path uses (_build_scenario_tc). The new
+    # TCs are appended BEFORE the grounding gate below, so they are held to the same gate,
+    # coverage audit, and CHALK-GUARD as the rest of the CR suite.
+    #
+    # Fail-loud preserved: a dead QMetry session raises QMetrySessionError inside
+    # enrich_scenarios_with_qmetry; the except below logs one visible warning and stashes
+    # options['_qmetry_skip_warning'] (same text as the main path) so the skip is visible,
+    # but a run is never crashed.
+    try:
+        from .qmetry_steps_source import enrich_scenarios_with_qmetry
+        from .tc_builder import _build_scenario_tc
+        _qmetry_scenarios = []
+        enrich_scenarios_with_qmetry(_qmetry_scenarios, jira, options, log)
+        if _qmetry_scenarios:
+            for _sc in _qmetry_scenarios:
+                _qtc = _build_scenario_tc(
+                    _sc, jira, feature_title, feature_type='cr_bug_fix')
+                suite.test_cases.append(_qtc)
+            log('[QMETRY] CR path: %d authored QMetry test case(s) added to CR suite %s'
+                % (len(_qmetry_scenarios), feature_id))
+    except Exception as _qe:                   # import/auth/network/parse — never break a run
+        _qe_msg = str(_qe)[:200]
+        log('[QMETRY] WARNING: supplement skipped (%s) — continuing with generated steps'
+            % _qe_msg)
+        # Fail-loud: stash the skip reason so the engine can promote it to a visible
+        # suite-level warning (decision 5 — do NOT silently continue without a warning).
+        try:
+            options['_qmetry_skip_warning'] = (
+                'QMetry supplement skipped — authored QMetry test cases were NOT added. '
+                'Reason: %s' % _qe_msg)
+        except Exception:
+            pass
+
     # ── Grounding gate, same as the non-CR path (Step 4b) ──
     #
     # Before this, `_build_cr_suite_v8` returned without ever calling `gate_suite`, so CR
