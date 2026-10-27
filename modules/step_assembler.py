@@ -77,6 +77,128 @@ def _origin_rank(step) -> int:
     return _ORIGIN_RANK.get(o, _ORIGIN_RANK['grounded'])
 
 
+def _feature_evidence_blob(suite) -> str:
+    """Build the feature's OWN evidence blob for the grounded-only banned backstop.
+
+    Includes Chalk feature_title/scope/rules + Jira acceptance_criteria + feature_desc,
+    PLUS the text of every AUTHORED / Chalk-grounded step across the suite (ground truth
+    written by the test architect or pulled verbatim from QMetry). It deliberately
+    EXCLUDES fabricated generated/obligation/closer step text so a fabricated banned
+    step can never 'ground itself'. Pure, case-insensitive. Module-level so both
+    ``StepAssembler.reconcile`` and the export-time universal backstop share the exact
+    same grounding signal.
+    """
+    parts = [
+        getattr(suite, 'feature_title', '') or '',
+        getattr(suite, 'feature_desc', '') or '',
+        getattr(suite, 'scope', '') or '',
+        getattr(suite, 'rules', '') or '',
+    ]
+    _ac = getattr(suite, 'acceptance_criteria', None) or []
+    try:
+        parts.append('\n'.join(str(a) for a in _ac))
+    except Exception:
+        pass
+    for tc in getattr(suite, 'test_cases', []) or []:
+        for st in getattr(tc, 'steps', []) or []:
+            _authored = getattr(st, 'authored', False) or (getattr(st, 'origin', '') == 'authored')
+            if _authored:
+                parts.append(getattr(st, 'summary', '') or '')
+                parts.append(getattr(st, 'expected', '') or '')
+    return ' '.join(parts)
+
+
+def _strip_ungrounded_banned_steps_tc(tc, evidence_blob: str, feature_grounded: bool) -> int:
+    """Strip fabricated banned steps from a single TC. Shared implementation used by
+    both ``StepAssembler._strip_ungrounded_banned_steps`` (per-TC, inside reconcile) and
+    the module-level ``strip_ungrounded_banned_steps`` (whole-suite export backstop).
+
+    Grounded-only policy, mirroring the closer gate:
+      - If the feature's OWN evidence references the NSL/NBOP provisioning concept
+        (``feature_grounded``), banned steps are LEGITIMATE for this feature; the
+        per-step backstop still trims any individual step whose specific banned concept
+        is itself ungrounded.
+      - If the feature is NOT grounded at all, EVERY banned step is fabricated garbage
+        and is dropped.
+
+    NEVER drops an AUTHORED / QMetry-ground-truth step (origin='authored' / authored=True).
+    Renumbers the surviving steps. Returns the count removed.
+    """
+    if qmetry_pattern_library is None:
+        return 0
+    steps = list(getattr(tc, 'steps', []) or [])
+    if not steps:
+        return 0
+    keep = []
+    removed = 0
+    for st in steps:
+        if getattr(st, 'authored', False) or (getattr(st, 'origin', '') == 'authored'):
+            keep.append(st)
+            continue
+        text = '%s %s' % (getattr(st, 'summary', '') or '', getattr(st, 'expected', '') or '')
+        banned = qmetry_pattern_library._step_is_banned_and_ungrounded(text, evidence_blob)
+        if not feature_grounded:
+            # Not grounded at all: drop ANY step that carries a banned phrase, regardless
+            # of whether that specific phrase has an in-step grounding keyword.
+            if qmetry_pattern_library._step_is_banned_and_ungrounded(text, ''):
+                removed += 1
+                continue
+        elif banned:
+            # Grounded feature: trim only the individually-ungrounded banned sub-concept.
+            removed += 1
+            continue
+        keep.append(st)
+    if removed:
+        for i, st in enumerate(keep, 1):
+            if hasattr(st, 'step_num'):
+                st.step_num = i
+        tc.steps = keep
+    return removed
+
+
+def strip_ungrounded_banned_steps(suite, log=print) -> int:
+    """Universal grounded-gated banned-phrase backstop over an ENTIRE suite.
+
+    This is the HARD, universal final net the review requires: it runs on EVERY TC and
+    EVERY step of a suite regardless of path (main/PI, narrow-CR ``_build_cr_suite_v8``,
+    manual-link) and regardless of step origin (grounded/obligation/authored/QMetry/
+    AC-derived/closer). It is invoked from ``StepAssembler.reconcile`` (main path) AND
+    from the shared export chokepoint ``excel_generator.generate_excel`` (so the CR/manual
+    path that never reaches ``reconcile`` is still covered).
+
+    For any step whose summary OR expected text carries a banned NSL/NBOP provisioning
+    phrase that is NOT grounded in the feature's own evidence (``concept_grounded``), that
+    single step is stripped — the TC's other grounded steps are kept (never drop a whole
+    TC because one step was banned). A feature genuinely about Century Report / Service
+    Grouping / NBOP keeps those steps (grounded there). Authored/QMetry ground-truth steps
+    are never stripped. Pure, idempotent, never fatal. Returns the total count stripped.
+    """
+    _log = log or (lambda *_a, **_k: None)
+    if qmetry_pattern_library is None:
+        return 0
+    evidence_blob = _feature_evidence_blob(suite)
+    try:
+        feature_grounded = qmetry_pattern_library.concept_grounded(evidence_blob)
+    except Exception:
+        feature_grounded = False
+    total = 0
+    for tc in getattr(suite, 'test_cases', []) or []:
+        try:
+            total += _strip_ungrounded_banned_steps_tc(tc, evidence_blob, feature_grounded)
+        except Exception as exc:  # one bad TC is skipped, not fatal
+            try:
+                _log('[STEP-ASSEMBLER] backstop skip %s: %s'
+                     % ((getattr(tc, 'summary', '') or '')[:40], str(exc)[:80]))
+            except Exception:
+                pass
+    try:
+        _log('[STEP-ASSEMBLER] universal banned backstop: %d ungrounded banned step(s) stripped'
+             % total)
+    except Exception:
+        pass
+    return total
+
+
 def _assertion_key(step):
     """The semantic key a step asserts, or None when it asserts nothing concrete.
 
@@ -123,6 +245,11 @@ class StepAssembler:
         # only; fabricated generated steps are deliberately EXCLUDED so they cannot
         # self-ground).
         evidence_blob = self._feature_evidence_blob(suite)
+        try:
+            feature_grounded = (qmetry_pattern_library is not None
+                                and qmetry_pattern_library.concept_grounded(evidence_blob))
+        except Exception:
+            feature_grounded = False
         n_dedup = 0
         n_precon = 0
         n_stripped = 0
@@ -130,7 +257,7 @@ class StepAssembler:
             try:
                 removed = self._dedup_steps(tc)
                 n_dedup += removed
-                n_stripped += self._strip_ungrounded_banned_steps(tc, evidence_blob)
+                n_stripped += _strip_ungrounded_banned_steps_tc(tc, evidence_blob, feature_grounded)
                 if is_batch and self._set_batch_preconditions(tc):
                     n_precon += 1
             except Exception as exc:  # never fail the build over reconciliation
@@ -166,85 +293,25 @@ class StepAssembler:
 
     @staticmethod
     def _feature_evidence_blob(suite) -> str:
-        """Build the feature's OWN evidence blob for the grounded-only backstop.
-
-        Includes Chalk feature_title/scope/rules + Jira acceptance_criteria + feature_desc,
-        PLUS the text of every AUTHORED / Chalk-grounded step across the suite (ground truth
-        written by the test architect or pulled verbatim from QMetry). It deliberately
-        EXCLUDES fabricated generated/obligation/closer step text so a fabricated banned
-        step can never 'ground itself'. Pure, case-insensitive.
-        """
-        parts = [
-            getattr(suite, 'feature_title', '') or '',
-            getattr(suite, 'feature_desc', '') or '',
-            getattr(suite, 'scope', '') or '',
-            getattr(suite, 'rules', '') or '',
-        ]
-        _ac = getattr(suite, 'acceptance_criteria', None) or []
-        try:
-            parts.append('\n'.join(str(a) for a in _ac))
-        except Exception:
-            pass
-        for tc in getattr(suite, 'test_cases', []) or []:
-            for st in getattr(tc, 'steps', []) or []:
-                _authored = getattr(st, 'authored', False) or (getattr(st, 'origin', '') == 'authored')
-                _chalk = getattr(st, 'origin', '') == 'grounded' and bool(getattr(st, 'precond_from_chalk', False))
-                if _authored:
-                    parts.append(getattr(st, 'summary', '') or '')
-                    parts.append(getattr(st, 'expected', '') or '')
-        return ' '.join(parts)
+        """Thin wrapper over the module-level ``_feature_evidence_blob`` so both the
+        reconcile path and the export-time universal backstop share one grounding signal."""
+        return _feature_evidence_blob(suite)
 
     def _strip_ungrounded_banned_steps(self, tc, evidence_blob: str) -> int:
-        """Drop fabricated steps carrying a banned NSL/NBOP provisioning phrase that is NOT
-        grounded in the feature's own evidence. This is the FINAL single-choke-point
-        backstop over EVERY producer (integration-contract downstream steps, step_templates
-        chains, test_analyst D1/D2 matrices, pattern-library closers) — the comprehensive
-        net the review requires so a plain API feature's suite ships with
-        ``banned_total == 0``.
-
-        Grounded-only policy, mirroring the closer gate:
-          - If the feature's OWN evidence references the NSL/NBOP provisioning concept
-            (``concept_grounded``), banned steps are LEGITIMATE for this feature; the
-            per-step backstop still trims any individual step whose specific banned concept
-            is itself ungrounded.
-          - If the feature is NOT grounded at all, EVERY banned step is fabricated garbage
-            and is dropped.
-
-        NEVER drops an AUTHORED / QMetry-ground-truth step (origin='authored' / authored=True)
-        — authored content is ground truth even if it names a banned table. Returns the count
-        removed.
+        """Thin per-TC wrapper over the shared strip implementation. Recomputes the
+        feature-grounded flag from *evidence_blob* so direct callers behave exactly as
+        before. ``reconcile`` bypasses this and calls the shared helper directly with a
+        once-computed flag for efficiency. See ``strip_ungrounded_banned_steps`` for the
+        whole-suite universal backstop and ``_strip_ungrounded_banned_steps_tc`` for the
+        grounded-only policy. NEVER drops an authored/QMetry ground-truth step.
         """
         if qmetry_pattern_library is None:
             return 0
-        steps = list(getattr(tc, 'steps', []) or [])
-        if not steps:
-            return 0
-        feature_grounded = qmetry_pattern_library.concept_grounded(evidence_blob)
-        keep = []
-        removed = 0
-        for st in steps:
-            if getattr(st, 'authored', False) or (getattr(st, 'origin', '') == 'authored'):
-                keep.append(st)
-                continue
-            text = '%s %s' % (getattr(st, 'summary', '') or '', getattr(st, 'expected', '') or '')
-            banned = qmetry_pattern_library._step_is_banned_and_ungrounded(text, evidence_blob)
-            if not feature_grounded:
-                # Not grounded at all: drop ANY step that carries a banned phrase, regardless
-                # of whether that specific phrase has an in-step grounding keyword.
-                if qmetry_pattern_library._step_is_banned_and_ungrounded(text, ''):
-                    removed += 1
-                    continue
-            elif banned:
-                # Grounded feature: trim only the individually-ungrounded banned sub-concept.
-                removed += 1
-                continue
-            keep.append(st)
-        if removed:
-            for i, st in enumerate(keep, 1):
-                if hasattr(st, 'step_num'):
-                    st.step_num = i
-            tc.steps = keep
-        return removed
+        try:
+            feature_grounded = qmetry_pattern_library.concept_grounded(evidence_blob)
+        except Exception:
+            feature_grounded = False
+        return _strip_ungrounded_banned_steps_tc(tc, evidence_blob, feature_grounded)
 
     # ── step dedup ──────────────────────────────────────────────────────────
 

@@ -109,6 +109,20 @@ def generate_excel(suite: TestSuite, log=print) -> Path:
     except Exception as _san_err:
         log('[EXCEL] output sanitize skipped: %s' % str(_san_err)[:100])
 
+    # Universal grounded-gated banned-phrase backstop — the HARD final net that runs on
+    # EVERY TC/step of EVERY path. generate_excel is the one export chokepoint every write
+    # path shares (main/PI, narrow-CR _build_cr_suite_v8, manual-link), so running the strip
+    # here closes the CR/manual bypass where the suite never reaches StepAssembler.reconcile.
+    # Runs AFTER polish_suite so it also removes any banned text the wording passes introduce
+    # (e.g. the Service-Grouping fallback in output_sanitizer._generic_expected), and BEFORE
+    # the workbook is built so stripped steps never reach a sheet. Pure/idempotent — a
+    # no-op (count 0) on the main path where reconcile already stripped. Never fatal.
+    try:
+        from .step_assembler import strip_ungrounded_banned_steps
+        strip_ungrounded_banned_steps(suite, log)
+    except Exception as _bb_err:
+        log('[EXCEL] banned backstop skipped: %s' % str(_bb_err)[:100])
+
     # Output-stage crawl-grounding pass. UI_Features only: rewrites filler/UI step
     # text to crawl-grounded wording and attaches StepGrounding records. Non-UI
     # suites return immediately and are left untouched. Never changes TC count or
