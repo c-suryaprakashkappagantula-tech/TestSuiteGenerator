@@ -681,6 +681,28 @@ def build_test_cases(
     # ── Determine API spec context for step generation ──
     api_context = _build_api_context(jira, deep_mine_result, feature_name)
 
+    # ── Feature-level operation name (grounding fallback) ──────────────────────
+    # A request-variant / rejection scenario on an NSL/API feature often does not name the
+    # operation in its OWN title ("Prepare request variants: …"), and when there is no Jira
+    # the feature_name is 'Unknown Feature'. The operation is still knowable from the other
+    # Chalk scenarios of the SAME feature (e.g. "The NSL cancel-device-location API …"), so
+    # resolve it ONCE here and thread it down as a grounding fallback. This grounds such a
+    # scenario in its OWN feature's operation — never a foreign one.
+    try:
+        from .step_templates import _operation_from_scenario as _op_from
+        _feat_op = _op_from(feature_name or '') or _op_from(jira_summary or '')
+        if not _feat_op:
+            for _sc in (getattr(plan, 'scenario_tcs', None) or []):
+                _cand = _op_from(getattr(_sc, 'title', '') or '',
+                                 getattr(_sc, 'validation', '') or '')
+                if _cand:
+                    _feat_op = _cand
+                    break
+        if _feat_op and not api_context.get('api_name'):
+            api_context['feature_operation'] = _feat_op
+    except Exception:
+        pass
+
     # ── Enrich api_context with NMNO data (highest quality source) ──
     if nmno_result and nmno_result.api_specs:
         nmno_spec = nmno_result.api_specs[0]
@@ -1509,7 +1531,11 @@ def _build_scenario_tc(
         # This produces domain-specific steps (inquiry, notification, API, UI) based on the
         # scenario's actual subject matter.
         from .step_templates import get_step_chain as _get_chain
-        _ctx = (feature_name + ' ' + (scenario.validation or '')).lower()
+        # Include the feature-level operation (resolved once in build_test_cases) so a
+        # request-variant/rejection scenario that doesn't name the operation in its own
+        # title is still grounded in its OWN feature's operation, not a foreign one.
+        _feat_op_ctx = (api_context or {}).get('feature_operation', '') if api_context else ''
+        _ctx = (feature_name + ' ' + _feat_op_ctx + ' ' + (scenario.validation or '')).lower()
         # feature_name is truncated to ~50 chars ('Handle Non-Numeric Data Types i...'),
         # which cut 'PRR Usage Files' off 4503 and sent its Jira-AC TCs to the API
         # template (Trigger API / Century Report / NE Portal). Decide file-ingestion from
@@ -1748,6 +1774,31 @@ def _build_scenario_tc(
         # Scenario-aware preconditions derived from the scenario title/validation so each TC
         # isn't the same generic boilerplate (device / plan / existing-line context).
         _t = (scenario.title + ' ' + (scenario.validation or '')).lower()
+        # D5 — grounded preconditions for an operation-named NSL/API feature: name the
+        # operation and reflect the line state THIS scenario requires, instead of the generic
+        # '1. Active TMO subscriber line / 2. API endpoint accessible' boilerplate.
+        _op = ''
+        try:
+            from .step_templates import _operation_from_scenario as _op_from
+            _op = (_op_from(scenario.title, scenario.validation)
+                   or _op_from(feature_name or '')
+                   or (api_context.get('feature_operation') or ''))
+        except Exception:
+            _op = ''
+        if _op and feature_type not in ('batch_file', 'ui_portal', 'ui'):
+            _states = [s for s in ('active', 'deactive', 'hotline', 'suspend')
+                       if re.search(r'\b%s' % s, _t)]
+            _pc = ['1.\tNSL %s API is deployed and reachable in SIT' % _op]
+            if _states:
+                _pc.append('2.\tTMO subscriber line(s) prepared in the state(s) this scenario '
+                           'requires: %s' % ', '.join(s.upper() for s in _states))
+            else:
+                _pc.append('2.\tA TMO subscriber line in the state required by this scenario')
+            preconditions = '\n'.join(_pc)
+            # fall through to the TestCase construction below
+            _skip_generic_api_precon = True
+        else:
+            _skip_generic_api_precon = False
         _pc = ['1.\tActive TMO subscriber line in SIT environment', '2.\tAPI endpoint accessible']
         _extra = []
         if 'tablet' in _t:
@@ -1768,7 +1819,8 @@ def _build_scenario_tc(
         for _e in _extra[:3]:  # cap to keep it tight
             _pc.append('%d.\t%s' % (_n, _e)); _n += 1
         _pc.append('%d.\tLine Status: Active' % _n)
-        preconditions = '\n'.join(_pc)
+        if not _skip_generic_api_precon:
+            preconditions = '\n'.join(_pc)
 
     _tc = TestCase(
         summary=summary,
