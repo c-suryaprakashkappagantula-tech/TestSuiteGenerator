@@ -1982,6 +1982,108 @@ def _kafka_event_steps(title, validation):
     ]
 
 
+# ── Shared grounded UI-visibility assertion ─────────────────────────────────
+#
+# The ROOT of both reported UI defects: the verify step's SUMMARY and EXPECTED
+# were canned generic phrases ("...is visible, correctly labeled, and
+# accessible" / "Element is present, enabled, and interactive" / "Screen loads
+# with the expected fields and controls") grafted onto a (sometimes truncated)
+# title fragment. This helper replaces that canned text with an assertion
+# GROUNDED in the scenario's OWN named target and the SPECIFIC state it asserts,
+# built as a complete sentence and trimmed ONCE at a word boundary — never
+# `fixed_prefix + truncate(target) + fixed_suffix`. Used by BOTH the KB-absent
+# fallback (`_ui_flow_steps`) and the KB-available path
+# (`nbop_ui_knowledge.generate_ui_steps`) so the two copies can never diverge.
+import re as _re_uiv
+
+# A trailing "exists"/"exists under" / dangling connective must never survive on
+# the extracted subject — otherwise the assertion reads "...exists under is
+# visible". Stripped before the subject is composed into a sentence.
+_UIV_TRAILING_RE = _re_uiv.compile(
+    r'\s+(?:exists?(?:\s+under)?|is\s+visible|is\s+accessible|under)\s*$',
+    _re_uiv.IGNORECASE)
+_UIV_QUOTE_RE = _re_uiv.compile(
+    r"['\"\u2018\u2019\u201c\u201d]([^'\"\u2018\u2019\u201c\u201d]{3,70})"
+    r"['\"\u2018\u2019\u201c\u201d]")
+_UIV_PARENT_RE = _re_uiv.compile(r'\bunder\s+([A-Za-z][\w /&-]{2,40})', _re_uiv.IGNORECASE)
+# A concrete subscriber/line STATE the scenario asserts (ACTIVE, SUSPENDED, …).
+# When present, the verify step asserts THAT state rather than bare visibility.
+_UIV_STATE_RE = _re_uiv.compile(
+    r'\b(ACTIVE|INACTIVE|SUSPENDED|HOTLINED|DEACTIVATED|CANCELLED|PENDING|PORTED)\b')
+_UIV_ROLE_RE = _re_uiv.compile(r'\b([A-Za-z][\w]*_Admin|non-?Admin|NBOP_Admin)\b', _re_uiv.IGNORECASE)
+
+
+def _grounded_ui_visibility_assertion(scenario_title, subject, parent='', nav=''):
+    """Return a grounded ``(verify_summary, verify_expected)`` for a UI-visibility /
+    state scenario.
+
+    GROUNDED means: the text names the scenario's SPECIFIC target (``subject`` —
+    a quoted option, a named menu/group/element) and its ``parent`` when present,
+    and asserts the SPECIFIC condition the scenario is about:
+      * a concrete line/subscriber STATE in the title (e.g. ACTIVE) → the verify
+        step asserts that the status actually reads that value on the screen;
+      * an "exists under <parent>" group/option → the verify step asserts the
+        option appears specifically under that parent, respecting any role
+        gating named in the scenario (e.g. NBOP_Admin vs non-Admin);
+      * otherwise a named element → asserts that specific element is present.
+
+    No generic whole-assertion filler ("expected fields and controls",
+    "present, enabled, and interactive", "visible, correctly labeled, and
+    accessible"). The sentence is composed first and trimmed ONCE via
+    ``truncate_at_word`` — no prefix+truncate+suffix graft.
+    """
+    sc = scenario_title or ''
+    subj = strip_dangling_tail(_UIV_TRAILING_RE.sub('', (subject or '').strip())).strip()
+    # Drop a leading article so composed sentences read cleanly ("the Resend OTA
+    # Notification option" not "the the Resend OTA Notification option").
+    subj = _re_uiv.sub(r'^(?:the|a|an)\s+', '', subj, flags=_re_uiv.IGNORECASE).strip()
+    if not subj:
+        subj = 'the specified target'
+    parent = (parent or '').strip().rstrip('. ')
+    # Role gating named in the scenario (NBOP_Admin / non-Admin) — surfaced in the
+    # expected so an access-control scenario asserts the role-specific visibility.
+    roles = []
+    for m in _UIV_ROLE_RE.finditer(sc):
+        r = m.group(1)
+        if r.lower() not in [x.lower() for x in roles]:
+            roles.append(r)
+    role_clause = ''
+    if roles:
+        role_clause = ' for %s; hidden/blocked for roles without permission' % (
+            ' and '.join(roles))
+
+    state_m = _UIV_STATE_RE.search(sc)
+    if state_m:
+        # STATE scenario (e.g. TC01 line ACTIVE): assert the specific status value,
+        # not bare visibility.
+        state = state_m.group(1).upper()
+        summary = strip_dangling_tail(truncate_at_word(
+            'Verify %s status reads %s on the loaded profile screen' % (subj, state), 110))
+        expected = strip_dangling_tail(truncate_at_word(
+            'Status field for %s shows %s (exact value), confirming the asserted state'
+            % (subj, state), 150))
+        return summary, expected
+
+    if parent:
+        # "exists under <parent>" group/option (e.g. TC02 'Resend OTA Notification'
+        # under Reset Line): assert the option appears specifically under that parent.
+        summary = strip_dangling_tail(truncate_at_word(
+            'Verify the %s option appears under %s' % (subj, parent), 110))
+        expected = strip_dangling_tail(truncate_at_word(
+            '%s is listed specifically under %s%s'
+            % (subj, parent, role_clause or ''), 160))
+        return summary, expected
+
+    # Named element with no explicit state/parent: still name the SPECIFIC element,
+    # never generic UI words.
+    summary = strip_dangling_tail(truncate_at_word(
+        'Verify %s is present on the %s screen' % (subj, nav or 'NBOP'), 110))
+    expected = strip_dangling_tail(truncate_at_word(
+        '%s is rendered on the screen with its label%s'
+        % (subj, role_clause or ''), 150))
+    return summary, expected
+
+
 def _ui_flow_steps(title, validation):
     """UI flow: NBOP portal-driven test steps using real UI knowledge base."""
     val = _sanitize_val(validation, title) or 'UI operation completed. NBOP displays correct results'
@@ -2008,9 +2110,10 @@ def _ui_flow_steps(title, validation):
     # leaving a dangling "exists under".
     _parent = _re_ui.search(r'\bunder\s+([A-Za-z][\w /&-]{2,40})', _action)
     if _quoted:
+        # Keep the quoted target BARE. The grounded-assertion helper names the
+        # parent ("under <parent>") separately, so embedding "(under ...)" here
+        # would double it ("... (under Reset Line) option appears under Reset Line").
         _subject = _quoted.group(1).strip()
-        if _parent:
-            _subject = "%s (under %s)" % (_subject, _parent.group(1).strip().rstrip('. '))
     else:
         # Cut any trailing validation/existence phrase so only the subject NAME remains.
         _subject = _re_ui.split(
@@ -2020,6 +2123,7 @@ def _ui_flow_steps(title, validation):
     _subject = _re_ui.sub(r'\s+(?:exists?(?:\s+under)?|is\s+visible|under)\s*$', '', _subject,
                           flags=_re_ui.IGNORECASE).strip()
     _subject = strip_dangling_tail(truncate_at_word(_subject, 80)) if _subject else 'the feature'
+    _parent_name = _parent.group(1).strip().rstrip('. ') if _parent else ''
     # Resolve a real NBOP navigation path (crawl if present, else the hand-
     # maintained feature→page map) instead of a generic 'menu for: X'.
     try:
@@ -2027,17 +2131,18 @@ def _ui_flow_steps(title, validation):
         _nav = _get_nav(_subject)
     except Exception:
         _nav = 'NBOP → Mobile Service Management'
+    # GROUNDED verify step: name the SPECIFIC target and assert the SPECIFIC state
+    # the scenario is about (line status, option-under-parent, role gating) —
+    # never a canned "visible, correctly labeled, and accessible" phrase.
+    _v_summary, _v_expected = _grounded_ui_visibility_assertion(
+        title, _subject, parent=_parent_name, nav=_nav)
+    _subj_disp = _re_ui.sub(r'^(?:the|a|an)\s+', '', _subject, flags=_re_ui.IGNORECASE).strip() or _subject
     return [
         ('Launch NBOP portal and search subscriber by MDN',
          'Subscriber profile loaded with header cards showing Account, MDN, IMEI, ICCID'),
         ('Navigate: %s' % _nav,
-         'Screen loads and the %s target is present, correctly labeled, and accessible per role'
-         % _subject),
-        ('Verify the %s is visible, correctly labeled, and accessible to permitted roles only'
-         % _subject,
-         'The %s is shown to permitted roles and hidden/blocked for non-permitted roles' % _subject),
-        ('Verify subscriber profile reflects the %s state' % _subject,
-         'All affected fields show correct values for the %s' % _subject),
+         'The %s screen loads so the %s can be inspected' % (_nav, _subj_disp)),
+        (_v_summary, _v_expected),
         ('Navigate to Transaction History and verify entry logged',
          'Transaction History shows entry with correct timestamp, type, and SUCC status'),
     ]
@@ -2431,7 +2536,7 @@ _TITLE_TRAILING_RE = _re_plumb.compile(r'[\s_\-,:;.]+$')     # trailing punctuat
 _DANGLING_TAIL_RE = re.compile(
     r'[\s,;:_]+(?:and|or|but|the|a|an|in|on|at|to|for|by|with|that|which|from|as|of|'
     r'is|are|was|were|be|been|if|when|then|any|all|each|per|via|into|onto|not|no|'
-    r'should|shall|must|will|does|do|has|have|its|their)$',
+    r'should|shall|must|will|does|do|has|have|its|their|under|exists?)$',
     re.IGNORECASE)
 
 
@@ -2502,7 +2607,8 @@ def truncate_at_word(text, limit):
 
 
 _CUT_CONNECTOR_RE = re.compile(
-    r'[\s_]+(?:the|of|and|or|to|with|for|a|an|in|by|only|not|that)$', re.IGNORECASE)
+    r'[\s_]+(?:the|of|and|or|to|with|for|a|an|in|by|only|not|that|under|exists?)$',
+    re.IGNORECASE)
 
 
 def _tidy_cut_tail(out):
