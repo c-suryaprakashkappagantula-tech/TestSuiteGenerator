@@ -488,24 +488,38 @@ _CLOSER_CONCEPT_KEYWORDS = (
 )
 
 # Per-phrase banned backstop. Each entry maps a banned surface phrase (as it would
-# appear in an emitted closer step) to the set of concept keywords that would
-# GROUND it. A closer step carrying a banned phrase is only allowed when at least
-# one of its grounding keywords appears in the feature's evidence blob.
+# appear in an emitted step) to the set of concept keywords that would GROUND it. A
+# step carrying a banned phrase is only allowed when at least one of its grounding
+# keywords appears in the feature's evidence blob.
+#
+# Phrases and step text are both normalized (underscores -> spaces, whitespace
+# collapsed) before matching, so a single entry catches BOTH the pattern-library
+# closer surface ('NBOP_MIG_LINE', 'TRANSACTION_HISTORY') and the integration-contract
+# downstream surface ('NBOP MIG tables', 'Transaction History'). Grounding keywords are
+# matched against the raw (un-normalized) lowercased blob so underscore tokens like
+# 'nbop_mig' still work there.
 _BANNED_CLOSER_PHRASES = (
-    ('nbop_mig_', ('nbop', 'nsl', 'nbop_mig', 'provision')),
-    ('transaction_history', ('transaction_history', 'nbop', 'nsl', 'provision')),
-    ('line_history', ('line_history', 'nbop', 'nsl', 'provision')),
+    ('nbop mig', ('nbop', 'nsl', 'nbop_mig', 'provision')),
+    ('transaction history', ('transaction_history', 'transaction history', 'nbop', 'nsl', 'provision')),
+    ('line history', ('line_history', 'line history', 'nbop', 'nsl', 'provision')),
     ('service grouping', ('service grouping', 'service_grouping', 'nsl', 'nbop')),
-    ('service_grouping', ('service grouping', 'service_grouping', 'nsl', 'nbop')),
     ('century report', ('century', 'nbop', 'nsl')),
     ('century db', ('century', 'nbop', 'nsl', 'provision')),
     ('ne portal', ('ne portal', 'ne-portal', 'nsl', 'nbop')),
     ('genesis portal', ('genesis', 'nbop', 'nsl', 'provision')),
+    ('tmo genesis', ('genesis', 'nbop', 'nsl', 'provision')),
     ('nbop line summary', ('nbop', 'nsl', 'provision')),
     ('nsl processes request', ('nsl', 'nbop', 'provision')),
     ('trigger api', ('trigger api', 'nsl', 'nbop', 'provision')),
     ('nsl db tables', ('nbop', 'nsl', 'nbop_mig', 'provision')),
+    ('syniverse', ('syniverse', 'nsl', 'nbop', 'provision')),
 )
+
+
+def _normalize_phrase(text: str) -> str:
+    """Lowercase and collapse underscores/whitespace so 'NBOP_MIG_LINE' and
+    'NBOP MIG tables' both normalize to a space-delimited form for matching."""
+    return re.sub(r'[\s_]+', ' ', (text or '').lower()).strip()
 
 
 def _closer_concept_grounded(evidence_blob: str) -> bool:
@@ -531,12 +545,66 @@ def _step_is_banned_and_ungrounded(step_text: str, evidence_blob: str) -> bool:
     the gate passes on some concept, an individual closer step that asserts a
     DIFFERENT banned concept not present in the evidence is still skipped.
     """
-    s = (step_text or '').lower()
+    s = _normalize_phrase(step_text)
     blob = (evidence_blob or '').lower()
     for phrase, grounding_kws in _BANNED_CLOSER_PHRASES:
         if phrase in s and not any(kw in blob for kw in grounding_kws):
             return True
     return False
+
+
+def concept_grounded(evidence_blob: str) -> bool:
+    """Public PRIMARY grounding predicate: True when *evidence_blob* references the
+    NSL/NBOP provisioning concept the canned closer / downstream-verification steps
+    assert. Thin public wrapper over ``_closer_concept_grounded`` so other producers
+    (e.g. the dimension_extractor D1/D2 state/partial-failure matrix injection) can gate
+    on the SAME grounding signal. Pure, case-insensitive, deterministic.
+    """
+    return _closer_concept_grounded(evidence_blob)
+
+
+def ground_downstream_steps(steps, evidence_blob: str):
+    """Grounding gate for the integration-contract downstream-verification producer.
+
+    The integration-contract step generator (``integration_contract.build_downstream_
+    verification_steps``, resolved via ``dimension_extractor.resolve_operation`` and the
+    per-system ``must_call`` chain) fabricates Service-Grouping / Century-Report /
+    Syniverse / NBOP-MIG / TMO-Genesis verification steps onto a TC purely from an
+    operation-alias title match — the SAME default-ON-with-exceptions policy the closer
+    path used to have. For plain API features (4497/4574/4575/4576/4611) whose own
+    evidence never mentions the NSL/NBOP provisioning concept, those steps are fabricated
+    garbage.
+
+    This applies the SAME grounded-only policy as the closer gate:
+
+    - PRIMARY gate (``_closer_concept_grounded``): if the feature's own evidence blob
+      (Chalk scope/rules + Jira AC + feature text + the TC's own step/validation text)
+      does NOT reference the NSL/NBOP provisioning concept, return ``[]`` — emit NO
+      downstream verification steps. This is the root-cause fix for the dirty features.
+    - BACKSTOP (``_step_is_banned_and_ungrounded``): even when the primary gate passes
+      on some concept, drop any individual step whose banned phrase (NBOP_MIG / Service
+      Grouping / Century / Transaction/Line History / NE Portal / Genesis / Syniverse)
+      is NOT itself grounded in the evidence.
+
+    *steps* is a list of ``(summary, expected)`` tuples (the shape
+    ``build_downstream_verification_steps`` returns). Returns the grounded subset, same
+    shape. A genuinely grounded NSL-provisioning feature keeps its legitimate steps.
+    Pure, case-insensitive, deterministic — no I/O.
+    """
+    if not steps:
+        return []
+    if not _closer_concept_grounded(evidence_blob):
+        return []
+    kept = []
+    for item in steps:
+        if isinstance(item, (tuple, list)) and len(item) >= 2:
+            summ, exp = item[0], item[1]
+        else:
+            summ, exp = str(item), ''
+        if _step_is_banned_and_ungrounded('%s %s' % (summ or '', exp or ''), evidence_blob):
+            continue
+        kept.append(item)
+    return kept
 
 
 def enrich_test_case(tc, feature_context: str = '',
