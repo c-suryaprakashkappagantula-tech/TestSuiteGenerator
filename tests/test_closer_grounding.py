@@ -166,18 +166,25 @@ def test_qmetry_authored_path_stays_clean():
 
 # ── Unit coverage for the new grounding predicates ────────────────────────────
 def test_closer_concept_grounded_predicate():
-    assert qpl._closer_concept_grounded('line is provisioned on nsl and nbop') is True
+    # iter-3: a SPECIFIC data-plane concept grounds the closer — the NBOP-MIG tables here.
+    assert qpl._closer_concept_grounded('line is provisioned and the nbop_mig tables update') is True
+    # A generic "provisioning on nsl and nbop" NO LONGER grounds the closer (root-cause
+    # fix: the generic provision/nbop/nsl tokens were removed from the concept set).
+    assert qpl._closer_concept_grounded('line is provisioned on nsl and nbop') is False
     assert qpl._closer_concept_grounded('send a rest request to update key info') is False
     assert qpl._closer_concept_grounded('') is False
 
 
 def test_step_banned_and_ungrounded_backstop():
-    # NBOP_MIG step with NO nbop/nsl grounding → banned.
+    # NBOP_MIG step with NO specific NBOP-MIG grounding → banned.
     assert qpl._step_is_banned_and_ungrounded(
         'Verify NBOP_MIG_LINE updated', 'rest request update key info') is True
-    # Same step, grounded by nbop in evidence → allowed.
+    # A generic 'nbop' word NO LONGER grounds the specific NBOP_MIG step (iter-3).
     assert qpl._step_is_banned_and_ungrounded(
-        'Verify NBOP_MIG_LINE updated', 'line provisioned on nbop') is False
+        'Verify NBOP_MIG_LINE updated', 'line provisioned on nbop') is True
+    # Same step, grounded by the SPECIFIC nbop_mig concept in evidence → allowed.
+    assert qpl._step_is_banned_and_ungrounded(
+        'Verify NBOP_MIG_LINE updated', 'the nbop_mig tables are updated') is False
     # A step with no banned phrase is never flagged.
     assert qpl._step_is_banned_and_ungrounded(
         'Send a REST request.', 'rest request update key info') is False
@@ -214,9 +221,13 @@ def test_ground_downstream_steps_suppressed_when_ungrounded():
 
 
 def test_ground_downstream_steps_kept_when_grounded():
-    # A genuinely grounded NSL-provisioning feature keeps its legitimate steps.
-    evidence = ('nbop line activation provisioning the line is provisioned on nsl '
-                'and nbop_mig tables are updated, syniverse createsubscriber, century report')
+    # A genuinely grounded NSL-provisioning feature whose OWN evidence names every
+    # specific data-plane concept the steps assert keeps all its legitimate steps.
+    # iter-3: grounding is now per-SPECIFIC-concept, so the evidence must name
+    # service grouping / century / syniverse / nbop_mig / genesis explicitly.
+    evidence = ('nbop line activation provisioning: the nbop_mig tables and transaction '
+                'history update; service grouping and the century report confirm the '
+                'syniverse createsubscriber call; tmo genesis portal reflects the state')
     out = qpl.ground_downstream_steps(_DOWNSTREAM_STEPS, evidence)
     assert len(out) == len(_DOWNSTREAM_STEPS), 'grounded downstream steps must survive'
 
@@ -238,7 +249,10 @@ def test_ground_downstream_steps_per_step_backstop():
 
 
 def test_concept_grounded_public_predicate():
-    assert qpl.concept_grounded('line provisioned on nsl and nbop') is True
+    # iter-3: only a SPECIFIC data-plane concept grounds; generic provisioning does not.
+    assert qpl.concept_grounded('line provisioned and nbop_mig tables updated') is True
+    assert qpl.concept_grounded('service grouping and century report validated') is True
+    assert qpl.concept_grounded('line provisioned on nsl and nbop') is False
     assert qpl.concept_grounded('rest request update key info field') is False
     assert qpl.concept_grounded('') is False
 
@@ -311,6 +325,41 @@ def test_step_assembler_keeps_banned_on_grounded_feature():
     _reconcile_suite(suite)
     assert len(tc.steps) == before, 'legitimate grounded steps must survive'
     assert 'NBOP MIG' in _blob(tc), 'grounded NBOP MIG step must survive'
+
+
+def test_step_assembler_strips_banned_on_generic_provisioning_feature():
+    # ROOT-CAUSE REGRESSION (iter-3): the real dirty features 4574/4575/4576 are MWTGPROV
+    # provisioning features whose Jira/Chalk evidence DOES contain the generic words
+    # "provisioning"/"nbop"/"nsl" but NEVER the specific NBOP-MIG/Service-Grouping/Century/
+    # NE-Portal data-plane concepts. The generic tokens used to re-admit the fabricated
+    # banned steps; after tightening, a generic-provisioning feature is NOT grounded for
+    # those specific concepts, so every fabricated banned step is stripped.
+    steps = [
+        TestStep(step_num=1, summary='Send a REST request to provision the subscriber line.',
+                 expected='The line is provisioned on NSL/NBOP.', origin='grounded'),
+        TestStep(step_num=2,
+                 summary='Verify Service Grouping (Century Report) shows outbound calls.',
+                 expected='Century Report Service Grouping confirms calls.', origin='grounded'),
+        TestStep(step_num=3,
+                 summary='Verify NBOP MIG tables reflect the change (Transaction History).',
+                 expected='NBOP MIG tables updated; Transaction History row present.',
+                 origin='grounded'),
+        TestStep(step_num=4,
+                 summary='Verify NE Portal and TMO Genesis portal reflect the subscriber state.',
+                 expected='NE Portal and TMO Genesis show the updated state.', origin='grounded'),
+    ]
+    tc = TestCase(sno='TC_SA_GEN', summary='Provision subscriber line via REST', steps=steps)
+    # Evidence carries ONLY generic provisioning/nbop/nsl words — the exact 4574/4575/4576
+    # shape — and none of the specific banned data-plane concepts.
+    suite = TestSuite(feature_id='MWTGPROV-4576',
+                      feature_title='REST wired provisioning of subscriber line',
+                      feature_desc='Provision the subscriber line on the NSL/NBOP provisioning stack.',
+                      test_cases=[tc],
+                      acceptance_criteria=['The subscriber line is provisioned on NSL and NBOP.'],
+                      scope='Provision the subscriber line via the wired REST provisioning flow.')
+    _reconcile_suite(suite)
+    assert len(tc.steps) == 1, 'generic-provisioning evidence must NOT ground specific banned steps'
+    _assert_no_banned(tc)
 
 
 def test_step_assembler_never_strips_authored_banned_step():

@@ -478,41 +478,66 @@ def _tc_is_mediation(tc, feature_context: str = '') -> bool:
 # backstop is only a final safety net. Both predicates are pure, case-insensitive
 # and deterministic (no I/O, no randomness).
 
-# Concept keyword groups the canned closer asserts. Any one group present in the
-# feature's own evidence grounds the closer. Kept broad (NSL provisioning stack)
-# so a genuinely grounded NSL/NBOP feature still gets its legitimate closer.
+# Concept keyword groups that ground the canned closer at the FEATURE level. These
+# are the SPECIFIC NSL/NBOP data-plane concepts the closer/downstream steps assert —
+# the DB-table family, the Century/Service-Grouping/NE-Portal/Genesis verification
+# surfaces and the Syniverse/"NSL processes request"/"Trigger API" flow markers.
+#
+# ROOT-CAUSE FIX (iter-3): the generic tokens 'provision', bare 'nbop' and bare 'nsl'
+# were REMOVED from this set. Every MWTGPROV feature's Jira/Chalk evidence says
+# "provisioning" (and usually "nbop"/"nsl"), so those generic tokens made
+# concept_grounded() return True for every provisioning feature and the StepAssembler
+# backstop then kept the fabricated NBOP_MIG/Service-Grouping/Century/NE-Portal steps
+# on plain API features (4574/4575/4576). A feature is now "grounded" only when its own
+# evidence references one of these SPECIFIC data-plane concepts — not a generic
+# "provisioning" word. All keywords are stored in normalized form (underscores ->
+# spaces) and matched against the normalized evidence blob, so 'nbop mig' catches both
+# 'NBOP_MIG' and 'NBOP MIG' in the evidence.
 _CLOSER_CONCEPT_KEYWORDS = (
-    'nbop', 'nsl', 'nbop_mig', 'transaction_history', 'line_history',
-    'service grouping', 'service_grouping', 'century', 'ne portal', 'ne-portal',
-    'genesis', 'trigger api', 'nsl processes request', 'provision',
+    'nbop mig', 'nbop_mig', 'transaction history', 'line history',
+    'service grouping', 'century', 'ne portal', 'ne-portal', 'genesis',
+    'syniverse', 'trigger api', 'nsl processes request', 'nbop line summary',
+    'nsl db tables',
 )
 
 # Per-phrase banned backstop. Each entry maps a banned surface phrase (as it would
 # appear in an emitted step) to the set of concept keywords that would GROUND it. A
 # step carrying a banned phrase is only allowed when at least one of its grounding
-# keywords appears in the feature's evidence blob.
+# keywords appears in the feature's own evidence blob.
 #
-# Phrases and step text are both normalized (underscores -> spaces, whitespace
-# collapsed) before matching, so a single entry catches BOTH the pattern-library
-# closer surface ('NBOP_MIG_LINE', 'TRANSACTION_HISTORY') and the integration-contract
-# downstream surface ('NBOP MIG tables', 'Transaction History'). Grounding keywords are
-# matched against the raw (un-normalized) lowercased blob so underscore tokens like
-# 'nbop_mig' still work there.
+# ROOT-CAUSE FIX (iter-3): each banned phrase is now grounded ONLY by its OWN specific
+# data-plane concept — the generic 'provision'/'nbop'/'nsl' tokens were removed from
+# every grounding set. Previously those generic tokens re-admitted exactly the
+# fabricated NBOP_MIG/Service-Grouping/Century/NE-Portal content on MWTGPROV features
+# (whose evidence always contains "provisioning"/"nbop"/"nsl"). Now an NBOP_MIG step
+# survives only when the feature's evidence actually names the NBOP-MIG tables, a
+# Century step only when the evidence names Century, and so on.
+#
+# Phrases, step text AND the grounding keywords are all normalized (underscores ->
+# spaces, whitespace collapsed) before matching, so a single entry catches BOTH the
+# pattern-library closer surface ('NBOP_MIG_LINE', 'TRANSACTION_HISTORY') and the
+# integration-contract downstream surface ('NBOP MIG tables', 'Transaction History'),
+# and a grounding keyword like 'nbop mig' matches evidence written as either
+# 'NBOP_MIG' or 'NBOP MIG'.
 _BANNED_CLOSER_PHRASES = (
-    ('nbop mig', ('nbop', 'nsl', 'nbop_mig', 'provision')),
-    ('transaction history', ('transaction_history', 'transaction history', 'nbop', 'nsl', 'provision')),
-    ('line history', ('line_history', 'line history', 'nbop', 'nsl', 'provision')),
-    ('service grouping', ('service grouping', 'service_grouping', 'nsl', 'nbop')),
-    ('century report', ('century', 'nbop', 'nsl')),
-    ('century db', ('century', 'nbop', 'nsl', 'provision')),
-    ('ne portal', ('ne portal', 'ne-portal', 'nsl', 'nbop')),
-    ('genesis portal', ('genesis', 'nbop', 'nsl', 'provision')),
-    ('tmo genesis', ('genesis', 'nbop', 'nsl', 'provision')),
-    ('nbop line summary', ('nbop', 'nsl', 'provision')),
-    ('nsl processes request', ('nsl', 'nbop', 'provision')),
-    ('trigger api', ('trigger api', 'nsl', 'nbop', 'provision')),
-    ('nsl db tables', ('nbop', 'nsl', 'nbop_mig', 'provision')),
-    ('syniverse', ('syniverse', 'nsl', 'nbop', 'provision')),
+    ('nbop mig', ('nbop mig',)),
+    # TRANSACTION_HISTORY / LINE_HISTORY are member tables of the NBOP_MIG family, so a
+    # feature grounded on the NBOP-MIG tables legitimately carries them inside the single
+    # NBOP_MIG DB-table-validation step. They are ALSO grounded standalone by their own
+    # name — but NOT by a generic 'provision'/'nbop'/'nsl' word.
+    ('transaction history', ('transaction history', 'nbop mig')),
+    ('line history', ('line history', 'nbop mig')),
+    ('service grouping', ('service grouping',)),
+    ('century report', ('century',)),
+    ('century db', ('century',)),
+    ('ne portal', ('ne portal', 'ne-portal')),
+    ('genesis portal', ('genesis',)),
+    ('tmo genesis', ('genesis',)),
+    ('nbop line summary', ('nbop line summary', 'nbop mig')),
+    ('nsl processes request', ('nsl processes request',)),
+    ('trigger api', ('trigger api',)),
+    ('nsl db tables', ('nsl db tables', 'nbop mig')),
+    ('syniverse', ('syniverse',)),
 )
 
 
@@ -523,15 +548,17 @@ def _normalize_phrase(text: str) -> str:
 
 
 def _closer_concept_grounded(evidence_blob: str) -> bool:
-    """PRIMARY gate: True when the feature's own evidence references the NSL/NBOP
-    provisioning concept the canned closer asserts.
+    """PRIMARY gate: True when the feature's own evidence references a SPECIFIC
+    NSL/NBOP data-plane concept the canned closer asserts.
 
-    *evidence_blob* is the lowercased concatenation of this feature's Chalk
-    scope/rules, Jira AC, feature text and the TC's own summary/step text. If none
-    of the provisioning concept keywords appear, the closer is fabricated for this
-    feature and must NOT be injected.
+    *evidence_blob* is the concatenation of this feature's Chalk scope/rules, Jira AC,
+    feature text and the TC's own summary/step text. It is normalized (underscores ->
+    spaces, whitespace collapsed) so underscore table tokens like 'NBOP_MIG' match the
+    'nbop mig' concept keyword. A generic "provisioning" word no longer grounds the
+    closer — only the specific DB-table / Century / Service-Grouping / NE-Portal /
+    Genesis / Syniverse / "Trigger API" concepts do (see _CLOSER_CONCEPT_KEYWORDS).
     """
-    blob = (evidence_blob or '').lower()
+    blob = _normalize_phrase(evidence_blob)
     if not blob:
         return False
     return any(kw in blob for kw in _CLOSER_CONCEPT_KEYWORDS)
@@ -539,14 +566,17 @@ def _closer_concept_grounded(evidence_blob: str) -> bool:
 
 def _step_is_banned_and_ungrounded(step_text: str, evidence_blob: str) -> bool:
     """BACKSTOP: True when *step_text* carries a banned provisioning phrase whose
-    grounding concept is absent from *evidence_blob*.
+    SPECIFIC grounding concept is absent from *evidence_blob*.
 
-    Used as a final per-step safety net AFTER the primary grounding gate: even if
-    the gate passes on some concept, an individual closer step that asserts a
-    DIFFERENT banned concept not present in the evidence is still skipped.
+    Used as a final per-step safety net AFTER the primary grounding gate: even if the
+    gate passes on some concept, an individual closer/downstream step that asserts a
+    DIFFERENT banned concept not present in the evidence is still skipped. Both the step
+    text and the evidence blob are normalized before matching so an 'NBOP_MIG' step is
+    grounded only when the evidence itself names the NBOP-MIG tables (not by a generic
+    "provisioning" word).
     """
     s = _normalize_phrase(step_text)
-    blob = (evidence_blob or '').lower()
+    blob = _normalize_phrase(evidence_blob)
     for phrase, grounding_kws in _BANNED_CLOSER_PHRASES:
         if phrase in s and not any(kw in blob for kw in grounding_kws):
             return True
