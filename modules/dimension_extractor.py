@@ -1589,6 +1589,20 @@ def _extract_scenarios_from_chalk_data(chalk, log: Callable = print) -> tuple:
             category = 'Happy Path'
 
         validation = (sc.validation or '').strip()
+
+        # Chalk pages routinely list every scenario (including rejection/variant ones) under
+        # one default 'Happy Path' heading. A scenario that describes invalid request variants
+        # / schema violations / an omitted required field is a Negative test, so it produces a
+        # distinct, correctly-typed TC rather than a positive one that collapses into its
+        # sibling. Only a DEFAULT Happy Path is re-labelled, and only on a clear rejection
+        # signal (explicit Negative/Edge/Regression categories are left alone).
+        if category.lower() == 'happy path' and re.search(
+                r'\b(?:violation|violations|schema\s*/?\s*field|omit|omits|omitting|non-tmo|'
+                r'malformed|invalid|reject|rejects|rejected|missing\s+(?:both|required|'
+                r'mandatory))\b',
+                ('%s %s' % (title, validation)).lower()):
+            category = 'Negative'
+
         steps_hint = sc.steps if hasattr(sc, 'steps') and sc.steps else []
 
         _owner_feature = getattr(sc, 'owner_feature_id', '') or feature_id
@@ -1701,6 +1715,19 @@ def _extract_dimensions_from_chalk(
             category = sc.get('category', 'Happy Path')
             if not title or len(title) < 5:
                 continue
+
+            # Chalk pages routinely list every scenario (including rejection/variant ones)
+            # under one default 'Happy Path' heading. A scenario that describes invalid
+            # request variants / schema violations / omitted-required-field is a Negative
+            # test, so a distinct, correctly-typed TC is produced for it rather than a
+            # positive one that collapses into its sibling. Only a DEFAULT Happy Path is
+            # re-labelled, and only on a clear rejection signal.
+            if (category or 'Happy Path').strip().lower() == 'happy path' and re.search(
+                    r'\b(?:violation|violations|schema\s*/?\s*field|omit|omits|omitting|'
+                    r'non-tmo|malformed|invalid|reject|rejects|rejected|missing\s+(?:both|'
+                    r'required|mandatory))\b',
+                    ('%s %s' % (title, validation)).lower()):
+                category = 'Negative'
 
             # Quality filter: skip info/metadata rows
             title_lower = title.lower()

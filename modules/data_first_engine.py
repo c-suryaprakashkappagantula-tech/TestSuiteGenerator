@@ -971,6 +971,7 @@ def _assert_chalk_coverage(suite, chalk, log=print):
         return False
 
     missing = []
+    _by_fuzzy_only = []   # covered by fuzzy overlap but NOT by its own TC's provenance
     for sc in scenarios:
         raw = getattr(sc, 'title', '') or ''
         if _covered_by_provenance(raw):
@@ -980,8 +981,24 @@ def _assert_chalk_coverage(suite, chalk, log=print):
             continue
         if not _covered(key):
             missing.append(raw)
+        else:
+            # Covered only by fuzzy token overlap with some TC — NOT by a TC built from this
+            # scenario. This is exactly the masking path (D7): a distinct Chalk scenario that
+            # produced no TC of its own can look "covered" by overlapping an unrelated sibling
+            # TC, hiding a silent 3->2 drop. Surface it so the loss is never invisible.
+            _by_fuzzy_only.append(raw)
 
     covered = len(scenarios) - len(missing)
+    if _by_fuzzy_only:
+        log('[CHALK-GUARD] NOTE: %d scenario(s) matched only by fuzzy overlap, not by a TC '
+            'built from them — verify these are genuine merges, not silent drops:'
+            % len(_by_fuzzy_only))
+        for m in _by_fuzzy_only[:10]:
+            log('[CHALK-GUARD]   FUZZY-ONLY: %s' % m[:100])
+        try:
+            suite.chalk_fuzzy_only = list(_by_fuzzy_only)
+        except Exception:
+            pass
     try:
         suite.chalk_coverage = (covered, len(scenarios))
     except Exception:

@@ -538,6 +538,19 @@ _BANNED_CLOSER_PHRASES = (
     ('trigger api', ('trigger api',)),
     ('nsl db tables', ('nsl db tables', 'nbop mig')),
     ('syniverse', ('syniverse',)),
+    # D8 — generic NSL filler ("sends outbound call to downstream system", "processes
+    # response and prepares output"): grounded ONLY by its own verbatim concept, so it is
+    # stripped on any feature whose evidence does not literally use that boilerplate — i.e.
+    # always, since the grounded generator never emits it. A real authored step is exempt
+    # (authored steps bypass this backstop upstream).
+    ('sends outbound call to downstream system', ('sends outbound call to downstream system',)),
+    ('processes response and prepares output', ('processes response and prepares output',)),
+    # Foreign Hotline flow grafted onto a non-hotline scenario: 'transactiontype=sh' is
+    # grounded only when the feature's own evidence is about hotlining (names 'hotline' or
+    # the SH transaction). A genuine hotline feature keeps its steps; a cancel-device-location
+    # scenario that never mentions hotline has this stripped.
+    ('transactiontype=sh', ('transactiontype=sh', 'hotline')),
+    ('transactiontype = sh', ('transactiontype = sh', 'hotline')),
 )
 
 

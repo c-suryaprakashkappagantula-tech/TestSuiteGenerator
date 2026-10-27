@@ -355,6 +355,12 @@ def get_step_chain(sc_title, sc_validation, feature_context, feature_type='', ob
             return _sync_key_info_steps(sc_title, sc_validation, t)
         if _is_ui_flow(t, ctx):
             return _ui_negative_steps(sc_title, sc_validation)
+        # An operation-named NSL/API rejection scenario gets a grounded rejection chain
+        # (send the specific invalid request for THIS operation → assert the specific
+        # rejection), not the generic "Send API request to NSL" negative template.
+        if (_operation_from_scenario(sc_title, sc_validation) or _operation_from_scenario(ctx)) \
+                and not _is_hotline_flow(t, ctx) and not _is_syniverse_flow(t, ctx):
+            return _grounded_api_steps(sc_title, sc_validation, t, ctx)
         return _negative_steps(sc_title, sc_validation, t)
     if _is_rollback(t):
         return _rollback_steps(sc_title, sc_validation, t)
@@ -432,10 +438,20 @@ def get_step_chain(sc_title, sc_validation, feature_context, feature_type='', ob
         if _is_notification_content(t):
             return _notification_content_steps(sc_title, sc_validation)
         return _notification_steps(sc_title, sc_validation)
-    if _is_api_flow(t, ctx):
-        return _api_flow_steps(sc_title, sc_validation)
     if _is_deactivation(t, ctx):
         return _deactivation_steps(sc_title, sc_validation, t)
+
+    # Grounded NSL/API fallthrough (D4): replaces the generic _api_flow_steps filler.
+    # Fires when the scenario (or its feature context) names an operation, or the scenario
+    # is a bare API/request scenario. Steps are grounded in THIS scenario's own operation;
+    # never a foreign canned flow. A request-variant/rejection scenario that no specific
+    # detector claimed lands here too (e.g. "Prepare request variants: …") so it becomes a
+    # grounded rejection TC instead of OAuth/Century/NE-Portal default boilerplate.
+    if (_is_api_flow(t, ctx)
+            or _operation_from_scenario(sc_title, sc_validation)
+            or _operation_from_scenario(ctx)
+            or re.search(r'\brequest\b', t)):
+        return _grounded_api_steps(sc_title, sc_validation, t, ctx)
 
     return _default_workflow_steps(sc_title, sc_validation)
 
@@ -561,15 +577,46 @@ def _is_syniverse_flow(t, ctx):
            ('syniverse' in ctx and any(kw in t for kw in ['activat', 'deactivat', 'change',
                                                            'port-in', 'port in', 'swap']))
 
+def _hotline_is_the_operation(t):
+    """True only when 'hotline' is the scenario's ACTION, not a passing status mention.
+
+    A cancel-device-location scenario that lists non-ACTIVE states — e.g.
+    'non-ACTIVE status (DEACTIVE, HOTLINE, SUSPEND)' — mentions HOTLINE only as one state
+    in an enumeration. That must NOT route the scenario to the Hotline template (D3). The
+    scenario is about hotlining only when another operation does not already own it and
+    the word is not sitting inside a status list.
+    """
+    if 'hotline' not in t:
+        return False
+    # Another named operation owns the scenario → hotline is incidental.
+    if _operation_from_scenario(t) and 'hotline' not in (_operation_from_scenario(t) or ''):
+        return False
+    # 'hotline' only appears inside a parenthesised / comma status enumeration
+    # alongside other line states → it is a status mention, not the operation.
+    for m in re.finditer(r'hotline', t):
+        i = m.start()
+        window = t[max(0, i - 40):i + 40]
+        in_status_list = (
+            ('(' in t[max(0, i - 60):i] and ')' in t[i:i + 60])
+            or re.search(r'(?:deactive|suspend|active|barred)\s*,', window)
+            or re.search(r',\s*(?:deactive|suspend|active|barred)', window)
+            or ('status' in window and ',' in window))
+        if not in_status_list:
+            return True
+    return False
+
+
 def _is_hotline_flow(t, ctx):
     """Detect Hotline flows — these should NOT trigger Syniverse calls."""
-    return ('hotline' in t and 'remove' not in t and 'remove_hotline' not in t and
-            'dehotline' not in t)
+    return (_hotline_is_the_operation(t) and 'remove' not in t and
+            'remove_hotline' not in t and 'dehotline' not in t)
 
 def _is_remove_hotline_flow(t, ctx):
     """Detect Remove Hotline flows — these should NOT trigger Syniverse calls."""
-    return ('remove hotline' in t or 'remove_hotline' in t or 'dehotline' in t or
-            ('hotline' in t and 'remove' in t))
+    if 'remove hotline' in t or 'remove_hotline' in t or 'dehotline' in t:
+        return True
+    # 'hotline' + 'remove' only counts when hotline is the operation, not a status mention.
+    return 'remove' in t and _hotline_is_the_operation(t)
 
 def _is_report(t, ctx):
     return any(kw in t for kw in ['report', 'column', 'csv', 'differential', 'batch', '.gz'])
@@ -1827,6 +1874,130 @@ def _ui_negative_steps(title, validation):
          'NBOP displays appropriate error message to the user'),
         ('Verify no changes were made to subscriber data in NSL',
          'System state unchanged — no partial updates. Line table unmodified'),
+    ]
+
+
+# ── Grounded NSL/API generator (operation-named, no foreign canned flow) ──────
+#
+# Generic tokens that can never be the operation name of a scenario. Mirrors
+# api_step_grounder._STOP_TOKENS so the two agree on what "noise" is, plus the
+# scenario-prose connectors ("is", "deployed", "subscriber", "line", …) that
+# surround the operation in a Chalk sentence.
+_OP_STOP_TOKENS = frozenset({
+    'api', 'apis', 'call', 'calls', 'the', 'a', 'an', 'get', 'post', 'put', 'patch',
+    'delete', 'nsl', 'nbo', 'nbop', 'tmo', 'vzw', 'v1', 'v2', 'v3', 'mno', 'provisioning',
+    'request', 'requests', 'response', 'with', 'valid', 'invalid', 'is', 'are', 'was',
+    'were', 'be', 'been', 'being', 'and', 'or', 'for', 'of', 'to', 'in', 'on', 'at',
+    'by', 'from', 'that', 'this', 'it', 'its', 'as', 'via', 'using', 'use', 'used',
+    'deployed', 'subscriber', 'subscribers', 'line', 'lines', 'status', 'active',
+    'prepare', 'prepared', 'each', 'plus', 'both', 'which', 'exists', 'exist', 'no',
+    'returns', 'return', 'returned', 'stub', 'primed', 'success', 'variants', 'variant',
+    'header', 'headers', 'schema', 'field', 'fields', 'omitting', 'non', 'send', 'sends',
+    'sent', 'when', 'then', 'given', 'scenario', 'test', 'verify', 'validate', 'check',
+    'ensure', 'confirm', 'their', 'sim', 'mdn', 'iccid', 'eid', 'imei', 'account',
+})
+
+# An operation name looks like a hyphenated verb-noun ("cancel-device-location",
+# "fetch-line-details", "activate-subscriber", "change-sim"). Prefer that shape when it
+# is present in the scenario text because it is unambiguously the operation.
+_HYPHEN_OP_RE = re.compile(r'\b([a-z][a-z0-9]+(?:-[a-z0-9]+){1,4})\b', re.I)
+
+
+def _operation_from_scenario(sc_title, sc_validation=''):
+    """Return the operation/endpoint the scenario is about, or '' when none can be read.
+
+    Grounds the step text in the scenario's OWN named operation (D1/D2). Never invents an
+    operation and never falls back to a foreign flow — an empty string means the caller
+    must emit a minimal honest step instead of a canned template.
+    """
+    blob = '%s %s' % (sc_title or '', sc_validation or '')
+    # 1. A hyphenated operation name is the strongest signal.
+    for m in _HYPHEN_OP_RE.finditer(blob):
+        cand = m.group(1)
+        toks = [t for t in re.split(r'[^a-z0-9]+', cand.lower()) if t]
+        # Reject if every piece is noise (e.g. "non-TMO", "t-mobile").
+        if any(t not in _OP_STOP_TOKENS and len(t) > 2 for t in toks):
+            return cand.lower()
+    return ''
+
+
+def _grounded_api_steps(title, validation, t='', ctx=''):
+    """Emit an API/NSL step chain GROUNDED in the scenario's own operation (D1/D2).
+
+    Steps: call the named operation with the scenario's stated inputs → validate its
+    response/status → validate the resulting line/subscriber state the scenario names.
+    When no operation can be read from the scenario, emit a minimal honest chain tied to
+    the scenario's intent — NEVER the '_api_flow_steps' "downstream system" filler and
+    NEVER a foreign canned flow (Hotline/SH/APOLLO_NE/ITMBO/EMM/Syniverse).
+    """
+    val = _sanitize_val(validation, title)
+    op = _operation_from_scenario(title, validation)
+    low = (t or ('%s %s' % (title or '', validation or ''))).lower()
+    # When the scenario itself does not name the operation (a request-variant / rejection
+    # scenario phrased only as "Prepare request variants: …"), the operation under test is
+    # the feature's own operation carried in ctx. Grounding in that is still grounding in
+    # THIS scenario's content — it is the same feature — never a foreign operation.
+    if not op and ctx:
+        op = _operation_from_scenario(ctx)
+    # Rejection intent: the scenario sends a specific invalid request and asserts a specific
+    # rejection. Detected by its own vocabulary, independent of the keyword _is_negative gate.
+    _is_rejection = bool(re.search(
+        r'\b(?:violation|violations|omit|omits|omitting|reject|rejects|rejected|invalid|'
+        r'non-tmo|malformed|missing|schema\s*/?\s*field|error|400|422)\b', low))
+
+    # Concrete line/subscriber states the scenario names — asserted verbatim so the
+    # last step is grounded in the scenario, not a generic "operation completed".
+    _states = [s for s in ('active', 'deactive', 'hotline', 'suspend')
+               if re.search(r'\b%s' % s, low)]
+    state_clause = (' and '.join(s.upper() for s in _states)) if _states else ''
+
+    import re as _re_g
+    _action = _re_g.sub(r'^(?:Validate|Verify|Check|Ensure|Step\s*\d+\s*[-:]?\s*)', '',
+                        title or '', flags=_re_g.IGNORECASE).strip()
+    _action = strip_dangling_tail(truncate_at_word(_action, 120)) if _action else 'this scenario'
+
+    if _is_rejection:
+        # Send the specific invalid request named by the scenario → assert the specific
+        # rejection → confirm no state change. Grounded in the operation when known.
+        op_phrase = ('the %s API' % op) if op else 'the API'
+        return [
+            ('Send to %s the specific invalid request this scenario describes: %s'
+             % (op_phrase, _action),
+             'Invalid request is submitted as the scenario specifies.'),
+            ('Validate %s rejects the request with the error this scenario expects' % op_phrase,
+             val or 'Request is rejected with the specific error the scenario expects '
+                    '(e.g. validation/schema error); no success response is returned.'),
+            ('Validate no line/subscriber state change resulted from the rejected request',
+             'Line/subscriber state is unchanged; the invalid request produced no side effect.'),
+        ]
+
+    if op:
+        call_summary = 'Call the %s API with the request data this scenario specifies' % op
+        call_expected = (val or 'The %s API accepts the request and responds.' % op)
+        resp_summary = ('Validate the %s API response status and body against the scenario'
+                        % op)
+        resp_expected = ('Response status and payload match what the scenario expects for %s.'
+                         % op)
+        if state_clause:
+            state_summary = ('Validate the resulting line/subscriber state for %s (expected: %s)'
+                             % (op, state_clause))
+            state_expected = ('Line/subscriber state reflects the %s outcome (%s).'
+                              % (op, state_clause))
+        else:
+            state_summary = 'Validate the resulting line/subscriber state after %s' % op
+            state_expected = (val or 'Line/subscriber state reflects the %s outcome.' % op)
+        return [
+            (call_summary, call_expected),
+            (resp_summary, resp_expected),
+            (state_summary, state_expected),
+        ]
+
+    # No operation name available — minimal honest chain tied to the scenario's intent.
+    return [
+        ('Send the request this scenario describes: %s' % _action,
+         'Request is submitted as the scenario specifies.'),
+        ('Validate the response against the scenario',
+         val or 'Response matches what the scenario expects.'),
     ]
 
 
