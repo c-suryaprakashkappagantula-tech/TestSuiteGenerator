@@ -34,10 +34,24 @@ def _authored_tc():
 
 
 def _grounded_tc():
-    """A generated-from-Chalk provisioning TC (no authored provenance)."""
+    """A generated-from-Chalk NSL-provisioning TC (no authored provenance).
+
+    GROUNDED-ONLY closer gate (fix/closer-grounding): the legitimate NSL closer is
+    injected only when THIS feature's own evidence references a SPECIFIC NSL/NBOP
+    data-plane concept the closer asserts. iter-3 tightened the grounding signal so a
+    generic "provisioning"/"nbop"/"nsl" word no longer grounds the closer (that generic
+    admission was what kept fabricated NBOP_MIG/Century/Service-Grouping content on the
+    dirty API features). A genuinely grounded NSL-provisioning TC carries the specific
+    concept in its own step text — here the activation verifies the NBOP_MIG DB tables
+    directly, so the legitimate NBOP_MIG closer must still be appended (do NOT
+    blanket-delete).
+    """
     steps = [
-        TestStep(step_num=1, summary='Trigger the wearable activation API.', origin='grounded'),
-        TestStep(step_num=2, summary='Verify the line is activated.', origin='grounded'),
+        TestStep(step_num=1, summary='Trigger the wearable activation API to provision the line on NSL.',
+                 origin='grounded'),
+        TestStep(step_num=2,
+                 summary='Verify the line is activated and the NBOP_MIG tables are updated in NBOP.',
+                 origin='grounded'),
     ]
     return TestCase(sno='TC_002', summary='Activate wearable line', steps=steps)
 

@@ -1573,6 +1573,22 @@ def _build_scenario_tc(
                 existing_step_texts=_existing_texts,
                 max_steps=3,
             )
+            # GROUNDED-ONLY gate (ROOT-CAUSE fix): the downstream producer fabricates
+            # Service-Grouping / Century-Report / Syniverse / NBOP-MIG / Genesis steps
+            # purely from an operation-alias title match. Emit them ONLY when the NSL/
+            # NBOP provisioning concept is grounded in THIS feature's own evidence (Jira
+            # summary/description/AC + the scenario's own title/validation/steps). A plain
+            # API feature whose evidence never mentions the concept gets NONE. Reuses the
+            # same grounding predicate as the pattern-library closer gate.
+            _ds_evidence = ' '.join([
+                (getattr(jira, 'summary', '') or '') if jira else '',
+                (getattr(jira, 'description', '') or '') if jira else '',
+                (getattr(jira, 'acceptance_criteria', '') or '') if jira else '',
+                feature_name or '', scenario.title or '', scenario.validation or '',
+                ' '.join(s.summary or '' for s in steps),
+                ' '.join(getattr(s, 'expected', '') or '' for s in steps),
+            ])
+            _ds_steps = qmetry_pattern_library.ground_downstream_steps(_ds_steps, _ds_evidence)
             for _ds_summary, _ds_expected in _ds_steps:
                 steps.append(TestStep(
                     step_num=len(steps) + 1,
@@ -1974,6 +1990,18 @@ def _build_negative_tc(
                 existing_step_texts=_existing_neg,
                 max_steps=1,
             )
+            # GROUNDED-ONLY gate (ROOT-CAUSE fix): the negative downstream assertion
+            # names Service Grouping / Syniverse / external systems. Emit it ONLY when the
+            # NSL/NBOP provisioning concept is grounded in THIS feature's own evidence.
+            _ds_neg_evidence = ' '.join([
+                (getattr(jira, 'summary', '') or '') if jira else '',
+                (getattr(jira, 'description', '') or '') if jira else '',
+                (getattr(jira, 'acceptance_criteria', '') or '') if jira else '',
+                feature_name or '', condition or '',
+                ' '.join(s.summary or '' for s in steps),
+                ' '.join(getattr(s, 'expected', '') or '' for s in steps),
+            ])
+            _ds_neg = qmetry_pattern_library.ground_downstream_steps(_ds_neg, _ds_neg_evidence)
             for _ds_summary, _ds_expected in _ds_neg:
                 steps.append(TestStep(
                     step_num=len(steps) + 1,

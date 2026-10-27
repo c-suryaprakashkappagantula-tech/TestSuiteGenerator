@@ -461,6 +461,32 @@ def extract_dimensions(
             _ctx_check = ('%s %s' % (_feature_title, _desc)).lower()
             _is_provisioning = any(kw in _ctx_check for kw in _provisioning_kws)
 
+            # GROUNDED-ONLY gate (ROOT-CAUSE fix): the D1 state-transition and D2
+            # partial-failure matrices generate Service-Grouping / Century-Report /
+            # NBOP-MIG / TRANSACTION_HISTORY / Syniverse / TMO-Genesis scenarios from the
+            # per-system must_call chain. Historically they fired whenever the title
+            # matched a provisioning keyword (_is_provisioning) — the SAME title-only
+            # loophole that fabricated garbage onto plain API features. Require the NSL/
+            # NBOP provisioning concept to be grounded in THIS feature's own evidence
+            # (Jira summary/description/AC + Chalk feature_title/scope/rules). A plain API
+            # feature whose evidence never mentions the concept gets NO matrix TCs.
+            try:
+                from . import qmetry_pattern_library as _qpl
+                _ac_evi = (getattr(jira, 'acceptance_criteria', '') or '') if jira else ''
+                try:
+                    _chalk_evi = _chalk_obligation_text(chalk) if chalk is not None else ''
+                except Exception:
+                    _chalk_evi = ''
+                _matrix_evidence = ' '.join([
+                    _feature_title or '', _desc or '', _ac_evi or '', _chalk_evi or '',
+                ])
+                _concept_grounded = _qpl.concept_grounded(_matrix_evidence)
+            except Exception:
+                # Fail safe: if the grounding check cannot run, do NOT inject (the
+                # whole point is to stop fabricating ungrounded provisioning steps).
+                _concept_grounded = False
+            _is_provisioning = _is_provisioning and _concept_grounded
+
             if _is_provisioning:
                 _contract = resolve_operation(_feature_title, description=_ctx_check)
                 _state_tcs = generate_state_transition_matrix(

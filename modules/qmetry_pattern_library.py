@@ -461,17 +461,200 @@ def _tc_is_mediation(tc, feature_context: str = '') -> bool:
     return is_mediation_feature(*parts)
 
 
+# ── Grounded-only closer gate (ROOT-CAUSE fix) ────────────────────────────────
+# The universal provisioning CLOSER (Century-DB trace → NBOP_MIG_* DB-table
+# validation → Genesis/NE-Portal verify) asserts a set of NSL/NBOP provisioning
+# CONCEPTS. Historically the closer was injected whenever a feature's *title*
+# matched a provisioning keyword (is_provisioning_feature), with authored/mediation
+# TCs carved out as exceptions. That is default-ON with a blocklist, and it
+# fabricated NBOP_MIG/TRANSACTION_HISTORY/Service-Grouping/Century/NE-Portal steps
+# onto plain API features (4497/4574/4575/4576/4611) whose own evidence never
+# mentions those concepts.
+#
+# The fix inverts the policy to GROUNDED-ONLY: a canned closer may be injected into
+# a TC ONLY when the NSL/NBOP provisioning concept is actually present in THIS
+# feature's own evidence (Chalk scope/rules, Jira AC, QMetry-authored/generated
+# steps for this feature). Grounding is the PRIMARY mechanism; a per-phrase banned
+# backstop is only a final safety net. Both predicates are pure, case-insensitive
+# and deterministic (no I/O, no randomness).
+
+# Concept keyword groups that ground the canned closer at the FEATURE level. These
+# are the SPECIFIC NSL/NBOP data-plane concepts the closer/downstream steps assert —
+# the DB-table family, the Century/Service-Grouping/NE-Portal/Genesis verification
+# surfaces and the Syniverse/"NSL processes request"/"Trigger API" flow markers.
+#
+# ROOT-CAUSE FIX (iter-3): the generic tokens 'provision', bare 'nbop' and bare 'nsl'
+# were REMOVED from this set. Every MWTGPROV feature's Jira/Chalk evidence says
+# "provisioning" (and usually "nbop"/"nsl"), so those generic tokens made
+# concept_grounded() return True for every provisioning feature and the StepAssembler
+# backstop then kept the fabricated NBOP_MIG/Service-Grouping/Century/NE-Portal steps
+# on plain API features (4574/4575/4576). A feature is now "grounded" only when its own
+# evidence references one of these SPECIFIC data-plane concepts — not a generic
+# "provisioning" word. All keywords are stored in normalized form (underscores ->
+# spaces) and matched against the normalized evidence blob, so 'nbop mig' catches both
+# 'NBOP_MIG' and 'NBOP MIG' in the evidence.
+_CLOSER_CONCEPT_KEYWORDS = (
+    'nbop mig', 'nbop_mig', 'transaction history', 'line history',
+    'service grouping', 'century', 'ne portal', 'ne-portal', 'genesis',
+    'syniverse', 'trigger api', 'nsl processes request', 'nbop line summary',
+    'nsl db tables',
+)
+
+# Per-phrase banned backstop. Each entry maps a banned surface phrase (as it would
+# appear in an emitted step) to the set of concept keywords that would GROUND it. A
+# step carrying a banned phrase is only allowed when at least one of its grounding
+# keywords appears in the feature's own evidence blob.
+#
+# ROOT-CAUSE FIX (iter-3): each banned phrase is now grounded ONLY by its OWN specific
+# data-plane concept — the generic 'provision'/'nbop'/'nsl' tokens were removed from
+# every grounding set. Previously those generic tokens re-admitted exactly the
+# fabricated NBOP_MIG/Service-Grouping/Century/NE-Portal content on MWTGPROV features
+# (whose evidence always contains "provisioning"/"nbop"/"nsl"). Now an NBOP_MIG step
+# survives only when the feature's evidence actually names the NBOP-MIG tables, a
+# Century step only when the evidence names Century, and so on.
+#
+# Phrases, step text AND the grounding keywords are all normalized (underscores ->
+# spaces, whitespace collapsed) before matching, so a single entry catches BOTH the
+# pattern-library closer surface ('NBOP_MIG_LINE', 'TRANSACTION_HISTORY') and the
+# integration-contract downstream surface ('NBOP MIG tables', 'Transaction History'),
+# and a grounding keyword like 'nbop mig' matches evidence written as either
+# 'NBOP_MIG' or 'NBOP MIG'.
+_BANNED_CLOSER_PHRASES = (
+    ('nbop mig', ('nbop mig',)),
+    # TRANSACTION_HISTORY / LINE_HISTORY are member tables of the NBOP_MIG family, so a
+    # feature grounded on the NBOP-MIG tables legitimately carries them inside the single
+    # NBOP_MIG DB-table-validation step. They are ALSO grounded standalone by their own
+    # name — but NOT by a generic 'provision'/'nbop'/'nsl' word.
+    ('transaction history', ('transaction history', 'nbop mig')),
+    ('line history', ('line history', 'nbop mig')),
+    ('service grouping', ('service grouping',)),
+    ('century report', ('century',)),
+    ('century db', ('century',)),
+    ('ne portal', ('ne portal', 'ne-portal')),
+    ('genesis portal', ('genesis',)),
+    ('tmo genesis', ('genesis',)),
+    ('nbop line summary', ('nbop line summary', 'nbop mig')),
+    ('nsl processes request', ('nsl processes request',)),
+    ('trigger api', ('trigger api',)),
+    ('nsl db tables', ('nsl db tables', 'nbop mig')),
+    ('syniverse', ('syniverse',)),
+)
+
+
+def _normalize_phrase(text: str) -> str:
+    """Lowercase and collapse underscores/whitespace so 'NBOP_MIG_LINE' and
+    'NBOP MIG tables' both normalize to a space-delimited form for matching."""
+    return re.sub(r'[\s_]+', ' ', (text or '').lower()).strip()
+
+
+def _closer_concept_grounded(evidence_blob: str) -> bool:
+    """PRIMARY gate: True when the feature's own evidence references a SPECIFIC
+    NSL/NBOP data-plane concept the canned closer asserts.
+
+    *evidence_blob* is the concatenation of this feature's Chalk scope/rules, Jira AC,
+    feature text and the TC's own summary/step text. It is normalized (underscores ->
+    spaces, whitespace collapsed) so underscore table tokens like 'NBOP_MIG' match the
+    'nbop mig' concept keyword. A generic "provisioning" word no longer grounds the
+    closer — only the specific DB-table / Century / Service-Grouping / NE-Portal /
+    Genesis / Syniverse / "Trigger API" concepts do (see _CLOSER_CONCEPT_KEYWORDS).
+    """
+    blob = _normalize_phrase(evidence_blob)
+    if not blob:
+        return False
+    return any(kw in blob for kw in _CLOSER_CONCEPT_KEYWORDS)
+
+
+def _step_is_banned_and_ungrounded(step_text: str, evidence_blob: str) -> bool:
+    """BACKSTOP: True when *step_text* carries a banned provisioning phrase whose
+    SPECIFIC grounding concept is absent from *evidence_blob*.
+
+    Used as a final per-step safety net AFTER the primary grounding gate: even if the
+    gate passes on some concept, an individual closer/downstream step that asserts a
+    DIFFERENT banned concept not present in the evidence is still skipped. Both the step
+    text and the evidence blob are normalized before matching so an 'NBOP_MIG' step is
+    grounded only when the evidence itself names the NBOP-MIG tables (not by a generic
+    "provisioning" word).
+    """
+    s = _normalize_phrase(step_text)
+    blob = _normalize_phrase(evidence_blob)
+    for phrase, grounding_kws in _BANNED_CLOSER_PHRASES:
+        if phrase in s and not any(kw in blob for kw in grounding_kws):
+            return True
+    return False
+
+
+def concept_grounded(evidence_blob: str) -> bool:
+    """Public PRIMARY grounding predicate: True when *evidence_blob* references the
+    NSL/NBOP provisioning concept the canned closer / downstream-verification steps
+    assert. Thin public wrapper over ``_closer_concept_grounded`` so other producers
+    (e.g. the dimension_extractor D1/D2 state/partial-failure matrix injection) can gate
+    on the SAME grounding signal. Pure, case-insensitive, deterministic.
+    """
+    return _closer_concept_grounded(evidence_blob)
+
+
+def ground_downstream_steps(steps, evidence_blob: str):
+    """Grounding gate for the integration-contract downstream-verification producer.
+
+    The integration-contract step generator (``integration_contract.build_downstream_
+    verification_steps``, resolved via ``dimension_extractor.resolve_operation`` and the
+    per-system ``must_call`` chain) fabricates Service-Grouping / Century-Report /
+    Syniverse / NBOP-MIG / TMO-Genesis verification steps onto a TC purely from an
+    operation-alias title match — the SAME default-ON-with-exceptions policy the closer
+    path used to have. For plain API features (4497/4574/4575/4576/4611) whose own
+    evidence never mentions the NSL/NBOP provisioning concept, those steps are fabricated
+    garbage.
+
+    This applies the SAME grounded-only policy as the closer gate:
+
+    - PRIMARY gate (``_closer_concept_grounded``): if the feature's own evidence blob
+      (Chalk scope/rules + Jira AC + feature text + the TC's own step/validation text)
+      does NOT reference the NSL/NBOP provisioning concept, return ``[]`` — emit NO
+      downstream verification steps. This is the root-cause fix for the dirty features.
+    - BACKSTOP (``_step_is_banned_and_ungrounded``): even when the primary gate passes
+      on some concept, drop any individual step whose banned phrase (NBOP_MIG / Service
+      Grouping / Century / Transaction/Line History / NE Portal / Genesis / Syniverse)
+      is NOT itself grounded in the evidence.
+
+    *steps* is a list of ``(summary, expected)`` tuples (the shape
+    ``build_downstream_verification_steps`` returns). Returns the grounded subset, same
+    shape. A genuinely grounded NSL-provisioning feature keeps its legitimate steps.
+    Pure, case-insensitive, deterministic — no I/O.
+    """
+    if not steps:
+        return []
+    if not _closer_concept_grounded(evidence_blob):
+        return []
+    kept = []
+    for item in steps:
+        if isinstance(item, (tuple, list)) and len(item) >= 2:
+            summ, exp = item[0], item[1]
+        else:
+            summ, exp = str(item), ''
+        if _step_is_banned_and_ungrounded('%s %s' % (summ or '', exp or ''), evidence_blob):
+            continue
+        kept.append(item)
+    return kept
+
+
 def enrich_test_case(tc, feature_context: str = '',
                      add_closers: bool = True,
                      fix_preconditions: bool = True,
                      pair_century: bool = False,
+                     feature_evidence: str = '',
                      log=None) -> object:
     """Enrich one TestCase object in place with human patterns. Returns it.
 
-    - add_closers: append century-trace + DB-table + Genesis verify (only for
-      provisioning features, and only if not already present).
+    - add_closers: append century-trace + DB-table + Genesis verify, but ONLY when
+      the NSL/NBOP provisioning concept is grounded in THIS feature's own evidence
+      (and not already present). See _closer_concept_grounded.
     - fix_preconditions: overwrite filler/empty preconditions with grounded ones.
     - pair_century: insert Century-report validation after Trigger <API> steps.
+    - feature_evidence: lowercased-able blob of the feature's own evidence (Chalk
+      scope/rules + Jira AC + feature text), built once by enrich_suite and passed
+      down. Defaults empty → the grounding blob then falls back to ctx + the TC's
+      own step text only (zero behavioural change for callers that pass evidence on
+      the TC/context, which is how every in-repo caller works).
 
     Duck-typed: works on the V8 TestCase (steps=List[TestStep], preconditions:str)
     without importing it, so there is no circular-import risk.
@@ -501,25 +684,41 @@ def enrich_test_case(tc, feature_context: str = '',
             steps = [_make_step(i, s, e) for i, (s, e) in enumerate(paired, 1)]
             changed.append('century-pairing')
 
-    # 3. Closers — skip negatives, non-provisioning features, QMetry-authored TCs,
-    #    AND Mediation/PRR TCs.
-    #    - A QMetry-authored TC's steps ARE the ground truth (authored verbatim from the
-    #      linked subtask's QMetry folder); appending the mined NBOP_MIG_*/Century/Genesis
-    #      closer would fabricate DB-table verification steps (NBOP_MIG_*, *_HISTORY) that
-    #      are absent from the authored suite.
-    #    - A Mediation/PRR TC validates the Amdocs billing/PRR flow, not the NSL
-    #      provisioning stack, so the NSL closer is fabricated for it too (a "wearable
-    #      Audit Report" feature title matches a provisioning hint even though its TCs are
-    #      PRR/Amdocs mediation). Detected from the TC's own step content.
-    #    Only grounded (Chalk-generated) NSL-provisioning TCs get the house-style closer.
+    # 3. Closers — GROUNDED-ONLY policy (ROOT-CAUSE fix).
+    #    The canned NSL provisioning CLOSER (Century-DB trace → NBOP_MIG_* DB-table
+    #    validation → Genesis/NE-Portal verify) is injected ONLY when the NSL/NBOP
+    #    provisioning concept is actually grounded in THIS feature's own evidence
+    #    (Chalk scope/rules + Jira AC + feature text, threaded in as feature_evidence,
+    #    plus the TC's own summary/step text). A plain API feature whose evidence never
+    #    mentions NSL/NBOP/Service-Grouping/Century/NE-Portal gets NO closer — this is
+    #    the fix for 4497/4574/4575/4576/4611, which previously passed the title-only
+    #    is_provisioning_feature heuristic and had DB-table steps fabricated onto them.
+    #    The prior guards stay in the AND-chain:
+    #    - negative category and non-provisioning features are excluded;
+    #    - QMetry-authored TCs keep their authored steps (ground truth, no closer);
+    #    - Mediation/PRR TCs validate the Amdocs billing flow, not NSL, so no NSL closer.
+    #    _closer_concept_grounded is the PRIMARY gate; _step_is_banned_and_ungrounded is
+    #    a final per-step backstop that skips any individual banned step whose specific
+    #    concept is not grounded, even if the primary gate passed on a different concept.
+    step_text = ' '.join(
+        '%s %s' % (getattr(st, 'summary', '') or '', getattr(st, 'expected', '') or '')
+        for st in steps)
+    evidence_blob = (' '.join([
+        feature_evidence or '', ctx, summary, step_text,
+    ])).lower()
     if (add_closers and 'negative' not in category
             and is_provisioning_feature(ctx) and not _tc_has_db_closer(tc)
             and not _tc_is_qmetry_authored(tc)
-            and not _tc_is_mediation(tc, feature_context)):
+            and not _tc_is_mediation(tc, feature_context)
+            and _closer_concept_grounded(evidence_blob)):
         start = len(steps)
         op = operation_label(ctx)
-        for j, (s, e) in enumerate(provisioning_closer(feature_context, op), 1):
-            _cl = _make_step(start + j, s, e)
+        for s, e in provisioning_closer(feature_context, op):
+            # Backstop: skip any closer step asserting a banned concept that is not
+            # grounded in this feature's evidence.
+            if _step_is_banned_and_ungrounded('%s %s' % (s, e), evidence_blob):
+                continue
+            _cl = _make_step(len(steps) + 1, s, e)
             if hasattr(_cl, 'origin'):
                 _cl.origin = 'closer'
             steps.append(_cl)
@@ -551,6 +750,22 @@ def enrich_suite(suite, feature_context: str = '',
     gate. Never raises — a bad TC is skipped, not fatal.
     """
     fc = feature_context or getattr(suite, 'feature_title', '') or getattr(suite, 'feature_id', '')
+    # Build the feature-evidence blob ONCE from the suite's own Chalk/Jira evidence.
+    # This is the feature's own evidence (Chalk scope/rules via scope/rules, Jira AC,
+    # feature text); the grounded-only closer gate reads it per TC. Every attribute is
+    # guarded so a partially-populated suite never raises.
+    _ac = getattr(suite, 'acceptance_criteria', None) or []
+    try:
+        _ac_text = '\n'.join(str(a) for a in _ac)
+    except Exception:
+        _ac_text = ''
+    feature_evidence = ' '.join([
+        fc or '',
+        _ac_text,
+        getattr(suite, 'scope', '') or '',
+        getattr(suite, 'rules', '') or '',
+        getattr(suite, 'feature_desc', '') or '',
+    ])
     n_closers = n_pre = 0
     for tc in getattr(suite, 'test_cases', []) or []:
         try:
@@ -558,7 +773,8 @@ def enrich_suite(suite, feature_context: str = '',
             before_pre = getattr(tc, 'preconditions', '')
             enrich_test_case(tc, feature_context=fc, add_closers=add_closers,
                              fix_preconditions=fix_preconditions,
-                             pair_century=pair_century, log=None)
+                             pair_century=pair_century,
+                             feature_evidence=feature_evidence, log=None)
             if len(getattr(tc, 'steps', []) or []) > before_steps:
                 n_closers += 1
             if getattr(tc, 'preconditions', '') != before_pre:
