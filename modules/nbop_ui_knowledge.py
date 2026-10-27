@@ -1143,13 +1143,28 @@ def generate_ui_steps(feature_name: str, description: str = '',
         _target = _re_vis.split(
             r'\s+(?:menu\s+is|is|are|should|displays?|loads?|reflects?|must)\b',
             _target, maxsplit=1)[0].strip()
-        _target = strip_dangling_tail(truncate_at_word(_target, 80)) if _target else 'the feature'
+        # Preserve the quoted option and its "under <parent>" so the grounded
+        # assertion can name both (prevents the double-truncate-and-graft that
+        # produced "...exists under is visible, correctly labeled, and accessible").
+        _quoted = _re_vis.search(
+            r"['\"\u2018\u2019\u201c\u201d]([^'\"\u2018\u2019\u201c\u201d]{3,70})"
+            r"['\"\u2018\u2019\u201c\u201d]", scenario_title)
+        _parent = _re_vis.search(r'\bunder\s+([A-Za-z][\w /&-]{2,40})', scenario_title)
+        _parent_name = _parent.group(1).strip().rstrip('. ') if _parent else ''
+        _subject = _quoted.group(1).strip() if _quoted else _target
+        _subject = strip_dangling_tail(truncate_at_word(_subject, 80)) if _subject else 'the feature'
         _nav = get_navigation_path(_target)
+        # GROUNDED assertion built as a complete sentence and trimmed ONCE — never a
+        # fixed phrase grafted onto a truncated title fragment.
+        from .step_templates import _grounded_ui_visibility_assertion
+        _v_summary, _v_expected = _grounded_ui_visibility_assertion(
+            scenario_title, _subject, parent=_parent_name, nav=_nav)
+        _subj_disp = _re_vis.sub(r'^(?:the|a|an)\s+', '', _subject, flags=_re_vis.IGNORECASE).strip() or _subject
         return [
             ('Launch NBOP and search subscriber by MDN', 'Subscriber profile loaded'),
-            ('Navigate: %s' % _nav, 'Screen loads with the expected fields and controls'),
-            ('Verify %s is visible, correctly labeled, and accessible' % truncate_at_word(_target, 70),
-             'Element is present, enabled, and interactive'),
+            ('Navigate: %s' % _nav,
+             'The %s screen loads so the %s can be inspected' % (_nav, _subj_disp)),
+            (_v_summary, _v_expected),
         ]
 
     if intent == 'data_verify':

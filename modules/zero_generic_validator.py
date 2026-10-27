@@ -60,6 +60,25 @@ GENERIC_STEP_PATTERNS = [
     # Chalk section header contamination — these must never appear as step text or expected results
     re.compile(r'Scenario #\s*Test Scenario', re.IGNORECASE),
     re.compile(r'^(Negative|Positive|Edge|Regression) Scenarios\s*:', re.IGNORECASE),
+    # UI-visibility generic filler — these phrases say nothing about the scenario's
+    # specific target/state and must never be the whole assertion of a step or an
+    # expected result. Substring (search) match: the phrase is banned wherever it
+    # appears as the assertion, including grafted onto a title fragment.
+    re.compile(r'expected fields and controls', re.IGNORECASE),
+    re.compile(r'present,\s*enabled,\s*and\s*interactive', re.IGNORECASE),
+    re.compile(r'visible,\s*correctly\s*labeled,\s*and\s*accessible', re.IGNORECASE),
+    re.compile(r'sends?\s+outbound\s+call\s+to\s+downstream', re.IGNORECASE),
+]
+
+# UI-visibility filler phrases checked with ``search`` (not ``match``) so they are
+# caught even when grafted onto a title fragment (e.g. "...exists under is visible,
+# correctly labeled, and accessible"). Kept separate from GENERIC_STEP_PATTERNS,
+# which are anchored with ``match``.
+_UI_FILLER_SEARCH_PATTERNS = [
+    re.compile(r'expected fields and controls', re.IGNORECASE),
+    re.compile(r'present,\s*enabled,\s*and\s*interactive', re.IGNORECASE),
+    re.compile(r'visible,\s*correctly\s*labeled,\s*and\s*accessible', re.IGNORECASE),
+    re.compile(r'sends?\s+outbound\s+call\s+to\s+downstream', re.IGNORECASE),
 ]
 
 # Patterns indicating placeholder field references
@@ -147,6 +166,19 @@ def validate_suite(suite: TestSuite, log: Callable = print) -> ValidationResult:
                 if pattern.match(expected_text):
                     violation = 'TC %s Step %s: Generic expected result: "%s"' % (
                         tc_id, step.step_num, expected_text[:60])
+                    result.violations.append(violation)
+                    result.passed = False
+                    break
+
+            # UI-visibility filler — banned wherever it appears (summary OR expected),
+            # including grafted onto a truncated title fragment.
+            for pattern in _UI_FILLER_SEARCH_PATTERNS:
+                where = ('summary' if pattern.search(step_text)
+                         else 'expected' if pattern.search(expected_text) else None)
+                if where:
+                    bad = step_text if where == 'summary' else expected_text
+                    violation = 'TC %s Step %s: Generic UI filler in %s: "%s"' % (
+                        tc_id, step.step_num, where, bad[:60])
                     result.violations.append(violation)
                     result.passed = False
                     break
