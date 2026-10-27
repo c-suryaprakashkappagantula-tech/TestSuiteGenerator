@@ -380,6 +380,26 @@ def get_step_chain(sc_title, sc_validation, feature_context, feature_type='', ob
     if _is_ui_network_reset(t, ctx):
         return _ui_network_reset_steps(sc_title, sc_validation, t)
 
+    # NE LNP-customer-name 25-char name-trim feature (D-C). These port-in scenarios are NOT
+    # subscriber activations and must not become the generic "Call the port-in API" chain —
+    # route to the grounded name-trim generator so each name-part shape differs.
+    if _is_lnp_name_trim(t, ctx):
+        return _lnp_name_trim_steps(sc_title, sc_validation, t)
+
+    # Operation-named NSL/API scenario on an API feature that only INCIDENTALLY mentions
+    # NBOP (D-A). When the scenario (or its feature ctx) names a real NSL/API operation and
+    # the feature is an NSL/NE/NSLNM API feature, route to the grounded API generator so the
+    # steps name the actual operation (e.g. send-ota-mdn) instead of generic NBOP UI-nav
+    # filler — UNLESS the scenario genuinely is a UI-visibility/access-control check, which
+    # keeps a UI chain (handled by _is_ui_flow below, but named specifically in the
+    # _ui_flow_steps fallback).
+    if (not _is_ui_visibility_scenario(t)
+            and _is_api_nsl_feature(ctx)
+            and (_operation_from_scenario(sc_title, sc_validation) or _operation_from_scenario(ctx))
+            and not _is_hotline_flow(t, ctx)
+            and not _is_syniverse_flow(t, ctx)):
+        return _grounded_api_steps(sc_title, sc_validation, t, ctx)
+
     # UI flow takes priority — prevents API templates from firing on
     # NBOP features that mention "activate", "port", "hotline" etc.
     if _is_ui_flow(t, ctx):
@@ -508,8 +528,35 @@ def _is_rollback(t):
 def _is_swap_mdn(t, ctx):
     return 'swap' in t and ('mdn' in t or 'esim' in t or 'psim' in t or 'swap' in ctx)
 
+def _is_lnp_name_trim(t, ctx):
+    """Detect the NE LNP-customer-name / 25-char name-trim feature (MWTGPROV-4576).
+
+    The thing under test is NE concatenating firstName + lastName, splitting at the first
+    space, trimming each part to 25 chars, re-joining, and TMO no longer rejecting with
+    GENS-0005. Scenarios are phrased as a port-in "reaching NE with a ... name ...". These
+    are NE name-handling scenarios, NOT subscriber activations, so they must not route to
+    the generic activation flow.
+    """
+    blob = '%s %s' % (t or '', ctx or '')
+    return (
+        'gens-0005' in blob
+        or '25-char' in blob or '25 char' in blob or '25-character' in blob
+        or 'lnp customer name' in blob or 'lnp name' in blob
+        or ('name' in t and re.search(r'\breaches?\s+ne\b|\breaching\s+ne\b', t))
+        or ('name' in t and ('name part' in t or 'name-part' in t or 'first name' in t
+                             or 'last name' in t or 'business name' in t))
+    ) and ('name' in blob)
+
+
 def _is_activation(t, ctx):
-    return any(kw in t for kw in ['activat', 'port-in']) and 'deactivat' not in t
+    if 'deactivat' in t:
+        return False
+    # NE LNP name-trim scenarios mention "port-in activation" but are NOT subscriber
+    # activations — they exercise the 25-char name concatenation/split/trim rule. Do not
+    # claim them here; they route to the grounded name-trim generator.
+    if _is_lnp_name_trim(t, ctx):
+        return False
+    return any(kw in t for kw in ['activat', 'port-in'])
 
 def _is_port_out(t, ctx):
     """Detect Port-Out scenarios (Solicited, Unsolicited, Update Port-Out)."""
@@ -591,16 +638,37 @@ def _hotline_is_the_operation(t):
     # Another named operation owns the scenario → hotline is incidental.
     if _operation_from_scenario(t) and 'hotline' not in (_operation_from_scenario(t) or ''):
         return False
-    # 'hotline' only appears inside a parenthesised / comma status enumeration
-    # alongside other line states → it is a status mention, not the operation.
-    for m in re.finditer(r'hotline', t):
-        i = m.start()
-        window = t[max(0, i - 40):i + 40]
+    # 'hotline' counts as the operation ONLY when the scenario's verb is actually hotlining
+    # (e.g. "enable/add hotline", "hotline the line"). A bare mention of a HOTLINE *status*
+    # must not route here. We treat each 'hotline'/'hotlined' occurrence as an incidental
+    # status mention when it sits in a status enumeration (parenthesised/comma), OR is a
+    # slash/"or"-joined status adjective (e.g. "suspended/hotlined", "disconnected or
+    # hotlined"), OR is adjacent to other non-ACTIVE status words in the scan window.
+    _status_word = r'(?:deactive|disconnect(?:ed)?|suspend(?:ed)?|active|barred)'
+    for m in re.finditer(r'hotlin(?:e|ed|ing)', t):
+        i, j = m.start(), m.end()
+        window = t[max(0, i - 40):j + 40]
+        # slash/"or"/"and"-joined status adjective immediately around the token
+        edge = t[max(0, i - 15):min(len(t), j + 15)]
+        slash_or_joined = bool(
+            re.search(_status_word + r'\s*[/]\s*hotlin', edge)
+            or re.search(r'hotlin\w*\s*[/]\s*' + _status_word, edge)
+            or re.search(_status_word + r'\s+(?:or|and)\s+hotlin', edge)
+            or re.search(r'hotlin\w*\s+(?:or|and)\s+' + _status_word, edge))
         in_status_list = (
-            ('(' in t[max(0, i - 60):i] and ')' in t[i:i + 60])
-            or re.search(r'(?:deactive|suspend|active|barred)\s*,', window)
-            or re.search(r',\s*(?:deactive|suspend|active|barred)', window)
-            or ('status' in window and ',' in window))
+            ('(' in t[max(0, i - 60):i] and ')' in t[j:j + 60])
+            or re.search(_status_word + r'\s*,', window)
+            or re.search(r',\s*' + _status_word, window)
+            or ('status' in window and ',' in window)
+            or slash_or_joined
+            # any other non-ACTIVE status word in the window → incidental status mention
+            or bool(re.search(_status_word, window)))
+        # the scenario's own verb is hotlining → this IS the operation
+        verb_is_hotline = bool(re.search(
+            r'\b(?:enable|add|apply|place|set|trigger|submit|perform|do|the)\s+(?:a\s+)?hotlin'
+            r'|\bhotline\s+(?:the\s+)?(?:line|subscriber|mdn|device)', edge))
+        if verb_is_hotline:
+            return True
         if not in_status_list:
             return True
     return False
@@ -722,6 +790,28 @@ def _is_api_flow(t, ctx):
                                    'retrieve', 'fetch'])
 
 
+def _is_api_nsl_feature(ctx):
+    """True when the feature context names an NSL/NE/NSLNM API feature (not a pure UI feature)."""
+    return any(kw in ctx for kw in ('nslnm', ' nsl', 'nsl ', 'nsl,', 'nsl]', ' ne', 'ne,',
+                                    'ne]', 'apollo', 'send-ota-mdn', 'api'))
+
+
+def _is_ui_visibility_scenario(t):
+    """True when the scenario is a GENUINE UI-visibility / access-control check — a new
+    menu/group/option exists under a parent, is visible, is accessible by role, etc.
+
+    These stay on a UI chain (but a SPECIFIC, named one). Distinguished from operation
+    scenarios like 'a line is ACTIVE and the agent submits <operation>' which merely mention
+    NBOP but are really exercising an API operation.
+    """
+    return bool(re.search(
+        r'\b(?:menu|group|option|tab|button|link|screen|page|field)\b.*\b(?:exists?|visible|'
+        r'accessible|displayed|appears?|present|shown|labeled)\b', t)
+        or re.search(r'\bexists?\s+under\b', t)
+        or ('visible' in t and ('menu' in t or 'option' in t or 'group' in t))
+        or ('accessible' in t and ('role' in t or 'menu' in t or 'option' in t)))
+
+
 # ── Step chain templates (from V6 pipeline + real samples) ──
 
 def _swap_mdn_steps(title, validation, t):
@@ -828,6 +918,91 @@ def _activation_steps(title, validation, t):
          'NBOP Line Summary shows correct IMSI matching Syniverse CreateSubscriber call. Wholesale Plan assigned correctly'),
     ]
     return steps
+
+
+def _lnp_name_trim_steps(title, validation, t):
+    """NE LNP-customer-name 25-char trim (MWTGPROV-4576), grounded per-scenario.
+
+    The feature: NE concatenates firstName + ' ' + lastName, splits at the FIRST space into
+    two parts, trims each part to 25 chars when it exceeds, re-joins with a single space, and
+    TMO then validates each part against 25 chars and no longer rejects with GENS-0005. The
+    rule is NE-ONLY and TMO port-in only — VZW port-ins are UNCHANGED (no 25-char trim).
+
+    Each scenario is differentiated by its own name-part SHAPE, read from the title:
+      - first+last pair → concatenate/split/trim both parts;
+      - single business name → one part, no split, trim only that part;
+      - VZW → assert VZW is UNCHANGED (no trim, no GENS-0005 handling);
+      - controlled lengths around the 25-char boundary → at/just-over trimming behaviour.
+    """
+    low = (t or '%s %s' % (title or '', validation or '')).lower()
+    val = _sanitize_val(validation, title)
+    is_vzw = 'vzw' in low or 'verizon' in low
+    is_business = 'business name' in low or 'single business' in low
+    is_boundary = ('controlled length' in low or 'boundary' in low
+                   or 'around the 25' in low or 'at/just' in low)
+    is_first_last = ('first name' in low or 'last name' in low or 'first + last' in low
+                     or 'first name + last name' in low)
+
+    if is_vzw:
+        return [
+            ('Submit a VZW port-in activation to NE carrying the LNP customer name with a '
+             'name part exceeding 25 characters',
+             'NE receives the VZW port-in with the oversized LNP name part'),
+            ('Verify NE does NOT apply the 25-character split/trim to the VZW name — the '
+             '25-char rule is TMO-only, VZW is unchanged',
+             'NE leaves the VZW LNP customer name exactly as received; no concatenation '
+             'split or per-part trim is performed for VZW'),
+            ('Verify TMO-side GENS-0005 name-length handling is NOT invoked for the VZW '
+             'port-in',
+             val or 'VZW port-in behaviour is unchanged by this CR — no 25-char trimming and '
+                    'no GENS-0005 handling applied to VZW'),
+        ]
+
+    if is_business:
+        return [
+            ('Submit a TMO port-in activation to NE whose LNP customer name is a single '
+             'business name value from NSL',
+             'NE receives the TMO port-in carrying a single-part business name'),
+            ('Verify NE treats the single business name as ONE part (no first-space split '
+             'into two parts) and trims it to 25 characters only if it exceeds 25',
+             'Single business name is kept as one part; it is trimmed to 25 chars only when '
+             'longer than 25, otherwise passed through unchanged'),
+            ('Verify TMO validates the single-part name against the 25-char limit and does '
+             'NOT reject with GENS-0005',
+             val or 'TMO accepts the NE-trimmed single business name without raising '
+                    'GENS-0005'),
+        ]
+
+    if is_boundary:
+        return [
+            ('Submit TMO port-in activations to NE with LNP name parts at controlled lengths '
+             'around the 25-char boundary (exactly 25 and just over 25)',
+             'NE receives port-ins whose name parts sit at and just over the 25-char limit'),
+            ('Verify NE leaves a 25-char part unchanged and trims a >25-char part to exactly '
+             '25 characters after the first-space split',
+             'A part of exactly 25 chars is untouched; a part over 25 chars is trimmed to '
+             'exactly 25 chars; parts are re-joined with a single space'),
+            ('Verify TMO validates each re-joined part against the 25-char limit and does '
+             'NOT reject with GENS-0005 at the boundary',
+             val or 'TMO accepts the NE-trimmed name at and just over the boundary; no '
+                    'GENS-0005 rejection occurs'),
+        ]
+
+    # Default / first-name + last-name pair.
+    _ = is_first_last
+    return [
+        ('Submit a TMO port-in activation to NE whose LNP customer name is a first name + '
+         'last name pair from NSL',
+         'NE receives the TMO port-in carrying a first-name/last-name pair'),
+        ('Verify NE concatenates firstName + space + lastName, splits at the FIRST space '
+         'into two parts, and trims each part exceeding 25 characters to 25',
+         'NE builds "firstName lastName", splits on the first space, and trims each >25-char '
+         'part to 25 chars before re-joining with a single space'),
+        ('Verify TMO validates each re-joined name part against the 25-char limit and does '
+         'NOT reject the port-in with GENS-0005',
+         val or 'TMO accepts the NE-trimmed first/last name parts; no GENS-0005 rejection is '
+                'raised because NE pre-trimmed each part to 25 chars'),
+    ]
 
 
 def _port_out_steps(title, validation, t):
@@ -1819,31 +1994,50 @@ def _ui_flow_steps(title, validation):
                 return steps
     except Exception:
         pass
-    # Fallback if knowledge base not available — use feature name for specificity
+    # Fallback if knowledge base not available — name the SPECIFIC UI target.
     import re as _re_ui
     _action = _re_ui.sub(r'^(?:Validate|Verify|Check|Ensure|UI Verify\s*[-:]?\s*)', '', title, flags=_re_ui.IGNORECASE).strip()
     _action = _re_ui.sub(r'New\s+MVNO\s*[-:—]\s*', '', _action, flags=_re_ui.IGNORECASE).strip()
-    # Cut any trailing validation phrase so only the operation NAME remains.
-    _action = _re_ui.split(
-        r'\s+(?:menu\s+is|is|are|should|displays?|loads?|reflects?|must)\b',
-        _action, maxsplit=1)[0].strip()
-    _action = strip_dangling_tail(truncate_at_word(_action, 80)) if _action else 'the feature'
+    # A quoted option/menu name ("'Resend OTA Notification'") is the SPECIFIC subject of a
+    # UI-visibility scenario — prefer it verbatim over the whole sentence so the step names
+    # the real target instead of a truncated prose fragment.
+    _quoted = _re_ui.search(r"['\"\u2018\u2019\u201c\u201d]([^'\"\u2018\u2019\u201c\u201d]{3,60})"
+                            r"['\"\u2018\u2019\u201c\u201d]", _action)
+    # Any "<target> exists/is/under <parent>" clause — keep the target and its parent so a
+    # scenario like "'Resend OTA Notification' exists under Reset Line" names both without
+    # leaving a dangling "exists under".
+    _parent = _re_ui.search(r'\bunder\s+([A-Za-z][\w /&-]{2,40})', _action)
+    if _quoted:
+        _subject = _quoted.group(1).strip()
+        if _parent:
+            _subject = "%s (under %s)" % (_subject, _parent.group(1).strip().rstrip('. '))
+    else:
+        # Cut any trailing validation/existence phrase so only the subject NAME remains.
+        _subject = _re_ui.split(
+            r'\s+(?:menu\s+is|is|are|should|displays?|loads?|reflects?|must|exists?\b)\b',
+            _action, maxsplit=1)[0].strip()
+    # Strip a dangling connective tail ("exists under", "exists") so no fragment survives.
+    _subject = _re_ui.sub(r'\s+(?:exists?(?:\s+under)?|is\s+visible|under)\s*$', '', _subject,
+                          flags=_re_ui.IGNORECASE).strip()
+    _subject = strip_dangling_tail(truncate_at_word(_subject, 80)) if _subject else 'the feature'
     # Resolve a real NBOP navigation path (crawl if present, else the hand-
     # maintained feature→page map) instead of a generic 'menu for: X'.
     try:
         from .nbop_ui_knowledge import get_navigation_path as _get_nav
-        _nav = _get_nav(_action)
+        _nav = _get_nav(_subject)
     except Exception:
         _nav = 'NBOP → Mobile Service Management'
     return [
         ('Launch NBOP portal and search subscriber by MDN',
          'Subscriber profile loaded with header cards showing Account, MDN, IMEI, ICCID'),
         ('Navigate: %s' % _nav,
-         'Screen loads with all expected fields and controls'),
-        ('Perform %s via NBOP portal' % truncate_at_word(_action, 70),
-         'Operation submitted successfully — confirmation displayed'),
-        ('Verify subscriber profile reflects the change',
-         'All affected fields show correct post-operation values'),
+         'Screen loads and the %s target is present, correctly labeled, and accessible per role'
+         % _subject),
+        ('Verify the %s is visible, correctly labeled, and accessible to permitted roles only'
+         % _subject,
+         'The %s is shown to permitted roles and hidden/blocked for non-permitted roles' % _subject),
+        ('Verify subscriber profile reflects the %s state' % _subject,
+         'All affected fields show correct values for the %s' % _subject),
         ('Navigate to Transaction History and verify entry logged',
          'Transaction History shows entry with correct timestamp, type, and SUCC status'),
     ]
@@ -1895,6 +2089,9 @@ _OP_STOP_TOKENS = frozenset({
     'header', 'headers', 'schema', 'field', 'fields', 'omitting', 'non', 'send', 'sends',
     'sent', 'when', 'then', 'given', 'scenario', 'test', 'verify', 'validate', 'check',
     'ensure', 'confirm', 'their', 'sim', 'mdn', 'iccid', 'eid', 'imei', 'account',
+    # role/permission connectors that surround operations in Chalk prose but are never
+    # themselves the operation under test (e.g. "NBOP_Admin and non-Admin roles").
+    'admin', 'nbop_admin', 'role', 'roles', 'permitted', 'user', 'users', 'group', 'groups',
 })
 
 # An operation name looks like a hyphenated verb-noun ("cancel-device-location",

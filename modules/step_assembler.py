@@ -49,6 +49,27 @@ def _norm(v: str) -> str:
     return re.sub(r'\s+', ' ', (v or '').strip().lower())
 
 
+def _scope_is_lnp_name_trim(blob: str) -> bool:
+    """True when the feature scope is the NE LNP-customer-name / 25-char name-trim feature.
+
+    Used to EXCLUDE this feature from batch/mediation precondition selection: its scope is
+    port-in customer-name handling (NE concatenate/split/trim to 25 chars, GENS-0005), not
+    SFTP/PRR file ingestion. Requires a concrete name-limit signal so it never excludes a
+    genuine PRR/mediation feature (4628/4074) that merely mentions a name somewhere.
+    """
+    b = (blob or '').lower()
+    if not b:
+        return False
+    has_name_limit = (
+        'gens-0005' in b
+        or '25-character' in b or '25 character' in b or '25-char' in b
+        or 'lnp customer name' in b or 'lnp name' in b
+        or ('customer name' in b and ('25' in b or 'port-in' in b or 'port in' in b)))
+    # must be about port-in / NE name handling, not a PRR usage file
+    has_portin_ne = 'port-in' in b or 'port in' in b or 'portin' in b or 'lnp' in b
+    return bool(has_name_limit and has_portin_ne)
+
+
 def _origin_rank(step) -> int:
     o = getattr(step, 'origin', '') or ''
     if getattr(step, 'authored', False):
@@ -327,6 +348,16 @@ class StepAssembler:
     # ── preconditions from classification ─────────────────────────────────────
 
     def _is_batch_feature(self, suite, classification) -> bool:
+        blob = '%s %s %s' % (
+            getattr(suite, 'feature_title', '') or '',
+            getattr(suite, 'feature_desc', '') or '',
+            getattr(suite, 'scope', '') or '')
+        # NE LNP-customer-name / 25-char name-trim feature is an NE name-handling feature,
+        # NOT a mediation/PRR/batch-file feature — even though its large scope text may
+        # incidentally mention "mediation" (e.g. "BI/Kafka, mediation" when describing an
+        # unrelated downstream). It must not receive SFTP/PRR batch preconditions.
+        if _scope_is_lnp_name_trim(blob):
+            return False
         cls = (getattr(classification, 'classification', '') or '').strip().lower()
         if cls == 'batch_file':
             return True
@@ -334,10 +365,6 @@ class StepAssembler:
         # misclassification upstream still gets correct preconditions.
         if qmetry_pattern_library is not None:
             try:
-                blob = '%s %s %s' % (
-                    getattr(suite, 'feature_title', '') or '',
-                    getattr(suite, 'feature_desc', '') or '',
-                    getattr(suite, 'scope', '') or '')
                 return bool(qmetry_pattern_library.is_mediation_feature(blob))
             except Exception:
                 return False
