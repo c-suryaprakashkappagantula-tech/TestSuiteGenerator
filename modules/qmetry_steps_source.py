@@ -509,7 +509,7 @@ def _apply_packed_rule(parsed: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str,
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _EXPORT_CACHE: Dict[tuple, Dict[str, Dict[str, Any]]] = {}   # (pid, folder_id) → parsed
-_FOLDER_MEMO: Dict[tuple, Optional[str]] = {}                # (pid, feature_key) → folder_id
+_FOLDER_MEMO: Dict[tuple, Optional[str]] = {}                # (pid, candidate_key) → folder_id
 _DISK_TTL_SECS = 6 * 3600                                    # 6h default
 
 
@@ -622,49 +622,37 @@ def _resolve_folder_id(client, project_id, candidate_keys, log) -> Optional[str]
     return None
 
 
-def fetch_authored_steps(project_id, feature_key, subtask_keys, cookies=None,
-                         log=print) -> Dict[str, Dict[str, Any]]:
-    """Fetch + parse authored QMetry steps for a feature.
+def _resolve_folders_for_keys(client, project_id, candidate_keys, log) -> List[str]:
+    """Resolve EVERY candidate key's own QMetry folder within the (already-resolved)
+    project and return an ordered, de-duplicated list of folder ids — never stopping at
+    the first match (FEAT-002).
 
-    Returns ``{tc_key: {'summary', 'story_linkages': [..], 'steps': [...],
-    'step_summaries': [..]}}``. Returns ``{}`` (graceful skip) when no candidate
-    key is valid or no folder matches. Raises ``QMetryFetchError`` on export /
-    parse failure.
-
-    ``cookies`` is the authenticated cookie dict from ``load_qmetry_cookies``;
-    it may be ``None`` in tests that monkeypatch the client (construction is then
-    a no-op mock).
+    Each key is resolved INDEPENDENTLY through the single-key ``_resolve_folder_id`` (the
+    exact tiered PASS 1 full-key / PASS 2 truncated-number logic), constrained to that one
+    key so one key's folder can never be matched via another key's number. The resolution
+    is memoized per ``(project_id, candidate_key)`` (D3). The returned order follows
+    ``candidate_keys``; a folder reached by two keys appears once.
     """
-    candidate_keys = _valid_keys(list(subtask_keys or []) + [feature_key])
-    if not candidate_keys:
-        log('[QMETRY] no valid Jira keys among subtasks/feature — skipping')
-        return {}
+    folder_ids: List[str] = []
+    for key in candidate_keys:
+        memo_key = (str(project_id), key)
+        if memo_key in _FOLDER_MEMO:
+            fid = _FOLDER_MEMO[memo_key]
+        else:
+            # Constrain resolution to THIS key only so a different key's folder cannot win.
+            fid = _resolve_folder_id(client, project_id, [key], log)
+            _FOLDER_MEMO[memo_key] = fid
+        if fid and fid not in folder_ids:
+            folder_ids.append(fid)
+    return folder_ids
 
-    # Lazy client construction (import fails gracefully as QMetryFetchError).
-    try:
-        from qmetry_rest_client import QMetryRestClient
-    except Exception as exc:
-        raise QMetryFetchError('QMetryRestClient import failed: %s' % exc)
 
-    cookies = cookies or {}
-    try:
-        client = QMetryRestClient(base_url=_QMETRY_BASE_URL, cookies=cookies,
-                                  project_id=str(project_id), logger=log)
-    except Exception as exc:
-        raise QMetryFetchError('QMetry client construction failed: %s' % exc)
+def _export_and_parse_folder(client, project_id, folder_id, log) -> Dict[str, Dict[str, Any]]:
+    """Export + parse ONE (project_id, folder_id), honouring the run + 6h disk caches.
 
-    # Folder resolution (memoized per feature per run).
-    memo_key = (str(project_id), feature_key)
-    if memo_key in _FOLDER_MEMO:
-        folder_id = _FOLDER_MEMO[memo_key]
-    else:
-        folder_id = _resolve_folder_id(client, project_id, candidate_keys, log)
-        _FOLDER_MEMO[memo_key] = folder_id
-    if not folder_id:
-        log('[QMETRY] no folder matched candidate keys %s — skipping' % candidate_keys)
-        return {}
-
-    # Export/parse cache (per project_id, folder_id) for the run.
+    Raises ``QMetryFetchError`` (fail-loud) on export/parse failure — unchanged from the
+    single-folder path; the merge above simply calls this once per distinct folder.
+    """
     cache_key = (str(project_id), str(folder_id))
     if cache_key in _EXPORT_CACHE:
         return _EXPORT_CACHE[cache_key]
@@ -688,6 +676,85 @@ def fetch_authored_steps(project_id, feature_key, subtask_keys, cookies=None,
     _EXPORT_CACHE[cache_key] = parsed
     _disk_cache_write(str(project_id), str(folder_id), parsed, log)
     return parsed
+
+
+def fetch_authored_steps(project_id, feature_key, subtask_keys, cookies=None,
+                         log=print) -> Dict[str, Dict[str, Any]]:
+    """Fetch + parse authored QMetry steps for a feature within ONE QMetry project.
+
+    Returns ``{tc_key: {'summary', 'story_linkages': [..], 'steps': [...],
+    'step_summaries': [..]}}``. Resolves EVERY candidate key's own folder within
+    ``project_id`` and MERGES all parsed TCs into one dict de-duped by QMetry TC key
+    (later folders never overwrite a TC key already present). Returns ``{}`` (graceful
+    skip) when no candidate key is valid or no folder matches. Raises
+    ``QMetryFetchError`` on export / parse failure.
+
+    A single-key feature resolves exactly one folder and exports once, so the result is
+    identical to the pre-FEAT-002 single-folder behavior. Cross-PROJECT merging is handled
+    one level up by ``fetch_authored_steps_multi``.
+
+    ``cookies`` is the authenticated cookie dict from ``load_qmetry_cookies``;
+    it may be ``None`` in tests that monkeypatch the client (construction is then
+    a no-op mock).
+    """
+    candidate_keys = _valid_keys(list(subtask_keys or []) + [feature_key])
+    if not candidate_keys:
+        log('[QMETRY] no valid Jira keys among subtasks/feature — skipping')
+        return {}
+
+    # Lazy client construction (import fails gracefully as QMetryFetchError).
+    try:
+        from qmetry_rest_client import QMetryRestClient
+    except Exception as exc:
+        raise QMetryFetchError('QMetryRestClient import failed: %s' % exc)
+
+    cookies = cookies or {}
+    try:
+        client = QMetryRestClient(base_url=_QMETRY_BASE_URL, cookies=cookies,
+                                  project_id=str(project_id), logger=log)
+    except Exception as exc:
+        raise QMetryFetchError('QMetry client construction failed: %s' % exc)
+
+    # Resolve EVERY key's folder within this project (ordered, de-duped) — never stop at
+    # the first (FEAT-002). Memoized per (project_id, candidate_key).
+    folder_ids = _resolve_folders_for_keys(client, project_id, candidate_keys, log)
+    if not folder_ids:
+        log('[QMETRY] no folder matched candidate keys %s — skipping' % candidate_keys)
+        return {}
+
+    # Export each distinct folder exactly once and MERGE parsed TCs de-duped by TC key:
+    # a TC key already present is NOT overwritten by a later folder.
+    merged: Dict[str, Dict[str, Any]] = {}
+    for folder_id in folder_ids:
+        parsed = _export_and_parse_folder(client, project_id, folder_id, log)
+        for tc_key, tc in parsed.items():
+            if tc_key not in merged:
+                merged[tc_key] = tc
+    return merged
+
+
+def fetch_authored_steps_multi(project_keys, feature_key, cookies=None,
+                               log=print) -> Dict[str, Dict[str, Any]]:
+    """Fetch + parse authored QMetry steps across MULTIPLE QMetry projects and MERGE.
+
+    ``project_keys`` is an ordered mapping ``{project_id: [candidate_key, ...]}`` — every
+    candidate key already resolved to its OWN QMetry project. For each project this calls
+    ``fetch_authored_steps`` (which resolves + exports EVERY folder in that project and
+    merges its folders), then merges the per-project dicts into one, de-duped by QMetry TC
+    key (an earlier project's TC key is never overwritten by a later one). The feature key
+    is appended to every project's key list so a feature-named folder still resolves.
+
+    Returns ``{}`` (graceful skip) when no project/key resolves. ``QMetryFetchError`` from
+    any project's export/parse is propagated (fail-loud).
+    """
+    merged: Dict[str, Dict[str, Any]] = {}
+    for project_id, keys in (project_keys or {}).items():
+        parsed = fetch_authored_steps(project_id, feature_key, list(keys or []),
+                                      cookies=cookies, log=log)
+        for tc_key, tc in parsed.items():
+            if tc_key not in merged:
+                merged[tc_key] = tc
+    return merged
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1067,22 +1134,90 @@ def enrich_scenarios_with_qmetry(scenarios, jira, options, log=print) -> int:
     feature_key = getattr(jira, 'key', '') if jira else ''
     subtask_keys = [k for st in (getattr(jira, 'subtasks', None) or [])
                     if isinstance(st, dict) and (k := (st.get('key') or '').strip())]
+    # FEAT-002: the related-key set is jira.subtasks (now carrying the epic children
+    # captured by FEAT-001) AND jira.linked_issues — not subtasks alone. Build the ordered
+    # union (subtasks first, then links; de-duped, blanks/non-key shapes dropped) so every
+    # related key gets its own QMetry project+folder resolved and merged.
+    link_keys = [k for l in (getattr(jira, 'linked_issues', None) or [])
+                 if isinstance(l, dict) and (k := (l.get('key') or '').strip())]
+    related_keys: List[str] = []
+    for k in _valid_keys(subtask_keys + link_keys):
+        if k not in related_keys:
+            related_keys.append(k)
 
     # Load the authenticated cookies FIRST (before any project decision) so a dead
     # session fails LOUD via QMetrySessionError (preserved fail-loud), and so the
     # dynamic /projects resolver below runs through the same authenticated session.
     cookies = load_qmetry_cookies(log=log)   # raises QMetrySessionError if none authenticate
 
-    pid = resolve_project_for_feature(feature_key, subtask_keys, cookies=cookies, log=log)
-    if pid is None:
-        log('[QMETRY] feature %s (subtasks %s) not mapped to a QMetry project — skipping'
-            % (feature_key, subtask_keys))
+    # Resolve EACH related key (plus the feature key as a fallback) to its OWN QMetry
+    # project and GROUP keys by project, preserving first-seen order. One key's cases can
+    # then never be fetched from another key's project. Per-key order: dynamic /projects
+    # key-match first, then the static QMETRY_PROJECT_MAP fallback (resolve_project_id).
+    project_keys: Dict[str, List[str]] = {}
+    for k in related_keys + [feature_key]:
+        if not k:
+            continue
+        pid = None
+        if cookies is not None:
+            pid = resolve_project_dynamic(k, cookies, log)
+        if pid is None:
+            pid = resolve_project_id(k)
+        if pid is None:
+            continue
+        project_keys.setdefault(str(pid), [])
+        if k not in project_keys[str(pid)]:
+            project_keys[str(pid)].append(k)
+
+    if not project_keys:
+        log('[QMETRY] feature %s (related keys %s) not mapped to any QMetry project — skipping'
+            % (feature_key, related_keys))
         return 0
 
-    authored = fetch_authored_steps(pid, feature_key, subtask_keys, cookies=cookies, log=log)
+    authored = fetch_authored_steps_multi(project_keys, feature_key, cookies=cookies, log=log)
+
+    # ── TRANSPARENCY: per-QMetry-project queried/eligible rollup ──
+    # A linked issue whose folder resolved and was queried but whose cases are all
+    # filtered by the story-linkage gate must be VISIBLE (not silently contributing 0).
+    # Group the queried TCs by their QMetry key prefix (e.g. MWTGNBOP, NSLNM) and count
+    # how many are story-link-eligible for THIS feature. Any prefix that returned cases
+    # but 0 eligible is surfaced to the suite warnings (via the same options convention
+    # the auth-skip path already uses) so the user sees WHY a linked issue added nothing.
+    _validated = _valid_keys(related_keys)
+    _queried: Dict[str, int] = {}
+    _eligible_ct: Dict[str, int] = {}
+    _ineligible_tcs: List[str] = []
+    for _tck, _tc in (authored or {}).items():
+        _pfx = _tck.split('-TC-')[0] if '-TC-' in _tck else (_tck.split('-')[0] or _tck)
+        _queried[_pfx] = _queried.get(_pfx, 0) + 1
+        if _authored_hint_list(_tc) and _story_linkage_eligible(
+                _tc.get('story_linkages') or [], _validated):
+            _eligible_ct[_pfx] = _eligible_ct.get(_pfx, 0) + 1
+        else:
+            _ineligible_tcs.append(_tck)
+    for _pfx in sorted(_queried):
+        log('[QMETRY] project %s: %d case(s) queried, %d story-link-eligible for %s'
+            % (_pfx, _queried[_pfx], _eligible_ct.get(_pfx, 0), feature_key))
+    # Surface EVERY queried-but-filtered case to the suite warnings (not only when a whole
+    # QMetry project contributes zero) — a single Jira issue (e.g. MWTGNBOP-5791) can share
+    # a QMetry project with another (MWTGNBOP-5792), so a project-level zero check would
+    # hide it. Listing the excluded TC keys makes the exclusion unambiguous and visible.
+    # NOTE: a precise per-ORIGINATING-Jira-key rollup (5791 vs 5792) would need the
+    # folder->key association threaded through the export/merge; that finer attribution is
+    # a follow-up. The per-TC 'not story-linked' log lines above already name each one.
+    if _ineligible_tcs:
+        _w = ('[QMETRY] %d QMetry case(s) fetched + folder-resolved but excluded from %s '
+              '(not story-linked to this feature): %s'
+              % (len(_ineligible_tcs), feature_key, ', '.join(sorted(_ineligible_tcs))))
+        try:
+            _existing = options.get('_qmetry_ineligible_warning') or ''
+            options['_qmetry_ineligible_warning'] = (
+                (_existing + ' | ' + _w) if _existing else _w)
+        except Exception:
+            pass
 
     n, new_scenarios = attach_steps_to_scenarios(
-        scenarios, authored, log=log, validated_keys=_valid_keys(subtask_keys))
+        scenarios, authored, log=log, validated_keys=_validated)
     # Append the ADD-AS-NEW-TC scenarios to the LIVE scenario list the engine passed in
     # (dimension_set.scenarios), AFTER the existing Chalk-derived scenarios — the engine's
     # plan/build path then emits their TCs in sequence after the Chalk-derived ones.
