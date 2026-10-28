@@ -7,6 +7,7 @@ items 2–10 (revision 6).
 """
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -823,3 +824,179 @@ def test_relevance_gate_marks_offtopic_but_not_relevant():
     assert len(new2) == 1                           # still promoted — never dropped
     assert getattr(new2[0], 'needs_review', False) is True   # off-topic → flagged
     assert getattr(new2[0], 'review_reason', '')             # carries a human-readable reason
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 13. FEAT-002 — multi-folder / multi-project merge + links plumbing
+# ═══════════════════════════════════════════════════════════════════
+
+def _write_simple_fixture(tmp_path, name, tc_rows):
+    """Build a minimal QMetry export workbook. ``tc_rows`` is a list of dicts with
+    keys tc/summary/steps/linkage → one single-packed-step row per TC. Returns path."""
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'Sheet1'
+    hdr = [None] * 36
+    for idx, hname in _HEADER.items():
+        hdr[idx] = hname
+    for i in range(36):
+        if hdr[i] is None:
+            hdr[i] = 'col_%d' % i
+    ws.append(hdr)
+    for r in tc_rows:
+        ws.append(_row({0: r['tc'], 1: r['summary'], 16: r['steps'],
+                        17: '', 18: r.get('expected', 'ok'), 26: r['linkage']}))
+    path = tmp_path / name
+    wb.save(str(path))
+    return path
+
+
+class _ExportResult:
+    def __init__(self, file_path):
+        self.status = 'success'
+        self.file_path = str(file_path)
+        self.error = None
+
+
+def _install_multiproject_client(monkeypatch, project_fixtures):
+    """Monkeypatch QMetryRestClient with a fake keyed off the constructed project_id.
+
+    ``project_fixtures`` maps project_id → {'folders': <tree>, 'exports': {folder_id: path}}.
+    Also stubs the dynamic /projects index and cookie loader, and clears the run caches.
+    """
+    qss._EXPORT_CACHE.clear()
+    qss._FOLDER_MEMO.clear()
+    qss._PROJECT_INDEX = None
+    import tempfile
+    _disk = tempfile.mkdtemp(prefix='qss_disk_')
+    monkeypatch.setattr(qss, '_disk_cache_path',
+                        lambda pid, fid: Path(_disk) / ('%s_%s.json' % (pid, fid)))
+    monkeypatch.setattr(qss, 'load_qmetry_cookies', lambda log=None: {'ok': '1'})
+    monkeypatch.setattr(qss, '_load_project_index',
+                        lambda cookies, log=print: {'NSLNM': '121405',
+                                                    'MWTGNBOP': '200300',
+                                                    'MWTGMED': '76000'})
+
+    class _FakeClient:
+        def __init__(self, *a, **k):
+            self._pid = str(k.get('project_id'))
+
+        def get_testcase_folders(self):
+            return project_fixtures.get(self._pid, {}).get('folders', [])
+
+        def export_testcases_v2(self, folder_id=None):
+            exports = project_fixtures.get(self._pid, {}).get('exports', {})
+            path = exports.get(str(folder_id))
+            if path is None:
+                raise AssertionError('unexpected export for pid=%s folder=%s'
+                                     % (self._pid, folder_id))
+            return _ExportResult(path)
+
+    import qmetry_rest_client
+    monkeypatch.setattr(qmetry_rest_client, 'QMetryRestClient', _FakeClient)
+
+
+def test_multi_project_merge(monkeypatch, tmp_path):
+    # Keys span TWO QMetry projects: NSLNM-784 → NSLNM project folder, and
+    # MWTGNBOP-5791/5792 → MWTGNBOP project folder. Every folder's TCs merge into one
+    # dict de-duped by TC key.
+    nslnm_xlsx = _write_simple_fixture(tmp_path, 'nslnm.xlsx', [
+        {'tc': 'NSLNM-TC-900', 'summary': 'NSLNM authored case',
+         'steps': '1. do nslnm thing', 'linkage': 'NSLNM-784'},
+        # a TC key that ALSO appears in the NBOP folder → proves de-dup keeps the
+        # FIRST-seen variant. Subtasks (NBOP) are resolved before links (NSLNM), so the
+        # NBOP variant wins and this NSLNM variant must NOT overwrite it.
+        {'tc': 'SHARED-TC-1', 'summary': 'from NSLNM folder',
+         'steps': '1. nslnm variant', 'linkage': 'NSLNM-784'},
+    ])
+    nbop_xlsx = _write_simple_fixture(tmp_path, 'nbop.xlsx', [
+        {'tc': 'MWTGNBOP-TC-700', 'summary': 'NBOP authored case',
+         'steps': '1. do nbop thing', 'linkage': 'MWTGNBOP-5791'},
+        {'tc': 'SHARED-TC-1', 'summary': 'from NBOP folder',
+         'steps': '1. nbop variant', 'linkage': 'MWTGNBOP-5791'},
+    ])
+    _install_multiproject_client(monkeypatch, {
+        '121405': {'folders': [{'id': 111, 'name': 'NSLNM-784', 'children': []}],
+                   'exports': {'111': nslnm_xlsx}},
+        '200300': {'folders': [{'id': 222, 'name': 'MWTGNBOP-5791', 'children': []},
+                               {'id': 223, 'name': 'MWTGNBOP-5792', 'children': []}],
+                   'exports': {'222': nbop_xlsx, '223': nbop_xlsx}},
+    })
+
+    jira = _Jira('MWTGPROV-4575')
+    jira.subtasks = [{'key': 'MWTGNBOP-5791'}, {'key': 'MWTGNBOP-5792'}]
+    jira.linked_issues = [{'key': 'NSLNM-784'}]
+
+    # No scenarios to match → every eligible authored TC flows through Tier-3 ADD-AS-NEW.
+    scenarios = []
+    n = enrich_scenarios_with_qmetry(scenarios, jira, {}, log=lambda *a: None)
+    titles = {getattr(s, 'source', None) and s.source.source_id for s in scenarios}
+    # Both projects' distinct TCs are present …
+    assert 'NSLNM-TC-900' in titles
+    assert 'MWTGNBOP-TC-700' in titles
+    # … and the shared TC key appears exactly once (de-duped across folders/projects),
+    #    keeping the FIRST-seen (NBOP subtask project, resolved before the NSLNM link) variant.
+    shared = [s for s in scenarios if s.source.source_id == 'SHARED-TC-1']
+    assert len(shared) == 1
+    assert 'nbop variant' in shared[0].steps_hint[0]
+    assert n == 0   # nothing matched an existing scenario (all Tier-3 adds)
+
+
+def test_single_key_feature_one_folder_unchanged(monkeypatch, tmp_path):
+    # A single-key feature resolves exactly one folder and exports once — result
+    # identical to the pre-FEAT-002 single-folder behavior.
+    med_xlsx = _write_simple_fixture(tmp_path, 'med.xlsx', [
+        {'tc': 'MWTGMED-TC-1', 'summary': 'mediation authored case',
+         'steps': '1. do med thing', 'linkage': 'MWTGMED-5214'},
+    ])
+    qss._EXPORT_CACHE.clear()
+    qss._FOLDER_MEMO.clear()
+    export_calls = {'n': 0}
+
+    class _FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def get_testcase_folders(self):
+            return [{'id': 129316, 'name': 'MWTGMED-5214', 'children': []}]
+
+        def export_testcases_v2(self, folder_id=None):
+            export_calls['n'] += 1
+            export_calls['folder'] = str(folder_id)
+            return _ExportResult(med_xlsx)
+
+    import qmetry_rest_client
+    monkeypatch.setattr(qss, '_disk_cache_path',
+                        lambda pid, fid: tmp_path / ('%s_%s.json' % (pid, fid)))
+    monkeypatch.setattr(qmetry_rest_client, 'QMetryRestClient', _FakeClient)
+
+    out = fetch_authored_steps('76000', 'MWTGMED-4628', ['MWTGMED-5214'],
+                               cookies={}, log=lambda *a: None)
+    assert export_calls['n'] == 1                 # exactly one export
+    assert export_calls['folder'] == '129316'
+    assert set(out) == {'MWTGMED-TC-1'}
+    assert out['MWTGMED-TC-1']['step_summaries'] == ['do med thing']
+
+
+def test_eligibility_any_validated_linked_key(monkeypatch, tmp_path):
+    # A TC whose Story Linkages contain a validated LINKED key (NSLNM-784, which arrives
+    # via jira.linked_issues) is eligible and attached/added, not dropped.
+    nslnm_xlsx = _write_simple_fixture(tmp_path, 'nslnm2.xlsx', [
+        {'tc': 'NSLNM-TC-950', 'summary': 'linked-key authored case',
+         'steps': '1. exercise the linked NSLNM behavior', 'linkage': 'NSLNM-784'},
+    ])
+    _install_multiproject_client(monkeypatch, {
+        '121405': {'folders': [{'id': 111, 'name': 'NSLNM-784', 'children': []}],
+                   'exports': {'111': nslnm_xlsx}},
+    })
+
+    jira = _Jira('MWTGPROV-4575')
+    jira.subtasks = []                            # NO subtasks
+    jira.linked_issues = [{'key': 'NSLNM-784'}]   # the key arrives via LINKS
+
+    scenarios = []
+    enrich_scenarios_with_qmetry(scenarios, jira, {}, log=lambda *a: None)
+    # The TC was story-linked to the validated LINKED key → eligible → added as a NEW TC.
+    assert any(getattr(s, 'source', None) and s.source.source_id == 'NSLNM-TC-950'
+               for s in scenarios)
