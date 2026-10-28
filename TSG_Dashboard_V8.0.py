@@ -42,6 +42,7 @@ from modules.data_first_engine import build_test_suite_v8
 from modules.excel_generator import generate_excel
 from modules.theme_v2 import CSS
 from modules.transaction_log import log_generation, get_history
+from modules import qmetry_session_guard as _qmg
 from modules.pipeline import (Pipeline, PipelineError, block_jira_fetch, block_chalk_db,
                                block_chalk_live, block_parse_docs, block_build_suite_v8,
                                block_generate_output, block_deep_mine)
@@ -791,10 +792,69 @@ with left:
                                       accept_multiple_files=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
+    # ── QMetry session guard (pre-run probe, cached 5 min) ──
+    # QMetry carve-out: auth comes from storage_state.json (NOT MCP, NOT the user's Chrome).
+    with st.spinner('Checking QMetry session…'):
+        _qm_status = _qmg.get_cached_status(ss)
+    _qm_login_res = ss.pop(_qmg.SS_LOGIN_RESULT, None)
+    if _qm_login_res is not None:
+        if _qm_login_res.get('ok') and _qm_status.get('ok'):
+            st.success('QMetry login refreshed — copied to: %s' % ', '.join(_qm_login_res.get('copied') or []))
+        elif _qm_login_res.get('ok'):
+            st.error('QMetry login refresh finished but QMetry is still not authenticated — '
+                     'complete SSO in the Edge window or run the MDA headed login manually.')
+        else:
+            st.error('QMetry login refresh failed: %s' % (_qm_login_res.get('error') or 'unknown error'))
+    if not _qm_status.get('ok'):
+        st.error('🔴 ' + _qmg.EXPIRED_MSG + '\n\nReason: ' + (_qm_status.get('reason') or 'unknown')[:300])
+        _qmc1, _qmc2 = st.columns([1, 1])
+        with _qmc1:
+            _qm_refresh_btn = st.button('🔄 Refresh QMetry login', key='qmetry_refresh_btn',
+                                        type='primary', use_container_width=True)
+        with _qmc2:
+            _qm_recheck_btn = st.button('Re-check', key='qmetry_recheck_btn', use_container_width=True)
+        st.checkbox('Generate without QMetry (QMetry test cases will be missing)', key=_qmg.SS_ACK)
+        if _qm_recheck_btn:
+            _qmg.invalidate_status(ss)
+            st.rerun()
+        if _qm_refresh_btn:
+            _qm_res = None
+            try:
+                _qm_proc, _qm_result_path, _qm_log_path = _qmg.start_login_subprocess()
+                with st.status('Refreshing QMetry login — complete SSO in the Edge window that opened…',
+                               expanded=True) as _qm_st:
+                    _qm_prog = st.empty()
+                    _qm_t0 = time.time()
+                    while _qm_proc.poll() is None and (time.time() - _qm_t0) < _qmg.LOGIN_WAIT_SECS:
+                        _qm_prog.text('%ds elapsed\n%s' % (int(time.time() - _qm_t0),
+                                                           '\n'.join(_qmg.tail_log(_qm_log_path))))
+                        time.sleep(2)
+                    if _qm_proc.poll() is None:
+                        try:
+                            _qm_proc.terminate()
+                        except Exception:
+                            pass
+                        _qm_res = {'ok': False, 'error': 'timed out after %ds' % _qmg.LOGIN_WAIT_SECS}
+                    else:
+                        _qm_res = _qmg.read_login_result(_qm_result_path)
+                    _qm_st.update(state='complete' if _qm_res.get('ok') else 'error')
+            except Exception as _qm_err:
+                _qm_res = {'ok': False, 'error': 'could not launch login: %s' % _qm_err}
+            ss[_qmg.SS_LOGIN_RESULT] = _qm_res
+            _qmg.invalidate_status(ss)
+            _qmg.get_cached_status(ss, force=True)
+            st.rerun()
+    else:
+        _qm_src = _qm_status.get('source') or ''
+        st.caption('✅ QMetry session OK — checked %ds ago via %s' % (
+            max(0, int(time.time() - float(_qm_status.get('_cached_at', time.time())))),
+            Path(_qm_src).parent.name if _qm_src else 'storage_state.json'))
+
     # ── Action Buttons ──
     bc1, bc2, bc3, bc4 = st.columns([1.5, 0.5, 0.5, 0.5])
     with bc1:
-        run_btn = st.button('🚀 Execute - Generate Test Suite (V8)', type='primary', use_container_width=True)
+        run_btn = st.button('🚀 Execute - Generate Test Suite (V8)', type='primary', use_container_width=True,
+                            key='run_btn')
     with bc2:
         clear_btn = st.button('Clear All', use_container_width=True)
     with bc3:
@@ -902,6 +962,15 @@ with right:
             </div>""" % (info.get('tc_count', 0), info.get('step_count', 0),
                          info.get('data_source_count', 0), _grounding_color, _grounding_display),
             unsafe_allow_html=True)
+
+            # ── QMetry skipped → post-run warning (surfaces suite.warnings / _qmetry_skip_warning) ──
+            _qm_post = list(info.get('qmetry_warnings') or [])
+            if _qm_post:
+                st.error('⚠️ %s — %s' % (_qmg.POSTRUN_MSG, '; '.join(_qm_post)[:400]))
+            _qm_other = {k: v for k, v in (ss.get(_qmg.SS_SKIPS) or {}).items()
+                         if v and k != ss.get('last_feature_id')}
+            if _qm_other:
+                st.error('⚠️ %s for: %s' % (_qmg.POSTRUN_MSG, ', '.join(sorted(_qm_other))))
 
             # ── Auto-diff changelog ──
             _diff = info.get('diff_report')
@@ -1703,6 +1772,10 @@ if run_btn:
     if not _features_to_run and ss.get('_batch_default'):
         _features_to_run = [s.split(' - ')[0].strip().upper() for s in ss['_batch_default'] if s.strip()]
 
+    # QMetry session gate (both PI-scope and Manual Links share this handler).
+    _qm_gate, _qm_gate_msg = _qmg.gate_decision(_qmg.get_cached_status(ss), bool(ss.get(_qmg.SS_ACK)))
+    ss[_qmg.SS_GATE] = _qm_gate
+
     if not _features_to_run:
         st.error('Please enter a Feature ID.' if not _is_manual_mode else 'Please provide at least one URL (Jira or Chalk) to proceed.')
     elif not _is_manual_mode and not ss.get('selected_pi'):
@@ -1711,6 +1784,8 @@ if run_btn:
         st.error('Please provide at least one URL — either Jira or Chalk — to generate a test suite.')
     elif _is_manual_mode and not _features_to_run:
         st.error('Please provide a Feature ID.')
+    elif _qm_gate == 'block':
+        st.error('🔴 Generation blocked — ' + _qm_gate_msg)
     else:
         feature_id = _features_to_run[0]
         ss['logs'] = []
@@ -1722,6 +1797,7 @@ if run_btn:
         ss['v8_data_sources'] = None
         ss['v8_combination_plan'] = None
         ss['v8_routing_audit'] = None
+        ss[_qmg.SS_SKIPS] = {}
 
         logger = LiveLog(cli_header, cli_log, cli_tools)
         if len(_features_to_run) > 1:
@@ -1736,6 +1812,9 @@ if run_btn:
 
         t0 = time.time()
         exit_items = []
+        if _qm_gate == 'allow_ack':
+            exit_items.append('⚠️ ' + _qmg.ACK_WARN_MSG)
+            print('[QMETRY] WARNING: user acknowledged expired session — generating without QMetry', flush=True)
 
         with redirect_stdout(logger):
             try:
@@ -1907,6 +1986,11 @@ if run_btn:
                         lambda: block_build_suite_v8(jira, chalk, parsed_docs, options, deep_mine_result=deep_mine_result, log=logger))
                     suite = engine_result['suite']
                     total_steps = engine_result['total_steps']
+                    _qm_skips = _qmg.qmetry_skip_messages(suite, options)
+                    if _qm_skips:
+                        ss[_qmg.SS_SKIPS][feature_id] = _qm_skips
+                        exit_items.append('%s%s: ⚠️ %s' % (_bp, feature_id, _qmg.POSTRUN_MSG))
+                        _qmg.invalidate_status(ss)  # session evidently died — re-probe next render
                     print('[V8] Engine complete: %d TCs, %d steps' % (len(suite.test_cases), total_steps), flush=True)
 
                     # Store V8-specific data for display
@@ -2006,6 +2090,7 @@ if run_btn:
                         'diff_report': output.get('diff_report'),
                         'scorecard_risk': getattr(output.get('scorecard'), 'overall_risk', ''),
                         'scorecard_badge': getattr(output.get('scorecard'), 'headline_badge', ''),
+                        'qmetry_warnings': ss[_qmg.SS_SKIPS].get(feature_id, []),
                     }
                     ss['last_feature_id'] = feature_id
                     ss['last_suite_id'] = output.get('suite_id', '')
