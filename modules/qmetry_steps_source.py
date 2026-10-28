@@ -337,6 +337,42 @@ def load_qmetry_cookies(log=print) -> Dict[str, str]:
         % searched)
 
 
+def qmetry_session_status(log=None) -> Dict[str, Any]:
+    """Non-raising QMetry auth probe (dashboard pre-run guard).
+
+    Wraps ``load_qmetry_cookies`` — same candidate list, same probe — and returns
+    ``{'ok': bool, 'reason': str, 'source': Optional[str], 'checked_at': float}``.
+    ``ok=True`` → ``reason=''`` and ``source`` is the authenticating storage_state path.
+    A ``QMetrySessionError`` → ``ok=False`` with its message as ``reason``; any other
+    exception → ``ok=False`` with ``reason='probe error: <exc>'``. Never raises.
+    """
+    lines: List[str] = []
+
+    def _log(msg):
+        lines.append(str(msg))
+        if log is not None:
+            try:
+                log(msg)
+            except Exception:
+                pass
+
+    status: Dict[str, Any] = {'ok': False, 'reason': '', 'source': None,
+                              'checked_at': time.time()}
+    try:
+        load_qmetry_cookies(log=_log)
+        status['ok'] = True
+        prefix = '[QMETRY] authenticated via '
+        for ln in lines:
+            if ln.startswith(prefix):
+                status['source'] = ln[len(prefix):].strip()
+    except QMetrySessionError as exc:
+        status['reason'] = str(exc)
+    except Exception as exc:
+        status['reason'] = 'probe error: %s' % exc
+    status['checked_at'] = time.time()
+    return status
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # XLSX PARSING — confirmed layout (sheet 'Sheet1')
 # ═══════════════════════════════════════════════════════════════════════════════
