@@ -770,6 +770,18 @@ def build_test_suite_v8(
     except Exception:
         pass
 
+    # ── Surface linked issues that were fetched/resolved/queried but contributed 0
+    #    eligible cases (filtered by the story-linkage gate). This is a legitimate
+    #    outcome, not an error — but it must be VISIBLE so the user sees why a linked
+    #    issue added nothing, instead of discovering it by counting. ──
+    try:
+        _inelig = options.get('_qmetry_ineligible_warning')
+        if _inelig:
+            if _inelig not in (suite.warnings or []):
+                suite.warnings.append(_inelig)
+    except Exception:
+        pass
+
     # ── TC-name polish: strip implementation detail (VARCHAR(45), (regression))
     #    and prefix bare-data-field titles with the feature's subject entity,
     #    mined from Chalk's own "Verify a <X> with ..." phrasing. ──

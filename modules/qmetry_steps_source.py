@@ -1176,8 +1176,48 @@ def enrich_scenarios_with_qmetry(scenarios, jira, options, log=print) -> int:
 
     authored = fetch_authored_steps_multi(project_keys, feature_key, cookies=cookies, log=log)
 
+    # ── TRANSPARENCY: per-QMetry-project queried/eligible rollup ──
+    # A linked issue whose folder resolved and was queried but whose cases are all
+    # filtered by the story-linkage gate must be VISIBLE (not silently contributing 0).
+    # Group the queried TCs by their QMetry key prefix (e.g. MWTGNBOP, NSLNM) and count
+    # how many are story-link-eligible for THIS feature. Any prefix that returned cases
+    # but 0 eligible is surfaced to the suite warnings (via the same options convention
+    # the auth-skip path already uses) so the user sees WHY a linked issue added nothing.
+    _validated = _valid_keys(related_keys)
+    _queried: Dict[str, int] = {}
+    _eligible_ct: Dict[str, int] = {}
+    _ineligible_tcs: List[str] = []
+    for _tck, _tc in (authored or {}).items():
+        _pfx = _tck.split('-TC-')[0] if '-TC-' in _tck else (_tck.split('-')[0] or _tck)
+        _queried[_pfx] = _queried.get(_pfx, 0) + 1
+        if _authored_hint_list(_tc) and _story_linkage_eligible(
+                _tc.get('story_linkages') or [], _validated):
+            _eligible_ct[_pfx] = _eligible_ct.get(_pfx, 0) + 1
+        else:
+            _ineligible_tcs.append(_tck)
+    for _pfx in sorted(_queried):
+        log('[QMETRY] project %s: %d case(s) queried, %d story-link-eligible for %s'
+            % (_pfx, _queried[_pfx], _eligible_ct.get(_pfx, 0), feature_key))
+    # Surface EVERY queried-but-filtered case to the suite warnings (not only when a whole
+    # QMetry project contributes zero) — a single Jira issue (e.g. MWTGNBOP-5791) can share
+    # a QMetry project with another (MWTGNBOP-5792), so a project-level zero check would
+    # hide it. Listing the excluded TC keys makes the exclusion unambiguous and visible.
+    # NOTE: a precise per-ORIGINATING-Jira-key rollup (5791 vs 5792) would need the
+    # folder->key association threaded through the export/merge; that finer attribution is
+    # a follow-up. The per-TC 'not story-linked' log lines above already name each one.
+    if _ineligible_tcs:
+        _w = ('[QMETRY] %d QMetry case(s) fetched + folder-resolved but excluded from %s '
+              '(not story-linked to this feature): %s'
+              % (len(_ineligible_tcs), feature_key, ', '.join(sorted(_ineligible_tcs))))
+        try:
+            _existing = options.get('_qmetry_ineligible_warning') or ''
+            options['_qmetry_ineligible_warning'] = (
+                (_existing + ' | ' + _w) if _existing else _w)
+        except Exception:
+            pass
+
     n, new_scenarios = attach_steps_to_scenarios(
-        scenarios, authored, log=log, validated_keys=_valid_keys(related_keys))
+        scenarios, authored, log=log, validated_keys=_validated)
     # Append the ADD-AS-NEW-TC scenarios to the LIVE scenario list the engine passed in
     # (dimension_set.scenarios), AFTER the existing Chalk-derived scenarios — the engine's
     # plan/build path then emits their TCs in sequence after the Chalk-derived ones.
