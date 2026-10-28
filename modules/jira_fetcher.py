@@ -397,13 +397,14 @@ def fetch_jira_issue(page, issue_key: str, log=print) -> JiraIssue:
                 log(f'[JIRA]     ❌ {st["key"]}: {str(e)[:60]}')
                 log(f'[JIRA]    {st["key"]}: failed to fetch ({e})')
 
-    # Fetch epic children — "Issues in epic" are not subtasks in REST API
-    if issue.issue_type and issue.issue_type.lower() == 'epic':
+    # Fetch epic children — "Issues in epic" are not subtasks in REST API.
+    # Capture every child for ANY parent type (not just Epic), de-duped by key.
+    if True:
         log(f'[JIRA] 🔍 Fetching epic children for {issue.key}...')
         try:
             epic_search = page.evaluate('''async (url) => {
                 const jql = encodeURIComponent('"Epic Link" = ''' + f'"{issue.key}"' + ''' ORDER BY key ASC');
-                const r = await fetch(url + '/search?jql=' + jql + '&maxResults=20&fields=summary,description,status,issuetype,labels,customfield_12402', {
+                const r = await fetch(url + '/search?jql=' + jql + '&maxResults=50&fields=summary,description,status,issuetype,labels,customfield_12402', {
                     credentials: 'include',
                     headers: {'Accept': 'application/json'}
                 });
@@ -412,10 +413,15 @@ def fetch_jira_issue(page, issue_key: str, log=print) -> JiraIssue:
             if epic_search['status'] == 200 and epic_search['body']:
                 epic_issues = epic_search['body'].get('issues', [])
                 log(f'[JIRA] Found {len(epic_issues)} issues in epic')
+                existing_keys = {s.get('key', '') for s in issue.subtasks}
+                existing_keys |= {l.get('key', '') for l in issue.linked_issues}
                 for ei in epic_issues:
+                    ck = ei.get('key', '')
+                    if ck in existing_keys:
+                        continue
                     ef = ei.get('fields', {})
                     child = {
-                        'key': ei.get('key', ''),
+                        'key': ck,
                         'summary': ef.get('summary', ''),
                         'description': ef.get('description', '') or '',
                         'status': (ef.get('status') or {}).get('name', ''),
@@ -429,6 +435,7 @@ def fetch_jira_issue(page, issue_key: str, log=print) -> JiraIssue:
                             child['acceptance_criteria'] = val
                             break
                     issue.subtasks.append(child)
+                    existing_keys.add(ck)
                     log(f'[JIRA]   Epic child: {child["key"]} | {child["summary"][:50]} | desc={len(child["description"])} chars')
             else:
                 log(f'[JIRA] Epic search returned HTTP {epic_search["status"]}')

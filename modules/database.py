@@ -15,6 +15,12 @@ from .config import ROOT
 DB_PATH = ROOT / 'tsg_cache.db'
 STALE_HOURS = 24  # data older than this shows a warning
 
+# Bump this whenever the Jira fetch logic changes in a way that must invalidate
+# already-cached rows. Rows written with a NULL or lower schema_version are treated
+# as stale by is_jira_stale, forcing a one-time re-fetch. v2 = epic-children captured
+# for any parent type (FEAT-001), not just issue_type == 'epic'.
+JIRA_FETCH_SCHEMA_VERSION = 2
+
 
 def _get_pi_registry():
     """Return a PI-registry module, deployment-safe.
@@ -109,7 +115,8 @@ def init_db():
             pi              TEXT,
             channel         TEXT,
             raw_json        TEXT,
-            last_fetched    TEXT
+            last_fetched    TEXT,
+            schema_version  INTEGER
         );
 
         CREATE TABLE IF NOT EXISTS chalk_cache (
@@ -312,6 +319,8 @@ def _run_migrations(c, current_version: int):
     migrations = [
         # (version, description, sql)
         # Example: (1, 'add vendor column to features', 'ALTER TABLE features ADD COLUMN vendor TEXT DEFAULT ""'),
+        (1, 'add schema_version to jira_cache (FEAT-001 epic-children re-sync)',
+         'ALTER TABLE jira_cache ADD COLUMN schema_version INTEGER'),
     ]
     for version, description, sql in migrations:
         if version > current_version:
@@ -412,8 +421,8 @@ def save_jira(jira_issue):
     c.execute('''INSERT OR REPLACE INTO jira_cache
         (feature_id, summary, description, status, priority, assignee, reporter,
          labels_json, ac_text, attachments_json, links_json, subtasks_json, comments_json,
-         pi, channel, raw_json, last_fetched)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''', (
+         pi, channel, raw_json, last_fetched, schema_version)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''', (
         jira_issue.key, jira_issue.summary, jira_issue.description,
         jira_issue.status, jira_issue.priority, jira_issue.assignee, jira_issue.reporter,
         json.dumps(jira_issue.labels), jira_issue.acceptance_criteria,
@@ -428,7 +437,7 @@ def save_jira(jira_issue):
         } for l in jira_issue.linked_issues]), json.dumps(jira_issue.subtasks),
         json.dumps(jira_issue.comments), jira_issue.pi, jira_issue.channel,
         json.dumps(jira_issue.raw_json) if jira_issue.raw_json else '{}',
-        datetime.now().isoformat(),
+        datetime.now().isoformat(), JIRA_FETCH_SCHEMA_VERSION,
     ))
     c.commit(); c.close()
 
@@ -444,11 +453,21 @@ def load_jira(feature_id: str) -> Optional[Dict]:
 
 
 def is_jira_stale(feature_id: str) -> bool:
-    """Check if cached Jira data is older than STALE_HOURS."""
+    """Check if cached Jira data is older than STALE_HOURS.
+
+    Rows written before the current JIRA_FETCH_SCHEMA_VERSION (NULL or a lower
+    marker) are always treated as stale so a fetch-logic change forces a one-time
+    re-fetch of already-cached features (FEAT-001 epic-children re-sync).
+    """
     c = _conn()
-    row = c.execute('SELECT last_fetched FROM jira_cache WHERE feature_id=?', (feature_id,)).fetchone()
+    row = c.execute(
+        'SELECT last_fetched, schema_version FROM jira_cache WHERE feature_id=?',
+        (feature_id,)).fetchone()
     c.close()
     if not row or not row['last_fetched']:
+        return True
+    cached_version = row['schema_version']
+    if cached_version is None or cached_version < JIRA_FETCH_SCHEMA_VERSION:
         return True
     try:
         fetched = datetime.fromisoformat(row['last_fetched'])
