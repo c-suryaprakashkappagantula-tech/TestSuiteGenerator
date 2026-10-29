@@ -13,10 +13,21 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Any
 from .config import JIRA_BASE_URL, JIRA_REST_V2, ATTACHMENTS, PAGE_LOAD_TIMEOUT_MS, NETWORK_IDLE_TIMEOUT_MS
 
-# Add shared module path for REST clients
-_SHARED_PATH = str(Path(__file__).resolve().parent.parent.parent / 'shared')
-if _SHARED_PATH not in sys.path:
-    sys.path.insert(0, _SHARED_PATH)
+# Add shared module path for REST clients.
+# Prefer the repo-root `shared/` (vendored copy) so a fresh TSG clone AND a nested git
+# worktree both resolve the vendored package before any parent monorepo `shared/`.
+# `rest_clients` is imported top-level, so `<repo_root>/shared` must be on sys.path; the
+# repo root itself is added too so `from shared.* import ...` resolves to the same vendored
+# tree. Walk up for the first parent containing `shared/`, falling back to the historical
+# `parents[2]` so a normal checkout resolves identically.
+def _vendored_shared_paths():
+    here = Path(__file__).resolve()
+    root = next((p for p in here.parents if (p / 'shared').is_dir()), here.parents[2])
+    return str(root), str(root / 'shared')
+
+for _p in _vendored_shared_paths():
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 
 @dataclass

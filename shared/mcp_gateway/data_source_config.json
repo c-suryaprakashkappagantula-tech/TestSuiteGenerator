@@ -1,0 +1,19 @@
+{
+  "legacy_direct_access": false,
+  "qmetry_direct_access": true,
+  "mcp_config_path": "~/.kiro/settings/mcp.json",
+  "jira_server": "jira",
+  "chalk_server": "confluence",
+  "daily_budget": 1200,
+  "per_minute": 20,
+  "min_read_gap_s": 1.0,
+  "min_write_gap_s": 2.0,
+  "cache_ttl_s": {
+    "jira": 900,
+    "chalk": 86400,
+    "tools_list": 86400
+  },
+  "verify_ssl": true,
+  "request_timeout_s": 120,
+  "tool_map": {}
+}
