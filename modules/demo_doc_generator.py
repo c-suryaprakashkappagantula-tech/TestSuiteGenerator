@@ -1,47 +1,72 @@
 # -*- coding: utf-8 -*-
-"""demo_doc_generator.py - 'Test Suite Demo' Word document, generated with every suite.
+"""demo_doc_generator.py - 'Test Case Presenter Guide' Word document.
 
-Same layout as the hand-built MWTGPROV-4503 demo (30 Sep 2026):
-  1. Feature at a glance        (Jira + Chalk facts)
-  2. The problem in plain words (Jira description, Chalk scope, key data table)
-  3. What each team must deliver ({panel:title=TEAM} blocks + acceptance criteria)
-  4. Test suite overview        (sources, AC coverage, category / priority / TC tables)
-  5. Test case walkthrough      (per TC: about, pre-condition, steps table)
-  6. How this suite was produced
-  7. Items to confirm before execution (auto-detected, e.g. duplicate Chalk IDs)
+Generated with every suite. A generic, OFFLINE, fully deterministic (NO LLM)
+client-facing narration guide for a screen-share walkthrough of ANY feature.
 
-Everything is built from the suite that was just written to Excel, so the document
-and the workbook always agree. Read-only on its inputs; never raises into the caller.
+Structure (mirrors the hand-edited sample, MWTGPROV-4074):
+  - Title block: feature title + "Test Case Presenter Guide" subtitle + tagline + "<FID> | <PI>"
+  - Opening narrative (shaded single-cell table)
+  - "How to use this guide" (Heading 1) + 3 bullets
+  - Per test case: Heading 2 "TCnn | <label>", a "What to say" plain-English
+    narration paragraph (first-person-plural, what + why, no jargon), a shaded
+    single-cell "Key message:" table, and conditional "Presenter caution:" /
+    "Scope note:" asides derived from grounding (never hardcoded)
+  - "Closing summary" (Heading 1) + one quoted paragraph
+  - "Quick mental model" (Heading 2): TCs grouped by theme, non-empty buckets only
+
+Everything is composed deterministically from each test case's OWN cleaned label
+and one-liner (shared with the Excel High Level Scenarios sheet) plus per-category
+sentence templates. A banned-phrase safety net scrubs any client-facing string.
+Read-only on its inputs; never raises into the caller. No live Jira/QMetry calls.
 """
 from __future__ import annotations
 
 import re
-from collections import Counter, OrderedDict
+from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional
 
 from docx import Document
-from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
+from .client_text import _HLS_BANNED, _hls_description, _hls_scenario_name
 from .config import OUTPUTS
 from .text_utils import as_text  # MCP may hand back {'text': ...} dicts for long fields
 
 NAVY = '0B2A4A'
 TEAL = '0E9AA7'
-ZEBRA = 'EEF4F8'
-GREY = '555F6D'
-JIRA_BASE = 'https://jira.charter.com/browse/'
+OPEN_FILL = 'EEF3F8'   # light blue — Opening narrative table
+KEY_FILL = 'FFF4D6'    # light amber — Key message table
 
-PRIORITY_MEANING = {
-    'P1': 'Must run - blocks release if failing',
-    'P2': 'Should run - high risk if skipped',
-    'P3': 'Good to run',
-}
-CATEGORY_ORDER = ['Happy Path', 'Negative', 'Edge Case', 'E2E', 'Regression']
+LQUO = '\u201c'   # “
+RQUO = '\u201d'   # ”
+
+# Systems/terms that, when they appear in a TC's source steps but NOT in the
+# feature objective, signal unrelated contamination worth a presenter caution.
+_OFFTOPIC_TERMS = (
+    'prr', 'amdocs', 'mediation', 'nbop_mig', 'ne portal', 'trigger api',
+    'service grouping', 'century report', 'transaction_history',
+)
+
+# A one-liner that carries any of these is too technical for client narration
+# (snake_case/ALL-CAPS identifiers, table/field/file names) — fall back to the
+# plain cleaned label instead of echoing it verbatim.
+_JARGON_RE = re.compile(
+    r'(?:\b[A-Z][A-Z0-9]{2,}(?:_[A-Z0-9]+)+\b'      # STG_TMO_WEARABLE_RECON, TMO_PAIRING_ID
+    r'|\b\w+_\w+\b'                                   # any snake_case token
+    r'|\.[a-z]{2,4}\b'                               # .csv/.xml file extensions
+    r'|\bhttp[s]?://'                                 # URLs
+    r'|\bENV_IDENTIFIER\b|\bROUTEDTO\b|\bMDN\b)'      # bare uppercase identifiers
+)
+# Cues that a sentence is declaring something out of scope.
+_SCOPE_CUES = (
+    'out of scope', 'not in scope', 'excluded from scope', 'excluded',
+    'cross-environment fan-out', 'fan-out',
+)
 
 
 # ------------------------------------------------------------------ text helpers
@@ -54,113 +79,35 @@ def _clean(t: str) -> str:
     return t.strip()
 
 
-def _panels(text: str) -> "OrderedDict[str, List[str]]":
-    """{panel:title=NSL} * a * b {panel} -> {'NSL': ['a', 'b']}"""
-    out: "OrderedDict[str, List[str]]" = OrderedDict()
-    for m in re.finditer(r'\{panel:[^}]*?title=([^|}]+)[^}]*\}(.*?)\{panel\}', as_text(text), re.S | re.I):
-        title = m.group(1).strip()
-        items = _bullets(m.group(2))
-        if items:
-            out[title] = items
-    return out
-
-
-def _bullets(text: str) -> List[str]:
-    items = []
-    for ln in re.split(r'\r?\n', as_text(text)):
-        s = ln.strip()
-        if not s:
-            continue
-        s = re.sub(r'^(?:[*#\-\u2022]+|\d+[.)])\s*', '', s)
-        s = _clean(s)
-        if len(s) >= 4:
-            items.append(s)
-    return items
-
-
 def _strip_panels(text: str) -> str:
     return re.sub(r'\{panel[^}]*\}.*?\{panel\}', ' ', as_text(text), flags=re.S | re.I)
 
 
-def _problem_paragraphs(description: str, limit: int = 2) -> List[str]:
-    body = _strip_panels(description)
-    body = re.split(r'\n-{4,}|\*MDA Impacts', body)[0]
-    paras = [_clean(p) for p in re.split(r'\r?\n\s*\r?\n', body)]
-    paras = [p for p in paras if len(p) > 20]
-    return paras[:limit]
+def _plain(text: str) -> str:
+    """Collapse markup/whitespace to a single clean plain-English string."""
+    s = _clean(_strip_panels(as_text(text)))
+    s = re.sub(r'\{[^}]*\}', ' ', s)                 # stray macros
+    s = re.sub(r'https?://\S+', ' ', s)              # URLs
+    s = re.sub(r'[*_#|]+', ' ', s)                   # wiki markup
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s
 
 
-def _wiki_tables(text: str) -> List[List[List[str]]]:
-    """Jira wiki tables: '||h1||h2||' header then '|a|b|' rows."""
-    tables, cur = [], None
-    for ln in re.split(r'\r?\n', as_text(text)):
-        s = ln.strip()
-        if s.startswith('||'):
-            cur = [[_clean(c) for c in s.strip('|').split('||')]]
-            tables.append(cur)
-        elif s.startswith('|') and cur is not None:
-            cur.append([_clean(c) for c in s.strip('|').split('|')])
-        else:
-            cur = None
-    return [t for t in tables if len(t) >= 2 and len(t[0]) >= 3]
-
-
-def _tc_label(tc, feature_id: str) -> str:
-    n = getattr(tc, 'summary', '') or ''
-    n = re.sub(r'^(?:TC\d+_)+', '', n)
-    n = re.sub(r'^' + re.escape(feature_id) + r'_', '', n)
-    n = re.sub(r'^(?:TC\d+_)+', '', n)
-    n = re.sub(r'^(?:Verify|Validate|Check|Ensure)_(?:that_)?', '', n, flags=re.I)
-    words = [w for w in n.split('_') if w]
-    lab = ' '.join(words[:9])
-    return (lab[0].upper() + lab[1:]) if lab else n
-
-
-def _about(tc) -> str:
-    d = _clean(getattr(tc, 'description', '') or '')
-    d = re.sub(r'^\s*(?:To validate|UI verification)\s*:\s*', '', d, flags=re.I)
-    return d
-
-
-def _origin(tc) -> str:
-    tr = getattr(tc, 'traceability', None)
-    st = (getattr(tr, 'source_type', '') or '').strip().lower() if tr else ''
-    if st in ('chalk', 'chalk scenario', 'business rule', 'nbop ui', 'nbop'):
-        return 'Chalk'
-    if st in ('jira ac', 'jira'):
-        return 'Jira AC'
-    if st in ('subtask ac', 'subtask'):
-        return 'Subtask'
-    if st == 'attachment':
-        return 'Document'
-    return 'Chalk' if getattr(tc, 'from_chalk', False) else (st.title() or 'Other')
-
-
-_WORD_STOP = {'with', 'that', 'this', 'from', 'when', 'then', 'into', 'their', 'there',
-              'which', 'should', 'would', 'verify', 'validate', 'ensure', 'successfully',
-              'without', 'containing', 'remains', 'existing', 'records', 'record'}
-
-
-def _words(t: str) -> set:
-    return {re.sub(r'(?:ing|ed|es|s)$', '', w) for w in re.findall(r'[a-z0-9]{4,}', (t or '').lower())
-            if w not in _WORD_STOP}
-
-
-def _ac_coverage(acs: List[str], tcs, labels) -> List[Tuple[int, List[str]]]:
-    out = []
-    for i, ac in enumerate(acs, 1):
-        aw = _words(ac)
-        scored = []
-        for n, tc in enumerate(tcs, 1):
-            tw = _words((getattr(tc, 'summary', '') or '').replace('_', ' ') + ' ' + _about(tc))
-            sc = len(aw & tw)
-            if _origin(tc) == 'Jira AC' and sc >= max(2, len(aw) // 2):
-                sc += 5
-            if sc >= 3:
-                scored.append((sc, n))
-        scored.sort(key=lambda x: (-x[0], x[1]))
-        out.append((i, ['TC%02d' % n for _, n in scored[:3]]))
+def _first_sentences(text: str, n: int = 3) -> str:
+    s = _plain(text)
+    if not s:
+        return ''
+    parts = re.split(r'(?<=[.!?])\s+', s)
+    out = ' '.join(parts[:n]).strip()
     return out
+
+
+def _scrub(text: str, fallback: str) -> str:
+    """Banned-phrase safety net: if any banned phrase surfaces, use the fallback."""
+    low = (text or '').lower()
+    if any(b in low for b in _HLS_BANNED):
+        return fallback
+    return text or fallback
 
 
 # ------------------------------------------------------------------ docx helpers
@@ -183,52 +130,334 @@ def _run(p, text, bold=False, size=None, color=None):
     return r
 
 
-def _heading(doc, text, level):
-    h = doc.add_heading(text, level=level)
-    for r in h.runs:
-        r.font.color.rgb = RGBColor.from_string(NAVY if level == 1 else TEAL)
-    return h
-
-
-def _table(doc, header: List[str], rows: List[List[str]], head_fill=NAVY, widths=None):
-    t = doc.add_table(rows=1, cols=len(header))
-    t.style = 'Table Grid'
-    t.alignment = WD_TABLE_ALIGNMENT.LEFT
-    for i, h in enumerate(header):
-        c = t.rows[0].cells[i]
-        c.text = ''
-        _run(c.paragraphs[0], str(h), bold=True, size=9, color='FFFFFF')
-        _shade(c, head_fill)
-    for ri, row in enumerate(rows):
-        cells = t.add_row().cells
-        for i, v in enumerate(row[:len(header)]):
-            cells[i].text = ''
-            _run(cells[i].paragraphs[0], '' if v is None else str(v), size=9)
-            if ri % 2 == 1:
-                _shade(cells[i], ZEBRA)
-    if widths:
-        for row in t.rows:
-            for i, w in enumerate(widths):
-                if i < len(row.cells):
-                    row.cells[i].width = Inches(w)
-    doc.add_paragraph('')
+def _shaded_cell_table(doc, text: str, fill: str):
+    """A 1x1 'Normal Table' whose single cell is shaded `fill`."""
+    t = doc.add_table(rows=1, cols=1)
+    try:
+        t.style = 'Normal Table'
+    except Exception:
+        pass
+    cell = t.rows[0].cells[0]
+    cell.text = text
+    _shade(cell, fill)
     return t
 
 
-def _bold_lead(doc, lead: str, text: str):
-    p = doc.add_paragraph()
-    _run(p, lead, bold=True)
-    _run(p, text)
-    return p
+def _quote(text: str) -> str:
+    return '%s%s%s' % (LQUO, text.strip(), RQUO)
+
+
+# ------------------------------------------------------------------ composition
+def _feature_objective(title: str, blob: str) -> str:
+    """Short, clean noun phrase describing what the feature is about (for caution text).
+
+    Strips bracketed tags like '[NSLNM, INTG]:' and 'New MVNO -' prefixes, drops a
+    trailing jargon parenthetical/file token, and keeps it readable."""
+    t = _plain(title) or 'this feature'
+    t = re.sub(r'^\s*\[[^\]]*\]\s*:?\s*', '', t)             # drop leading [TAG]:
+    t = re.sub(r'^\s*(new\s+mvno|intg|nslnm)\s*[-:]\s*', '', t, flags=re.I)
+    t = re.sub(r'\s*\([^)]*\)\s*$', '', t)                   # drop trailing (CHRTR_deltas_...)
+    t = re.sub(r'\s*(feature|story|epic|process)\s*$', '', t, flags=re.I).strip()
+    t = re.sub(r'\s+', ' ', t).strip(' -:')
+    if not t:
+        return 'this feature'
+    return (t[:1].lower() + t[1:])[:70]
+
+
+def _tc_label(tc, idx: int) -> str:
+    """Short human label; if it carries a banned phrase, fall back to a neutral label
+    so no banned term reaches the client-facing heading."""
+    label = _hls_scenario_name(tc, idx)
+    low = (label or '').lower()
+    if any(b in low for b in _HLS_BANNED):
+        return 'Scenario %02d' % idx
+    return label
+
+
+def _subject(tc, label: str) -> str:
+    """The plain-English 'what' clause for narration.
+
+    Starts from the shared one-liner but REJECTS it if it carries technical jargon
+    (snake_case/ALL-CAPS identifiers, file/table/field names, off-topic systems) or
+    is empty — in those cases it falls back to the cleaned human label so the
+    narration stays client-facing. Never echoes raw step text verbatim."""
+    one = _hls_description(tc, name=label) or ''
+    one = re.sub(r'(?i)^\s*(verify|validate|ensure|confirm|check)\s+(that\s+)?', '', one).strip()
+    one = one.rstrip('.;, ').strip()
+    low = one.lower()
+    jargon = bool(_JARGON_RE.search(one)) or any(t in low for t in _OFFTOPIC_TERMS)
+    if not one or jargon:
+        one = (label or 'the scenario').strip()
+    return _mid_sentence(one)
+
+
+def _mid_sentence(phrase: str) -> str:
+    """Make a phrase read naturally in the middle of a sentence: lowercase each word
+    unless it is an ALL-CAPS acronym (SFTP, UAT, MDN) or a dotted/branded token."""
+    words = []
+    for w in (phrase or '').split(' '):
+        if not w:
+            continue
+        core = re.sub(r'[^A-Za-z0-9]', '', w)
+        if core.isupper() and len(core) > 1:      # acronym — keep as-is
+            words.append(w)
+        elif w[:1].isupper() and w[1:] != w[1:].lower():  # CamelCase/branded — keep
+            words.append(w)
+        else:
+            words.append(w[:1].lower() + w[1:])
+    return ' '.join(words)
+
+
+def _category(tc) -> str:
+    return (getattr(tc, 'category', '') or 'Happy Path').strip()
+
+
+def _tc_text_blob(tc) -> str:
+    """All of a TC's own text (summary/desc/steps) for keyword cues + off-topic scan."""
+    parts = [getattr(tc, 'summary', '') or '', getattr(tc, 'description', '') or '']
+    for s in (getattr(tc, 'steps', None) or []):
+        parts.append(getattr(s, 'summary', '') or '')
+        parts.append(getattr(s, 'expected', '') or '')
+    return _plain(' '.join(parts)).lower()
+
+
+def _has(blob: str, *cues: str) -> bool:
+    return any(c in blob for c in cues)
+
+
+def _narration_template(category: str, blob: str) -> str:
+    """Pick a per-category narration frame refined by keyword cues. Frame has one
+    '{subject}' slot. Deterministic selection: refine by cue first, else category."""
+    # visibility / reporting — only genuine result-visibility intent, not the mere
+    # presence of the words "report"/"audit" (which name the feature, not the check).
+    if _has(blob, 'is visible', 'visibility', 'clearly see', 'outcome is', 'result is visible',
+            'monitor', 'monitoring', 'alert', 'dashboard shows', 'processing-result'):
+        return ('This scenario checks that {subject} is clearly visible after processing, '
+                'so support can see what happened without manual investigation.')
+    # negative / exception
+    if category in ('Negative', 'Edge Case') or _has(
+            blob, 'invalid', 'blank', 'empty', 'missing', 'not found', 'fail', 'incorrect',
+            'exception', ' bad ', 'does not arrive', 'cannot be found'):
+        return ('In this scenario, we deliberately test {subject}. The system should handle it '
+                'safely - one bad record should not stop the rest, and the problem should be '
+                'visible rather than causing a silent failure.')
+    # regression / no-impact
+    if category == 'Regression' or _has(blob, 'not impacted', 'no impact', 'existing', 'unchanged'):
+        return ('This scenario confirms that {subject} does not affect existing functionality. '
+                'Anything that was already working should keep working exactly as before.')
+    # e2e
+    if category == 'E2E' or _has(blob, 'end to end', 'end-to-end', 'full flow'):
+        return ('This scenario walks the full flow end to end for {subject}, confirming the '
+                'pieces work together and the final result is correct.')
+    # validation / compare
+    if _has(blob, 'validate', 'verify', 'compare', 'reconcile', 'match', 'pairing', 'mismatch'):
+        return ('This is where the main checking happens. We compare {subject} and confirm the '
+                'system reacts correctly - correcting what is wrong and leaving what is already '
+                'right unchanged.')
+    # happy-path default
+    return ('In this scenario, we are checking that {subject}. The goal is to confirm the '
+            'expected outcome happens cleanly and the process completes as designed.')
+
+
+def _narration(tc, label: str) -> str:
+    cat = _category(tc)
+    blob = _tc_text_blob(tc)
+    subject = _subject(tc, label)
+    frame = _narration_template(cat, blob)
+    text = frame.format(subject=subject)
+    fallback = ('In this scenario, we are checking that %s behaves as the feature requires.'
+                % (label.lower() if label else 'this scenario'))
+    return _scrub(text, fallback)
+
+
+def _key_message(tc, label: str) -> str:
+    cat = _category(tc)
+    blob = _tc_text_blob(tc)
+    # Category-specific closers read better where they clearly apply.
+    if cat in ('Negative', 'Edge Case') or _has(blob, 'invalid', 'missing', 'not found', 'blank', 'empty'):
+        msg = 'One bad record must not stop the valid ones.'
+    elif cat == 'Regression' or _has(blob, 'no impact', 'not impacted', 'existing'):
+        msg = 'The new feature must not break existing processing.'
+    elif _has(blob, 'already', 'unchanged', 'matches'):
+        msg = 'If the record is already correct, leave it unchanged.'
+    elif _has(blob, 'is visible', 'visibility', 'monitor', 'monitoring', 'processing-result', 'outcome is'):
+        msg = 'Processing is not complete until the outcome is visible and understandable.'
+    else:
+        subject = _subject(tc, label)
+        msg = '%s completes correctly and safely.' % (subject[:1].upper() + subject[1:] if subject else 'The scenario')
+    fallback = 'The scenario behaves as the feature requires.'
+    return _scrub(msg, fallback)
+
+
+def _tc_step_text(tc) -> str:
+    """Just the TC's step summaries + expected (for the grounding check)."""
+    parts = []
+    for s in (getattr(tc, 'steps', None) or []):
+        parts.append(getattr(s, 'summary', '') or '')
+        parts.append(getattr(s, 'expected', '') or '')
+    return ' '.join(parts).strip()
+
+
+def _caution_note(tc, objective: str, evidence_blob: str) -> str:
+    """Emit a caution only when a TC's source steps reference a concept that is NOT
+    grounded in the feature objective — i.e. the step text is banned-and-ungrounded
+    against the feature evidence blob, OR it names an off-topic system/term that does
+    not appear anywhere in the feature evidence. Derived, never hardcoded. Fail open."""
+    step_text = _tc_step_text(tc)
+    if not step_text:
+        return ''
+    blob_low = (evidence_blob or '').lower()
+    # An off-topic term the steps mention that is absent from the feature evidence.
+    detected = next((t for t in _OFFTOPIC_TERMS
+                     if t in step_text.lower() and t not in blob_low), '')
+    banned_ungrounded = False
+    if not detected:
+        try:
+            from .qmetry_pattern_library import _step_is_banned_and_ungrounded
+            banned_ungrounded = bool(_step_is_banned_and_ungrounded(step_text, evidence_blob or ''))
+        except Exception:
+            banned_ungrounded = False
+    if not detected and not banned_ungrounded:
+        return ''
+    # Never surface a banned phrase as the named "system" — genericize it.
+    if detected and any(b in detected.lower() for b in _HLS_BANNED):
+        detected = ''
+    system = (detected.upper() if detected and len(detected) <= 5
+              else (detected or 'unrelated'))
+    return ('Keep the narration aligned to the %s objective. The detailed source steps appear to '
+            'reference unrelated %s processing and should be reviewed separately.'
+            % (objective, system))
+
+
+def _scope_note(tc) -> str:
+    """Emit a scope note when the TC text declares something out of scope."""
+    blob = _tc_text_blob(tc)
+    hit = next((c for c in _SCOPE_CUES if c in blob), '')
+    if not hit:
+        return ''
+    # Try to recover the excluded thing from the sentence that carries the cue.
+    full = _plain(' '.join([getattr(tc, 'description', '') or ''] +
+                           [getattr(s, 'summary', '') or '' for s in (getattr(tc, 'steps', None) or [])]))
+    excluded = hit
+    for sent in re.split(r'(?<=[.!?])\s+', full):
+        if hit in sent.lower():
+            excluded = sent.strip().rstrip('.')[:120] or hit
+            break
+    return ('Present this as scope-dependent. The source material notes that %s is excluded '
+            'from scope.' % excluded)
+
+
+# ----- quick mental model buckets (fixed order; render only non-empty) ---------
+_BUCKETS = [
+    ('Receive the file',
+     lambda cat, blob: _has(blob, 'receive', 'pick up', 'pickup', 'parse', 'ingest', 'load', 'schedul', 'sftp')),
+    ('Validate and compare',
+     lambda cat, blob: _has(blob, 'validate', 'verify', 'compare', 'reconcile', 'match', 'pairing')),
+    ('Correct the mismatch',
+     lambda cat, blob: _has(blob, 'correct', 'update', ' fix', 'mismatch', 'discrepanc')),
+    ('Handle exceptions safely',
+     lambda cat, blob: cat in ('Negative', 'Edge Case') or _has(
+         blob, 'blank', 'empty', 'invalid', 'missing', 'not found', 'fail', 'exception', ' bad ')),
+    ('Avoid unnecessary updates',
+     lambda cat, blob: _has(blob, 'already', 'matches', 'unchanged', 'no update', 'outside scope', 'skip')),
+    ('Regression - no impact',
+     lambda cat, blob: cat == 'Regression' or _has(blob, 'existing', 'not impacted', 'no impact')),
+    ('Show the outcome',
+     lambda cat, blob: _has(blob, 'is visible', 'visibility', 'monitor', 'monitoring',
+                            'processing-result', 'outcome is', 'result is visible')),
+]
+
+
+def _mental_model(tcs) -> "OrderedDict[str, List[str]]":
+    out: "OrderedDict[str, List[str]]" = OrderedDict((label, []) for label, _ in _BUCKETS)
+    for i, tc in enumerate(tcs, 1):
+        cat = _category(tc)
+        blob = _tc_text_blob(tc)
+        tag = 'TC%02d' % i
+        for label, rule in _BUCKETS:
+            try:
+                if rule(cat, blob):
+                    out[label].append(tag)
+            except Exception:
+                pass
+    return OrderedDict((k, v) for k, v in out.items() if v)
+
+
+def _oxford(tcs: List[str]) -> str:
+    """'TC01', 'TC01 and TC02', 'TC01, TC02 and TC03'."""
+    if not tcs:
+        return ''
+    if len(tcs) == 1:
+        return tcs[0]
+    if len(tcs) == 2:
+        return '%s and %s' % (tcs[0], tcs[1])
+    return '%s and %s' % (', '.join(tcs[:-1]), tcs[-1])
+
+
+def _opening_narrative(title: str, desc: str, objective: str) -> str:
+    """One plain paragraph. Built from the feature description with the (repeated)
+    title prefix removed and technical jargon sentences dropped, so it reads as a
+    clean client-facing restatement rather than echoing internal field names."""
+    body = _plain(desc)
+    plain_title = _plain(title)
+    # Descriptions typically begin by repeating the title — strip that prefix.
+    if plain_title and body.lower().startswith(plain_title.lower()):
+        body = body[len(plain_title):].lstrip(' -|:').strip()
+    # Keep only the opening sentences that are free of technical jargon.
+    clean_sents = []
+    for sent in re.split(r'(?<=[.!?])\s+', body):
+        s = sent.strip()
+        if not s:
+            continue
+        if _JARGON_RE.search(s) or any(t in s.lower() for t in _OFFTOPIC_TERMS):
+            break  # stop at the first technical sentence
+        clean_sents.append(s)
+        if len(clean_sents) >= 3:
+            break
+    gist = ' '.join(clean_sents).strip()
+    if gist:
+        text = 'The overall concept is simple. %s' % gist
+    else:
+        obj = objective[:1].upper() + objective[1:] if objective else 'This feature'
+        text = ('The overall concept is simple. %s receives its source data, validates it, and '
+                'acts on it so the right outcome is reached safely.' % obj)
+    fallback = ('The overall concept is simple. We receive the source data, validate it, and act '
+                'on it so the right outcome is reached safely.')
+    return _scrub(text, fallback)
+
+
+# Map each bucket label to a short theme phrase for the closing summary.
+_THEME_PHRASE = {
+    'Receive the file': 'the source data can be received and read',
+    'Validate and compare': 'the data can be validated and compared',
+    'Correct the mismatch': 'incorrect information can be corrected',
+    'Handle exceptions safely': 'problems are handled safely without stopping the valid work',
+    'Avoid unnecessary updates': 'records that are already correct are left unchanged',
+    'Regression - no impact': 'existing functionality keeps working',
+    'Show the outcome': 'the outcome is clearly visible afterwards',
+}
+
+
+def _closing_summary(buckets: "OrderedDict[str, List[str]]") -> str:
+    themes = [_THEME_PHRASE[b] for b in buckets if b in _THEME_PHRASE]
+    if themes:
+        body = _oxford(themes) if len(themes) <= 2 else '%s, and %s' % (', '.join(themes[:-1]), themes[-1])
+        text = 'Across these scenarios, we are proving that %s.' % body
+    else:
+        text = ('Across these scenarios, we are proving that the feature behaves correctly and '
+                'safely across the situations it must handle.')
+    fallback = ('Across these scenarios, we are proving that the feature behaves correctly and '
+                'safely across the situations it must handle.')
+    return _scrub(text, fallback)
 
 
 # ------------------------------------------------------------------ main
 def generate_demo_doc(suite, jira=None, chalk=None, log: Callable = print,
                       out_dir: Optional[Path] = None) -> Optional[Path]:
-    """Write <FID>_<PI>_Test_Suite_Demo_<ts>.docx. Returns the path (None on failure)."""
+    """Write <FID>_<PI>_Test_Case_Presenter_Guide_<ts>.docx. Returns path (None on failure)."""
     try:
         return _build(suite, jira, chalk, log, out_dir)
-    except Exception as e:  # a demo doc must never break suite generation
+    except Exception as e:  # a presenter guide must never break suite generation
         if log:
             log('[DEMO-DOC] skipped: %s' % str(e)[:120])
         return None
@@ -236,206 +465,96 @@ def generate_demo_doc(suite, jira=None, chalk=None, log: Callable = print,
 
 def _build(suite, jira, chalk, log, out_dir):
     fid = getattr(suite, 'feature_id', '') or (getattr(jira, 'key', '') if jira else '')
-    title = getattr(suite, 'feature_title', '') or (getattr(jira, 'summary', '') if jira else '')
+    title = (getattr(suite, 'feature_title', '') or (getattr(jira, 'summary', '') if jira else '')
+             or fid or 'Feature')
     pi = getattr(suite, 'pi', '') or (getattr(jira, 'pi', '') if jira else '') or ''
-    try:
-        from .config import _pi_to_iteration
-        iteration = _pi_to_iteration(pi) if pi else ''
-    except Exception:
-        iteration = ''
     tcs = list(getattr(suite, 'test_cases', None) or [])
-    n_steps = sum(len(getattr(t, 'steps', None) or []) for t in tcs)
-    labels = [_tc_label(t, fid) for t in tcs]
-    desc = as_text(getattr(jira, 'description', '')) if jira else ''
+
+    # Feature objective blob — Chalk/Jira desc + scope + AC — used for opening + grounding.
+    desc = _plain(getattr(suite, 'feature_desc', '') or (as_text(getattr(jira, 'description', '')) if jira else ''))
+    scope = _plain(getattr(suite, 'scope', '') or (getattr(chalk, 'scope', '') if chalk is not None else ''))
+    objective = _feature_objective(title, ' '.join(x for x in (title, desc, scope) if x))
+
+    # Feature evidence blob drives the grounded caution check (fail open on any error).
+    try:
+        from .step_assembler import _feature_evidence_blob
+        evidence_blob = _feature_evidence_blob(suite) or ''
+    except Exception:
+        evidence_blob = ' '.join(x for x in (title, desc, scope) if x)
 
     doc = Document()
     sec = doc.sections[0]
     for side in ('left_margin', 'right_margin', 'top_margin', 'bottom_margin'):
         setattr(sec, side, Inches(0.79))
     doc.styles['Normal'].font.name = 'Calibri'
-    doc.styles['Normal'].font.size = Pt(10)
+    doc.styles['Normal'].font.size = Pt(11)
 
     # ---------------- title block
-    _run(doc.add_paragraph(), 'Test Suite Demo', bold=True, size=26, color=NAVY)
-    _run(doc.add_paragraph(), '%s  |  %s' % (fid, pi or 'PI n/a'), bold=True, size=14, color=TEAL)
-    _run(doc.add_paragraph(), title, size=12)
-    try:
-        from shared.mcp_gateway.toggle import legacy_enabled
-        via = 'direct API' if legacy_enabled() else 'the approved Spectrum MCP gateway'
-    except Exception:
-        via = 'the TSG cache'
-    _run(doc.add_paragraph(), 'Prepared %s  |  Source: Jira + Chalk via %s; test cases from TSG'
-         % (datetime.now().strftime('%d %b %Y'), via), size=9, color=GREY)
+    p = doc.add_paragraph()
+    p.style = doc.styles['Title']
+    _run(p, title)
+    _run(p, '\nTest Case Presenter Guide')
+    _run(doc.add_paragraph(), 'Plain-English narration for screen-share walkthroughs', bold=True)
+    _run(doc.add_paragraph(), '%s | %s' % (fid, pi or 'PI'))
 
-    # ---------------- 1. at a glance
-    _heading(doc, '1. Feature at a glance', 1)
-    rows = [['Feature', '%s (%s) - %s%s' % (fid, (getattr(jira, 'issue_type', '') or 'Feature') if jira else 'Feature',
-                                            JIRA_BASE, fid)],
-            ['PI / Iteration', '%s%s' % (pi or 'n/a', ' (%s)' % iteration if iteration else '')]]
-    if jira:
-        rows += [['Status (Jira)', getattr(jira, 'status', '') or 'n/a'],
-                 ['Priority', getattr(jira, 'priority', '') or 'n/a'],
-                 ['Assignee / Reporter', '%s / %s' % (getattr(jira, 'assignee', '') or 'n/a',
-                                                      getattr(jira, 'reporter', '') or 'n/a')],
-                 ['Labels', ', '.join(getattr(jira, 'labels', None) or []) or 'None']]
-        subs = getattr(jira, 'subtasks', None) or []
-        if subs:
-            rows.append(['Dev subtask(s)', '; '.join('%s - %s' % (s.get('key', ''), (s.get('summary', '') or '')[:70])
-                                                   for s in subs[:4])])
-        links = getattr(jira, 'linked_issues', None) or []
-        if links:
-            rows.append(['Linked issues', '; '.join('%s - %s' % (l.get('key', ''), (l.get('summary', '') or '')[:70])
-                                                  for l in links[:4])])
-    chalk_url = ''
-    try:
-        from .database import _conn
-        c = _conn()
-        r = c.execute('SELECT url FROM pi_pages WHERE label=?', (pi,)).fetchone()
-        c.close()
-        chalk_url = (r['url'] if r else '') or ''
-    except Exception:
-        pass
-    if chalk is not None and getattr(chalk, 'scenarios', None):
-        rows.append(['Chalk spec', '%s page%s' % (pi or 'PI', ' - %s' % chalk_url if chalk_url else '')])
-    rows.append(['Suite', '%d test cases / %d steps' % (len(tcs), n_steps)])
-    _table(doc, ['Field', 'Value'], rows, widths=[1.7, 5.2])
+    # ---------------- opening narrative (shaded)
+    _shaded_cell_table(doc, 'Opening narrative\n%s'
+                       % _quote(_opening_narrative(title, desc or scope, objective)), OPEN_FILL)
 
-    # ---------------- 2. the problem
-    _heading(doc, '2. The problem in plain words', 1)
-    paras = _problem_paragraphs(desc)
-    for p in paras or ['No description in Jira.']:
-        doc.add_paragraph(p)
-    scope = _clean(getattr(chalk, 'scope', '') or '') if chalk is not None else ''
-    if scope:
-        lines = [l for l in re.split(r'\r?\n', getattr(chalk, 'scope', '') or '') if l.strip()]
-        keep = []
-        for l in lines:
-            s = _clean(l)
-            if not s or s.startswith('#') or s.lower().startswith(('[pi-', 'summary:')) or s == title:
-                continue
-            keep.append(s.lstrip('#').strip())
-            if sum(len(x) for x in keep) > 650:
-                break
-        if keep:
-            _heading(doc, 'What Chalk says', 2)
-            doc.add_paragraph(' '.join(keep)[:900])
-    tables = []
-    for src in [desc] + [as_text(s.get('description', '')) for s in (getattr(jira, 'subtasks', None) or [])] if jira else []:
-        tables += _wiki_tables(src)
-    if tables:
-        best = sorted(tables, key=lambda t: (0 if any('field' in h.lower() for h in t[0]) else 1, -len(t)))[0]
-        if len(best) <= 14:
-            _heading(doc, 'Key data (from Jira)', 2)
-            _table(doc, best[0], best[1:])
-
-    # ---------------- 3. deliverables + AC
-    panels = _panels(desc)
-    ac_raw = (getattr(jira, 'acceptance_criteria', '') or '') if jira else ''
-    acs = []
-    ac_panels = _panels(ac_raw)
-    for v in ac_panels.values():
-        acs += v
-    if not acs:
-        acs = _bullets(_strip_panels(ac_raw)) or _bullets(ac_raw)
-    if panels or acs:
-        _heading(doc, '3. What each team must deliver', 1)
-        for team, items in panels.items():
-            _heading(doc, team, 2)
-            for it in items:
-                doc.add_paragraph(it, style='List Bullet')
-        if acs:
-            _heading(doc, 'Acceptance criteria (Jira)', 2)
-            for i, a in enumerate(acs, 1):
-                doc.add_paragraph('AC %d: %s' % (i, a), style='List Bullet')
-
-    # ---------------- 4. overview
-    _heading(doc, '4. Test suite overview', 1)
-    src = Counter(_origin(t) for t in tcs)
-    parts = ['%d from %s' % (n, k if k != 'Chalk' else 'the Chalk %s scenarios' % (pi or 'PI'))
-             for k, n in src.most_common()]
-    line = '%d test cases, %d steps. %s.' % (len(tcs), n_steps, ', '.join(parts))
-    if acs:
-        cov = _ac_coverage(acs, tcs, labels)
-        covered = ['AC %d by %s' % (i, ', '.join(t)) for i, t in cov if t]
-        gaps = ['AC %d' % i for i, t in cov if not t]
-        if covered:
-            line += ' Acceptance criteria: %s.' % '; '.join(covered)
-        if gaps:
-            line += ' No clear test found for %s - check coverage.' % ', '.join(gaps)
-    doc.add_paragraph(line)
-    cats = Counter(getattr(t, 'category', '') or 'Uncategorised' for t in tcs)
-    ordered = [c for c in CATEGORY_ORDER if c in cats] + [c for c in cats if c not in CATEGORY_ORDER]
-    _table(doc, ['Category', 'Count'], [[c, cats[c]] for c in ordered], widths=[2.5, 1.0])
-    pris = Counter(getattr(t, 'priority', '') or 'P3' for t in tcs)
-    _table(doc, ['Priority', 'Count', 'Meaning'],
-           [[p, pris[p], PRIORITY_MEANING.get(p, '')] for p in ('P1', 'P2', 'P3') if pris.get(p)],
-           widths=[0.9, 0.8, 4.4])
-    _table(doc, ['TC', 'What it proves', 'Category', 'Priority'],
-           [['TC%02d' % i, labels[i - 1], getattr(t, 'category', ''), getattr(t, 'priority', '')]
-            for i, t in enumerate(tcs, 1)], widths=[0.6, 4.3, 1.2, 0.8])
-
-    # ---------------- 5. walkthrough
-    _heading(doc, '5. Test case walkthrough', 1)
-    _run(doc.add_paragraph(), 'Each test case below explains what it is about, the pre-condition, and how it is executed.',
-         color=GREY)
-    for i, t in enumerate(tcs, 1):
-        steps = list(getattr(t, 'steps', None) or [])
-        _heading(doc, 'TC%02d - %s' % (i, labels[i - 1]), 2)
-        _run(doc.add_paragraph(), '%s  |  %s  |  %d steps  |  Source: %s' % (
-            getattr(t, 'category', ''), getattr(t, 'priority', ''), len(steps), _origin(t)),
-            bold=True, size=9, color=TEAL)
-        about = _about(t)
-        if about:
-            _bold_lead(doc, 'What it is about: ', about)
-        pre = _clean(getattr(t, 'preconditions', '') or '')
-        if pre:
-            _bold_lead(doc, 'Pre-condition: ', re.sub(r'\s*\n\s*', '; ', pre))
-        if steps:
-            _table(doc, ['#', 'Step', 'Expected result'],
-                   [[getattr(s, 'step_num', n) or n, getattr(s, 'summary', '') or '', getattr(s, 'expected', '') or '']
-                    for n, s in enumerate(steps, 1)], head_fill=TEAL, widths=[0.4, 3.4, 3.1])
-
-    # ---------------- 6. how produced
-    _heading(doc, '6. How this suite was produced', 1)
-    for b in [
-        'TSG read the feature from Jira (description, acceptance criteria, subtasks, linked issues)'
-        + (' and from the %s Chalk page (%d scenarios).' % (pi, len(getattr(chalk, 'scenarios', []) or []))
-           if chalk is not None and getattr(chalk, 'scenarios', None) else '.'),
-        'All Jira and Chalk data was fetched through %s.' % via,
-        'Each Chalk scenario became a test case with steps, expected results and test data; Jira '
-        'acceptance criteria not already covered were added as their own test cases.',
-        'An output pass cleaned wiki/macro markup, made every name unique, and turned "old behaviour" '
-        'lines into executable log checks. Categories and priorities are rule-based - have the feature '
-        'owner confirm them.',
-    ]:
+    # ---------------- how to use
+    doc.add_heading('How to use this guide', level=1)
+    for b in (
+        'Keep the test case open on screen and use the %sWhat to say%s section as your narration.' % (LQUO, RQUO),
+        'Use the %sKey message%s as a short closing statement before moving to the next test case.' % (LQUO, RQUO),
+        'The wording is intentionally non-technical so business, operations, and technical '
+        'audiences can follow the same walkthrough.',
+    ):
         doc.add_paragraph(b, style='List Bullet')
+    doc.add_paragraph('')
 
-    # ---------------- 7. items to confirm
-    items = []
-    if chalk is not None:
-        ids = Counter((getattr(s, 'scenario_id', '') or '').strip() for s in (getattr(chalk, 'scenarios', None) or []))
-        for sid, n in ids.items():
-            if sid and n > 1:
-                items.append('Chalk scenario ID %s is used by %d scenarios - confirm with the Chalk page author.' % (sid, n))
-    for i, t in enumerate(tcs, 1):
-        g = getattr(t, 'grounding_score', None)
-        try:
-            g = float(str(g).rstrip('%')) if g not in (None, '') else None
-        except ValueError:
-            g = None
-        if g is not None and 0 <= g < 80:
-            items.append('TC%02d grounding is %.0f%% - review its steps against the source.' % (i, g))
-    for w in (getattr(suite, 'warnings', None) or [])[:8]:
-        items.append(_clean(str(w))[:240])
-    _heading(doc, '7. Items to confirm before execution', 1)
-    for it in items or ['No open items detected automatically.']:
-        doc.add_paragraph(it, style='List Bullet')
+    # ---------------- per TC
+    for i, tc in enumerate(tcs, 1):
+        label = _tc_label(tc, i)
+        doc.add_heading('TC%02d | %s' % (i, label), level=2)
+
+        p = doc.add_paragraph()
+        _run(p, 'What to say', bold=True)
+        _run(p, '\n', bold=True)
+        _run(p, _quote(_narration(tc, label)))
+
+        _shaded_cell_table(doc, 'Key message: %s' % _key_message(tc, label), KEY_FILL)
+
+        caution = _caution_note(tc, objective, evidence_blob)
+        if caution:
+            cp = doc.add_paragraph()
+            _run(cp, 'Presenter caution: ', bold=True)
+            _run(cp, caution)
+        snote = _scope_note(tc)
+        if snote:
+            sp = doc.add_paragraph()
+            _run(sp, 'Scope note: ', bold=True)
+            _run(sp, snote)
+
+        doc.add_paragraph('')
+
+    # ---------------- closing summary
+    buckets = _mental_model(tcs)
+    doc.add_heading('Closing summary', level=1)
+    doc.add_paragraph(_quote(_closing_summary(buckets)))
+
+    # ---------------- quick mental model
+    doc.add_heading('Quick mental model', level=2)
+    for label, tags in buckets.items():
+        mp = doc.add_paragraph()
+        _run(mp, '%s: ' % label, bold=True)
+        _run(mp, _oxford(tags))
 
     out_dir = Path(out_dir) if out_dir else OUTPUTS
     out_dir.mkdir(parents=True, exist_ok=True)
-    name = '%s_%s_Test_Suite_Demo_%s.docx' % (fid, (pi or 'PI').replace(' ', ''), datetime.now().strftime('%Y%m%d_%H%M%S'))
+    name = '%s_%s_Test_Case_Presenter_Guide_%s.docx' % (
+        fid, (pi or 'PI').replace(' ', ''), datetime.now().strftime('%Y%m%d_%H%M%S'))
     path = out_dir / name
     doc.save(str(path))
     if log:
-        log('[DEMO-DOC] Test Suite Demo saved: %s' % name)
+        log('[DEMO-DOC] Test Case Presenter Guide saved: %s' % name)
     return path
