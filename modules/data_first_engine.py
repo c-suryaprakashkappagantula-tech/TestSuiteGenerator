@@ -1168,6 +1168,41 @@ def _build_cr_suite_v8(jira, chalk, parsed_docs, options, deep_mine_result, log,
         except Exception:
             pass
 
+    # ── FEAT-001 analyst-mode derivation for the narrow-CR path ──
+    # The narrow-CR branch returns before the main V8 path ever reaches the
+    # dimension-extractor's analyst derivation and the analyst validity gate, so a CR like
+    # MWTGPROV-4533 (fix E3812 on PSIM/eSIM swap) produced ZERO analyst scenarios even with
+    # data_only=False. Mirror the main path here: in analyst mode ONLY, derive evidence-
+    # grounded negative/boundary/alternate-flow/regression scenarios from this feature's own
+    # Jira AC + Chalk, convert each to a TestCase with the SAME converter the path already
+    # uses (_build_scenario_tc), append BEFORE the grounding gate so derived TCs are held to
+    # the same gate/coverage/CHALK-GUARD, then run the analyst validity gate to keep/flag/
+    # drop them by their traceability pointer. In default mode (data_only True) this is a
+    # complete no-op — the CR suite stays byte-identical.
+    if not options.get('data_only', True):
+        try:
+            from . import analyst_derivation as _ad
+            from .tc_builder import _build_scenario_tc as _bld
+            _existing_cr_titles = [getattr(tc, 'summary', '') or '' for tc in suite.test_cases]
+            _cr_derived = _ad.derive_analyst_scenarios(
+                jira, chalk, classification='cr_bug_fix',
+                existing_titles=_existing_cr_titles, log=log)
+            _cr_added = 0
+            for _sc in _cr_derived:
+                _dtc = _bld(_sc, jira, feature_title, feature_type='cr_bug_fix')
+                if _dtc is not None:
+                    suite.test_cases.append(_dtc)
+                    _cr_added += 1
+            if _cr_added:
+                log('[V8-ENGINE] CR path: %d evidence-derived analyst TC(s) added for %s'
+                    % (_cr_added, feature_id))
+            from .analyst_validity import apply_analyst_validity_gate as _gate
+            _gate(suite, jira, chalk, log=log)
+        except Exception as _cr_an_err:
+            log('[V8-ENGINE]   WARNING: CR analyst derivation/gate failed: %s — continuing'
+                % str(_cr_an_err)[:120])
+            _record_degraded('CR analyst derivation/gate', _cr_an_err)
+
     # ── Grounding gate, same as the non-CR path (Step 4b) ──
     #
     # Before this, `_build_cr_suite_v8` returned without ever calling `gate_suite`, so CR

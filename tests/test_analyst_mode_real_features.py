@@ -133,6 +133,57 @@ def test_zero_banned_both_modes(build_suite):
         _assert_no_banned(analyst, label='%s analyst' % feature_id)
 
 
+# FEAT-001: thin API / batch / CR features that produced ZERO analyst scenarios before
+# the broadening, and must now gain evidence-derived analyst scenarios.
+FEAT001_FEATURES = ['MWTGPROV-4575', 'MWTGPROV-4503', 'MWTGPROV-4533']
+
+
+@pytest.mark.parametrize('feature_id', FEAT001_FEATURES)
+def test_feat001_thin_features_gain_analyst_scenarios(build_suite, feature_id):
+    """Each thin feature now yields > 0 analyst scenarios in analyst mode (was 0) and stays
+    banned-token clean. Self-skips if the feature is not in the cache."""
+    analyst = build_suite(feature_id, {'data_only': False})
+    analyst_tcs = [tc for tc in analyst.test_cases if is_analyst(tc)]
+    assert analyst_tcs, \
+        'FEAT-001: %s should gain > 0 analyst scenarios in analyst mode' % feature_id
+
+    # Every surviving analyst TC traces to this feature's own evidence (keep/flag).
+    evidence = _feature_evidence(build_suite, feature_id)
+    for tc in analyst_tcs:
+        verdict, _reason = scenario_is_valid(tc, evidence)
+        assert verdict in ('keep', 'flag'), \
+            'surviving analyst TC %r classified %r on %s' % (tc.summary, verdict, feature_id)
+
+    # The FEAT-001 analyst additions must not introduce ANY banned token beyond whatever
+    # the default-mode suite already carries. (The narrow-CR path has a pre-existing
+    # Service-Grouping/Century backstop gap in BOTH modes; FEAT-001 does not touch it, so
+    # the correct, isolating assertion is "no NEW banned tokens from analyst mode" plus a
+    # direct check that no banned token sits on an analyst-derived TC.)
+    default = build_suite(feature_id)
+    default_banned = {t for t in _BANNED_TOKENS if t.lower() in _blob(default)}
+    analyst_banned = {t for t in _BANNED_TOKENS if t.lower() in _blob(analyst)}
+    assert analyst_banned <= default_banned, \
+        'FEAT-001 analyst mode introduced NEW banned tokens on %s: %s' % (
+            feature_id, analyst_banned - default_banned)
+    # No banned token may sit on an analyst-derived/matrix TC itself.
+    for tc in analyst_tcs:
+        tc_blob = '\n'.join('%s %s' % (getattr(s, 'summary', '') or '',
+                                       getattr(s, 'expected', '') or '')
+                            for s in (tc.steps or [])).lower()
+        for token in _BANNED_TOKENS:
+            assert token.lower() not in tc_blob, \
+                'banned token %r on analyst TC %r (%s)' % (token, tc.summary, feature_id)
+
+
+@pytest.mark.parametrize('feature_id', FEAT001_FEATURES)
+def test_feat001_default_mode_has_no_analyst_scenarios(build_suite, feature_id):
+    """In default mode (data_only True) these features carry ZERO analyst scenarios —
+    the broadening is analyst-mode-only. Self-skips if the feature is absent."""
+    default = build_suite(feature_id)
+    assert not [tc for tc in default.test_cases if is_analyst(tc)], \
+        'FEAT-001: %s must have no analyst scenarios in default mode' % feature_id
+
+
 def _analyst_matrix_extracted(build_suite, feature_id):
     """Count analyst-matrix scenarios the extractor produces for this feature (pre-build),
     so the test can tell whether the gate dropped any before they became TCs."""

@@ -7,7 +7,23 @@ not guaranteed to be on sys.path. Centralise path setup here instead of duplicat
 import sys
 from pathlib import Path
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+def _find_repo_root():
+    """Locate the repository root that holds the ``shared`` package.
+
+    A normal checkout has it at ``parents[2]``; a nested git worktree
+    (``TestSuiteGenerator/.worktrees/<branch>/``) pushes it further up. Walk the
+    parents and pick the first that contains ``shared``, falling back to the
+    historical ``parents[2]`` so a normal checkout resolves identically.
+    """
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / 'shared').is_dir():
+            return parent
+    return here.parents[2]
+
+
+_REPO_ROOT = _find_repo_root()
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 

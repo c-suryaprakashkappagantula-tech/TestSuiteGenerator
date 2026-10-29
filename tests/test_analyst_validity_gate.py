@@ -129,6 +129,63 @@ def test_duplicate_grounded_tcs_collapsed():
     assert 'Verify suspend succeeds for Active line' in _summaries(suite)
 
 
+def _derived_tc(sno, title, source_id, extracted_text, source_type='Jira AC',
+                category='Edge Case'):
+    """A FEAT-001 evidence-derived analyst TC carrying a traceability pointer."""
+    tc = TestCase(sno=sno, summary=title, description=title, category=category,
+                  steps=_distinct_steps(title))
+    tc.traceability = TraceabilityRecord(source_type=source_type, source_id=source_id,
+                                         extracted_text=extracted_text, confidence=1.0)
+    return tc
+
+
+def test_derived_boundary_with_pointer_in_evidence_is_kept():
+    # extracted_text ("suspend") traces into the feature evidence (summary/description),
+    # so the derived boundary TC is KEPT.
+    boundary = _derived_tc('TC03', 'Verify value at the suspend boundary is accepted',
+                           'AC-Boundary-%s' % FID,
+                           extracted_text='suspend an Active subscriber line')
+    grounded = _grounded_tc('TC01', 'Verify suspend succeeds for Active line',
+                            '%s_scenario_1' % FID)
+    suite = _suite([grounded, boundary])
+    apply_analyst_validity_gate(suite, _Jira(), chalk=None, log=None)
+    assert 'Verify value at the suspend boundary is accepted' in _summaries(suite)
+
+
+def test_derived_negative_with_pointer_absent_is_dropped_or_flagged():
+    # extracted_text names a concept that is NOT in the feature evidence, and the subject
+    # itself shares no meaningful token with it either, so the derived TC is DROPPED.
+    neg = _derived_tc('TC03', 'Verify quantum teleport rejected for malformed payload',
+                      'AC-Negative-%s' % FID,
+                      extracted_text='quantum teleport handshake failed',
+                      category='Negative')
+    grounded = _grounded_tc('TC01', 'Verify suspend succeeds for Active line',
+                            '%s_scenario_1' % FID)
+    jira = _Jira()
+    jira.summary = 'Suspend a line'
+    jira.description = 'suspend the active line'
+    jira.acceptance_criteria = ['suspend an active line']
+    suite = _suite([grounded, neg])
+    apply_analyst_validity_gate(suite, jira, chalk=None, log=None)
+    summaries = _summaries(suite)
+    # Either dropped (removed) or flagged (kept with needs_review) — never silently kept.
+    if 'Verify quantum teleport rejected for malformed payload' in summaries:
+        kept = {tc.summary: tc for tc in suite.test_cases}
+        assert getattr(kept['Verify quantum teleport rejected for malformed payload'],
+                       'needs_review', False) is True
+
+
+def test_derived_concurrency_without_evidence_still_dropped():
+    # A2/A3 keep their old behavior: a Concurrency TC with no concurrency evidence drops.
+    conc = _analyst_tc('TC03', 'Verify concurrent suspend requests handled',
+                       'Concurrency-%s' % FID)
+    grounded = _grounded_tc('TC01', 'Verify suspend succeeds for Active line',
+                            '%s_scenario_1' % FID)
+    suite = _suite([grounded, conc])
+    apply_analyst_validity_gate(suite, _Jira(), chalk=None, log=None)
+    assert 'Verify concurrent suspend requests handled' not in _summaries(suite)
+
+
 def test_chalk_tcs_retained_after_risk_ordering():
     chalk1 = _grounded_tc('TC01', 'Verify suspend succeeds for Active line',
                           '%s_scenario_1' % FID)

@@ -202,9 +202,21 @@ def _deduplicate_scenarios(scenarios: List[ExtractedScenario]) -> tuple:
     except Exception:
         def _is_chalk(_sc):
             return False
+    # Analyst-mode scenarios (D1/D2/A1/A2/A3 matrices + FEAT-001 evidence-derived kinds)
+    # are intentionally derived from the feature's own AC/Chalk and are reconciled by the
+    # analyst validity gate downstream. Their titles can legitimately overlap >=75% with a
+    # grounded Chalk/AC scenario (a negative/boundary counterpart restates the positive
+    # line), so the near-dup collapse here must NOT silently delete them — the gate, not
+    # this estimator, owns their keep/flag/drop decision. These scenarios exist ONLY in
+    # analyst mode, so default-mode dedup is unchanged.
+    try:
+        from .scenario_title_sanitizer import is_analyst_scenario as _is_analyst
+    except Exception:
+        def _is_analyst(_sc):
+            return False
 
     def _protected(sc) -> bool:
-        return bool(_is_chalk(sc) or getattr(sc, 'user_requested', False))
+        return bool(_is_chalk(sc) or _is_analyst(sc) or getattr(sc, 'user_requested', False))
 
     # Phase 1: Exact title dedup
     seen_titles = set()
