@@ -750,6 +750,21 @@ def build_test_suite_v8(
     # _assert_chalk_coverage call — so the semantic dedup collapses redundant restatements
     # and the feature classification (batch_file/mediation) sets preconditions once, and
     # Chalk coverage is re-verified on the reconciled suite. See modules/step_assembler.py.
+    # ── STEP 2: Analyst-mode validity/reconciliation gate on the COMBINED set ──
+    # Runs ONLY in Analyst mode (data_only False). In default mode this is a no-op so
+    # the grounded-only output stays byte-comparable. It must run BEFORE reconcile (and
+    # therefore before polish/export and the RULE #1 _assert_chalk_coverage invariant):
+    # grounded TCs are always kept, unsupported analyst TCs are dropped, borderline
+    # analyst TCs are flagged needs_review (surfaced by reconcile as [REVIEW]), and the
+    # combined kept set is deduped + risk-ordered with the Chalk-first invariant preserved.
+    if not _data_only:
+        try:
+            from .analyst_validity import apply_analyst_validity_gate
+            apply_analyst_validity_gate(suite, jira, chalk, log=log)
+        except Exception as _av_err:
+            log('[V8-ENGINE]   WARNING: analyst validity gate failed: %s — continuing' % str(_av_err)[:100])
+            _record_degraded('analyst validity gate', _av_err)
+
     try:
         from .step_assembler import StepAssembler
         StepAssembler(log=log).reconcile(suite, classification, log=log)
