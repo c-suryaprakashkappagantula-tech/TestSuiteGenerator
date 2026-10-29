@@ -49,7 +49,18 @@ _ANALYST_PREFIXES = {
     'field-validation-matrix': 'field_validation',
     'idempotency': 'idempotency',
     'concurrency': 'concurrency',
+    # ── FEAT-001 evidence-derived analyst kinds (modules/analyst_derivation.py) ──
+    # These carry their own traceability pointer (source.extracted_text) back to the
+    # exact Jira AC line / Chalk element they were mined from. Validity hinges on that
+    # pointer being present in the feature's evidence, NOT on a fixed token vocabulary.
+    'ac-negative': 'ac_negative',
+    'ac-boundary': 'ac_boundary',
+    'ac-altflow': 'ac_alt_flow',
+    'ac-regression': 'ac_regression',
 }
+
+# The four FEAT-001 evidence-derived kinds, kept/flagged by their traceability pointer.
+_DERIVED_KINDS = frozenset(('ac_negative', 'ac_boundary', 'ac_alt_flow', 'ac_regression'))
 
 # ── Subject token vocabularies (all lowercase; matched against the evidence blob) ──
 # State tokens a State-Transition-Matrix scenario needs the evidence to mention.
@@ -220,8 +231,72 @@ def scenario_is_valid(scenario_or_tc, evidence_blob):
             return 'keep', 'evidence implies concurrency/idempotency'
         return 'drop', 'no concurrency/idempotency evidence on the feature'
 
+    if kind in _DERIVED_KINDS:
+        # FEAT-001 evidence-derived scenarios. Each carries a traceability pointer
+        # (source.extracted_text) back to the exact AC line / Chalk element it was mined
+        # from. KEEP when that pointer is confirmed in the feature's own evidence; FLAG
+        # when the scenario is on-topic (subject tokens overlap the evidence) but the
+        # pointer itself is not confirmed; DROP otherwise.
+        if _evidence_pointer_present(scenario_or_tc, blob):
+            return 'keep', 'derived scenario traces to evidence (pointer present)'
+        if _subject_shares_token(scenario_or_tc, blob):
+            return 'flag', 'derived scenario on-topic but pointer not confirmed in evidence'
+        return 'drop', 'derived scenario pointer not present in evidence'
+
     # Unknown analyst kind — be conservative and flag for review.
     return 'flag', 'unrecognized analyst subject kind'
+
+
+# ── FEAT-001 evidence-pointer helpers (for the four derived analyst kinds) ────────
+
+# Short/common words that are not meaningful "subject tokens" on their own — a shared
+# occurrence of one of these in both the pointer and the evidence does not confirm a trace.
+_STOPWORD_TOKENS = frozenset((
+    'the', 'and', 'for', 'with', 'that', 'this', 'from', 'when', 'not', 'are', 'was',
+    'has', 'have', 'does', 'into', 'per', 'via', 'any', 'all', 'but', 'its', 'only',
+    'is', 'in', 'of', 'to', 'a', 'an', 'or', 'on', 'be', 'by', 'as', 'at', 'no',
+    'verify', 'validate', 'ensure', 'confirm', 'check', 'remains', 'unchanged',
+))
+
+
+def _pointer_text(subject) -> str:
+    """The traceability pointer text a derived scenario traces back to (extracted_text)."""
+    src = getattr(subject, 'traceability', None) or getattr(subject, 'source', None)
+    return _norm(getattr(src, 'extracted_text', '') if src is not None else '')
+
+
+def _subject_tokens(text):
+    """Meaningful (non-stopword, >=3 char) word tokens from *text*, underscore-normalized."""
+    return {t for t in re.findall(r'[a-z0-9]+', _norm(text))
+            if len(t) >= 3 and t not in _STOPWORD_TOKENS}
+
+
+def _evidence_pointer_present(subject, blob) -> bool:
+    """True when the derived scenario's traceability pointer traces into *blob*.
+
+    A match is confirmed when the normalized extracted_text is a non-empty substring of
+    the evidence blob OR when it shares a meaningful (non-stopword) subject token with it.
+    Pure, deterministic."""
+    pointer = _pointer_text(subject)
+    if not pointer:
+        return False
+    blob = _norm(blob)
+    if pointer and pointer in blob:
+        return True
+    ptr_tokens = _subject_tokens(pointer)
+    if not ptr_tokens:
+        return False
+    blob_tokens = _subject_tokens(blob)
+    return bool(ptr_tokens & blob_tokens)
+
+
+def _subject_shares_token(subject, blob) -> bool:
+    """True when the subject's own title/steps share a meaningful token with the evidence
+    (used to FLAG an on-topic derived scenario whose pointer is not itself confirmed)."""
+    subj_tokens = _subject_tokens(_subject_text(subject))
+    if not subj_tokens:
+        return False
+    return bool(subj_tokens & _subject_tokens(blob))
 
 
 def _field_tokens(subject):

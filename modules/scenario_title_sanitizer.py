@@ -267,6 +267,30 @@ def is_chalk_scenario(scenario) -> bool:
     return _source_type_of(scenario) in CHALK_SOURCE_TYPES
 
 
+# Analyst-mode scenario source_id prefixes (matched case-insensitively against the
+# traceability source_id). These scenarios are produced ONLY in analyst mode
+# (options['data_only'] is False) by test_analyst.py (D1/D2/A1/A2/A3) and
+# analyst_derivation.py (FEAT-001 evidence-derived kinds). They carry their own
+# deterministic titles + traceability pointer and are reconciled by the analyst
+# validity gate downstream, so the supplement title sanitizer must pass them through
+# untouched — its feature-title / Chalk-duplicate drops are for Jira-AC supplements,
+# not for these intentionally evidence-derived scenarios. In default mode no scenario
+# carries these prefixes, so this is a no-op there (default output stays byte-identical).
+_ANALYST_SOURCE_PREFIXES = (
+    'state-transition-matrix', 'partial-failure-matrix', 'field-validation-matrix',
+    'idempotency', 'concurrency',
+    'ac-negative', 'ac-boundary', 'ac-altflow', 'ac-regression',
+)
+
+
+def is_analyst_scenario(scenario) -> bool:
+    """True when the scenario carries an analyst-mode source_id prefix (never altered)."""
+    tr = getattr(scenario, 'source', None) or getattr(scenario, 'traceability', None)
+    sid = (getattr(tr, 'source_id', '') if tr else '') or ''
+    sid = sid.strip().lower()
+    return any(sid.startswith(p) for p in _ANALYST_SOURCE_PREFIXES)
+
+
 def sanitize_supplement_scenarios(
     scenarios: List,
     feature_summary: str = '',
@@ -301,6 +325,11 @@ def sanitize_supplement_scenarios(
     for sc in scenarios:
         # Rule #1: Chalk is ground truth. Never rename, never drop.
         if is_chalk_scenario(sc):
+            kept.append(sc)
+            continue
+        # Analyst-mode scenarios (evidence-derived + matrix) carry their own titles and
+        # are reconciled by the analyst validity gate — pass through untouched.
+        if is_analyst_scenario(sc):
             kept.append(sc)
             continue
         # Explicit user requests are protected too.

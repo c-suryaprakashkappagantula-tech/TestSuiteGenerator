@@ -609,6 +609,105 @@ def extract_dimensions(
         except Exception as _a123_err:
             log('[DIM-EXTRACT]   A1/A2/A3 skipped: %s' % str(_a123_err)[:80])
 
+    # ── 10b. FEAT-001 broadened analyst supplements (analyst mode only) ──
+    # The D1 provisioning gate above only fires for NSL provisioning / NMNO-backed
+    # features. Plain API / batch / UI features whose own evidence enumerates states or
+    # names request fields still warrant matrix coverage. Fire D1 (state matrix) and A1
+    # (field validation) here by TYPE/EVIDENCE — not by NSL provisioning — using
+    # concept_grounded only as a FLAG signal downstream, never as a hard block. D2/A2/A3
+    # stay conservative (the existing _is_provisioning path above owns them; the validity
+    # gate would drop evidence-less concurrency/idempotency anyway). All inside not-data_only.
+    #
+    # Classification-agnostic by design: the legacy D1/D2/A1/A2/A3 block above only fires
+    # for api/hybrid features, which is exactly why plain batch_file / ui features
+    # (MWTGPROV-4503, 4533) produced ZERO analyst scenarios. This broadened block runs for
+    # ANY classification in analyst mode. The evidence-driven derivation is fully
+    # classification-agnostic; D1/A1 remain gated on the feature's own evidence
+    # (enumerated states / named fields), so a feature whose evidence names neither still
+    # gets no matrix TCs — only the evidence-grounded derived scenarios.
+    if not data_only:
+        _bf_id = jira.key if jira else ''
+        _bf_title = (jira.summary if jira else '') or ''
+        _bf_desc = (getattr(jira, 'description', '') or '') if jira else ''
+        _bf_ac = (getattr(jira, 'acceptance_criteria', '') or '') if jira else ''
+        try:
+            _bf_chalk = _chalk_obligation_text(chalk) if chalk is not None else ''
+        except Exception:
+            _bf_chalk = ''
+        _bf_evidence = '\n'.join([_bf_title, _bf_desc, str(_bf_ac), _bf_chalk])
+        _bf_short = re.sub(r'\[.*?\]\s*', '', _bf_title).strip().lstrip(':- ').strip()[:40] or _bf_id
+        _bf_existing = {s.title.lower().strip() for s in scenarios}
+
+        # (a) Broadened D1 — fire when the evidence enumerates line states/statuses.
+        try:
+            _states = _states_in_evidence(_bf_evidence)
+            if _states and not _is_provisioning:
+                from .test_analyst import generate_state_transition_matrix as _gen_stm
+                _bf_state_tcs = _gen_stm(
+                    feature_name=_bf_short, feature_id=_bf_id, contract=None,
+                    nmno_result=nmno_result, log=log)
+                _bf_d1 = 0
+                for _sc in _bf_state_tcs:
+                    _k = _sc.title.lower().strip()
+                    # Keep only state TCs whose status token is actually named in THIS
+                    # feature's evidence — the validity gate enforces this too.
+                    if _k in _bf_existing:
+                        continue
+                    if not any(_st in _sc.title.lower() for _st in _states):
+                        continue
+                    scenarios.append(_sc)
+                    _bf_existing.add(_k)
+                    _bf_d1 += 1
+                if _bf_d1:
+                    log('[DIM-EXTRACT]   D1 (broadened) State Matrix: %d TCs injected '
+                        '(states: %s)' % (_bf_d1, ', '.join(_states)))
+        except Exception as _bf_d1_err:
+            log('[DIM-EXTRACT]   D1 (broadened) skipped: %s' % str(_bf_d1_err)[:80])
+
+        # (b) Broadened A1 — fire when the evidence names request fields/values, even
+        # without nmno_result.api_specs. Mine the field list from Chalk obligations / AC.
+        try:
+            _mined_fields = _fields_in_evidence(_bf_evidence)
+            _already_a1 = any(
+                (getattr(getattr(s, 'source', None), 'source_id', '') or '')
+                .lower().startswith('field-validation-matrix') for s in scenarios)
+            if _mined_fields and not _already_a1:
+                from .test_analyst import generate_field_validation_matrix as _gen_fvm
+                _bf_a1_tcs = _gen_fvm(_bf_short, _bf_id, _mined_fields, '', log=log)
+                _bf_a1 = 0
+                for _sc in _bf_a1_tcs:
+                    _k = _sc.title.lower().strip()
+                    if _k not in _bf_existing:
+                        scenarios.append(_sc)
+                        _bf_existing.add(_k)
+                        _bf_a1 += 1
+                if _bf_a1:
+                    log('[DIM-EXTRACT]   A1 (broadened) Field Validation: %d TCs injected '
+                        '(fields: %s)' % (_bf_a1, ', '.join(_mined_fields[:6])))
+        except Exception as _bf_a1_err:
+            log('[DIM-EXTRACT]   A1 (broadened) skipped: %s' % str(_bf_a1_err)[:80])
+
+        # (d) Evidence-driven derivation: negative / boundary / alternate-flow / regression
+        # scenarios mined directly from this feature's own Jira AC + Chalk. Each carries an
+        # AC-<Kind>-<fid> traceability pointer so the validity gate KEEPS it.
+        try:
+            from . import analyst_derivation as _ad
+            _derived = _ad.derive_analyst_scenarios(
+                jira, chalk, classification=_classification,
+                existing_titles=[s.title for s in scenarios], log=log)
+            _bf_dv = 0
+            for _sc in _derived:
+                _k = _sc.title.lower().strip()
+                if _k not in _bf_existing:
+                    scenarios.append(_sc)
+                    _bf_existing.add(_k)
+                    _bf_dv += 1
+            if _bf_dv:
+                log('[DIM-EXTRACT]   Derivation: %d evidence-derived analyst TCs injected'
+                    % _bf_dv)
+        except Exception as _bf_dv_err:
+            log('[DIM-EXTRACT]   Derivation skipped: %s' % str(_bf_dv_err)[:80])
+
     # Rebuild data_inventory with D1 + D2 + A1/A2/A3 included
     data_inventory = _build_data_inventory(sources_checked)
 
@@ -2121,6 +2220,68 @@ def _synthesize_obligation_scenario(ob, source_type, feature_id):
         source=tr,
         obligations=[ob],
     )
+
+
+# ── FEAT-001 broadened-gate evidence helpers (analyst mode only) ─────────────────
+
+# Line states/statuses the D1 state-transition matrix covers (lowercased). Word-boundary
+# matched against the feature's own evidence blob so a plain API/batch feature that
+# enumerates these states gets state coverage without the NSL provisioning gate.
+_EVIDENCE_STATE_TOKENS = (
+    'active', 'suspended', 'hotlined', 'hotline', 'pending port', 'pending-port',
+    'cancelled', 'canceled', 'pre-active', 'preactive', 'disconnected',
+)
+
+
+def _states_in_evidence(evidence_blob) -> List[str]:
+    """Return the line-state/status tokens actually NAMED in *evidence_blob*.
+
+    Pure, deterministic, word-boundary matched. Used to fire the broadened D1 state
+    matrix only when the feature's own evidence enumerates states/statuses."""
+    blob = (evidence_blob or '').lower()
+    found = []
+    for tok in _EVIDENCE_STATE_TOKENS:
+        pat = r'(?<![a-z])%s(?![a-z])' % re.escape(tok)
+        if re.search(pat, blob):
+            # Normalize hyphen/space variants to a single form for stable comparison.
+            norm = tok.replace('-', ' ')
+            if norm not in found:
+                found.append(norm)
+    return found
+
+
+# Request-field name patterns mined from Chalk obligations / AC for the broadened A1 gate.
+# UPPER_SNAKE identifiers, quoted field names, and the well-known input identifiers.
+_FIELD_UPPER_RE = re.compile(r'\b([A-Z][A-Z0-9]{2,}(?:_[A-Z0-9]+)+)\b')
+_FIELD_KNOWN = ('MDN', 'ICCID', 'IMEI', 'EID', 'MSISDN', 'IMEI-2', 'IMEI2')
+
+
+def _fields_in_evidence(evidence_blob) -> List[str]:
+    """Return candidate request-field names NAMED in *evidence_blob* (deterministic order).
+
+    Mines UPPER_SNAKE identifiers, single/double-quoted field tokens, and well-known input
+    identifiers. Used to fire the broadened A1 field-validation matrix without requiring an
+    nmno_result.api_spec."""
+    text = evidence_blob or ''
+    fields = []
+
+    def _add(v):
+        v = (v or '').strip()
+        if v and v not in fields:
+            fields.append(v)
+
+    for m in _FIELD_UPPER_RE.finditer(text):
+        _add(m.group(1))
+    for m in re.finditer(r"'([A-Za-z][A-Za-z0-9_ -]{1,38})'", text):
+        _add(m.group(1))
+    for m in re.finditer(r'"([A-Za-z][A-Za-z0-9_ -]{1,38})"', text):
+        _add(m.group(1))
+    _upper = text.upper()
+    for kw in _FIELD_KNOWN:
+        if re.search(r'(?<![A-Z0-9])%s(?![A-Z0-9])' % re.escape(kw), _upper):
+            _add(kw)
+    # Cap for determinism — generate_field_validation_matrix also caps internally.
+    return fields[:8]
 
 
 def _chalk_obligation_text(chalk):
