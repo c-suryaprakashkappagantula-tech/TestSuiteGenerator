@@ -875,17 +875,31 @@ def _build_high_level_scenarios_sheet(wb, suite):
     (no LLM); any banned-phrase row text is scrubbed to a neutral summary."""
     ws = wb.create_sheet('High Level Scenarios')
     ws.freeze_panes = 'A2'
-    ws.column_dimensions['A'].width = 14
-    ws.column_dimensions['B'].width = 45
+    ws.sheet_view.showGridLines = False
+    ws.column_dimensions['A'].width = 16
+    ws.column_dimensions['B'].width = 46
     ws.column_dimensions['C'].width = 95
+
+    # Styling palette (matches the client-facing sample):
+    #   header = navy band / white bold; TC-ID = cream fill, bold, centered;
+    #   Scenario Name = bold navy text; rows alternate white / light-blue.
+    _id_fill = PatternFill(start_color='FBF3DC', end_color='FBF3DC', fill_type='solid')   # cream/tan
+    _stripe_fill = PatternFill(start_color='EAF1FB', end_color='EAF1FB', fill_type='solid')  # light blue
+    _white_fill = PatternFill(start_color='FFFFFF', end_color='FFFFFF', fill_type='solid')
+    _name_font = Font(name='Calibri', bold=True, size=11, color=NAVY)
+    _id_font = Font(name='Calibri', bold=True, size=11, color='333333')
+    _desc_font = Font(name='Calibri', size=11, color='222222')
+    _id_align = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    _body_align = Alignment(horizontal='left', vertical='center', wrap_text=True)
 
     headers = ['Test Case ID', 'Scenario Name', 'High-Level Scenario Description']
     for ci, h in enumerate(headers, 1):
-        c = ws.cell(row=1, column=1 + ci - 1, value=h)
+        c = ws.cell(row=1, column=ci, value=h)
         c.font = _hf
         c.fill = _hfill
         c.alignment = _center
         c.border = _bdr
+    ws.row_dimensions[1].height = 22
 
     r = 2
     for idx, tc in enumerate(suite.test_cases, 1):
@@ -896,12 +910,29 @@ def _build_high_level_scenarios_sheet(wb, suite):
         _blob = (name + ' ' + desc).lower()
         if any(b in _blob for b in _HLS_BANNED):
             desc = 'Verify %s behaves as specified by the feature requirements.' % (name or ('scenario %02d' % idx))
-        ws.cell(row=r, column=1, value='TC%02d' % idx).border = _bdr
-        ws.cell(row=r, column=1).alignment = _center
-        ws.cell(row=r, column=2, value=name).border = _bdr
-        ws.cell(row=r, column=2).alignment = _wrap
-        ws.cell(row=r, column=3, value=desc).border = _bdr
-        ws.cell(row=r, column=3).alignment = _wrap
+
+        _row_fill = _stripe_fill if (idx % 2 == 0) else _white_fill
+
+        cid = ws.cell(row=r, column=1, value='TC%02d' % idx)
+        cid.font = _id_font
+        cid.fill = _id_fill            # cream ID column (overrides stripe)
+        cid.alignment = _id_align
+        cid.border = _bdr
+
+        cname = ws.cell(row=r, column=2, value=name)
+        cname.font = _name_font
+        cname.fill = _row_fill
+        cname.alignment = _body_align
+        cname.border = _bdr
+
+        cdesc = ws.cell(row=r, column=3, value=desc)
+        cdesc.font = _desc_font
+        cdesc.fill = _row_fill
+        cdesc.alignment = _body_align
+        cdesc.border = _bdr
+
+        # Taller rows with vertical breathing room (approx 2 wrapped lines).
+        ws.row_dimensions[r].height = 34
         r += 1
 
 
