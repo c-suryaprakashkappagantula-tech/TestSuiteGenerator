@@ -782,6 +782,15 @@ with left:
                                   'keeping subscriber-state last. ~60 = state coverage; '
                                   '80+ adds the device axis (more TCs).') \
         if (expand_matrix or plan_matrix) else 60
+    # Analyst mode: append rule-based analyst scenarios (state / partial-failure /
+    # field / idempotency / concurrency) reasoned from the description to the grounded
+    # set. Off by default so grounded-only output stays byte-comparable.
+    analyst_mode = st.checkbox(
+        'Expand scenarios (Analyst mode) — generate additional edge/negative/state/concurrency scenarios reasoned from the description',
+        value=False,
+        help='Appends rule-based analyst scenarios (state/partial-failure/field/idempotency/concurrency) '
+             "to the grounded set; each is validity-checked against this feature's AC/Chalk evidence "
+             'before export.')
     st.markdown("</div>", unsafe_allow_html=True)
 
     # ── Step 5: Upload ──
@@ -1980,6 +1989,7 @@ if run_btn:
                         'expand_matrix': expand_matrix,
                         'max_expanded_tcs': max_expanded,
                         'plan_matrix': plan_matrix,
+                        'data_only': (not analyst_mode),
                     }
 
                     engine_result = pipe.run('Engine_V8_%s' % feature_id,
