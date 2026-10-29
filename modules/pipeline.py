@@ -756,13 +756,14 @@ def block_generate_output(suite, feature_id, pi, strategy, jira=None, chalk=None
     out_path = generate_excel(suite, log=log)
     total_steps = sum(len(tc.steps) for tc in suite.test_cases)
 
-    # Generate Feature Objective doc
+    # Feature Objective & Summary doc — DISABLED per user request (only the Test Suite Demo
+    # doc is required). Re-enable by uncommenting the block below.
     doc_path = None
-    try:
-        doc_path = generate_feature_doc(suite, jira, chalk, log=log)
-    except Exception as e:
-        log('[PIPELINE] Feature doc warning: %s' % str(e)[:60])
-        _record_degraded('Feature Summary document', e)
+    # try:
+    #     doc_path = generate_feature_doc(suite, jira, chalk, log=log)
+    # except Exception as e:
+    #     log('[PIPELINE] Feature doc warning: %s' % str(e)[:60])
+    #     _record_degraded('Feature Summary document', e)
 
     # Test Suite Demo document - same content as the workbook, written for a walkthrough.
     demo_doc_path = None
