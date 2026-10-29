@@ -15,14 +15,24 @@ _TSG_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _TSG_ROOT not in sys.path:
     sys.path.insert(0, _TSG_ROOT)
 
-# The single shared rest_clients package lives at the monorepo root, outside the
-# worktree. jira_fetcher adds a path relative to its own location, which does not
-# resolve inside the nested worktree, so point at the canonical shared dir here.
-_SHARED_PATH = r'C:\Users\P3314665\Documents\mcp-jira-server\shared'
-if _SHARED_PATH not in sys.path:
-    sys.path.insert(0, _SHARED_PATH)
+# The rest_clients package is now VENDORED inside this repo at <repo_root>/shared/
+# rest_clients. Put the repo root (and its shared/ dir, where rest_clients lives as a
+# top-level package) first on sys.path so the vendored copy wins over the parent
+# monorepo's shared/ that still exists two levels up on disk.
+for _p in (_TSG_ROOT, os.path.join(_TSG_ROOT, 'shared')):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from rest_clients import JiraRestClient
+
+
+def test_vendored_rest_clients_wins_over_parent_monorepo():
+    """Regression guard: the FEAT-001 client resolves to the VENDORED copy inside this
+    repo, not the parent monorepo's shared/ (which still exists two levels up)."""
+    assert JiraRestClient.__module__ == 'rest_clients.mcp_clients', JiraRestClient.__module__
+    pkg_file = os.path.abspath(sys.modules['rest_clients'].__file__)
+    assert pkg_file.lower().startswith(_TSG_ROOT.lower()), pkg_file
+    assert 'mcp-jira-server\\shared' not in pkg_file.lower(), pkg_file
 
 
 PARENT_KEY = 'MWTGPROV-4575'

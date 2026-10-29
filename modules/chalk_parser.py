@@ -12,10 +12,17 @@ from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 from .config import CHALK_BASE_URL, PAGE_LOAD_TIMEOUT_MS, NETWORK_IDLE_TIMEOUT_MS
 
-# Add shared module to path for REST client imports
-_SHARED_PATH = Path(__file__).resolve().parent.parent.parent / 'shared'
-if str(_SHARED_PATH) not in sys.path:
-    sys.path.insert(0, str(_SHARED_PATH))
+# Add shared module to path for REST client imports.
+# Prefer the repo-root (vendored) `shared/` so a clone AND a nested worktree both resolve the
+# vendored copy before any parent monorepo `shared/`. `rest_clients` is a top-level import, so
+# `<repo_root>/shared` must be on sys.path; the repo root is added too so `from shared.* import
+# ...` resolves to the same vendored tree. Walk up for the first parent containing `shared/`,
+# falling back to the historical `parents[2]` so a normal checkout resolves identically.
+_here = Path(__file__).resolve()
+_repo_root = next((p for p in _here.parents if (p / 'shared').is_dir()), _here.parents[2])
+for _p in (str(_repo_root), str(_repo_root / 'shared')):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 TMO_TESTING_SCOPE_URL = 'https://chalk.charter.com/spaces/MDA/pages/3007682647/TMO+Testing+Scope'
 TMO_TESTING_SCOPE_PAGE_ID = '3007682647'

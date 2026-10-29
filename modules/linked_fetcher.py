@@ -23,9 +23,16 @@ def _get_jira_rest_client():
         try:
             import sys
             from pathlib import Path
-            _shared = str(Path(__file__).resolve().parent.parent.parent / 'shared')
-            if _shared not in sys.path:
-                sys.path.insert(0, _shared)
+            # Prefer the repo-root (vendored) `shared/` so a clone AND a worktree both resolve
+            # the vendored copy before any parent monorepo `shared/`. `rest_clients` is a
+            # top-level import, so `<repo_root>/shared` goes on sys.path; the repo root is added
+            # too so `from shared.* import ...` resolves to the same vendored tree. Walk up for
+            # the first parent holding `shared/`, falling back to the historical `parents[2]`.
+            _here = Path(__file__).resolve()
+            _root = next((p for p in _here.parents if (p / 'shared').is_dir()), _here.parents[2])
+            for _p in (str(_root), str(_root / 'shared')):
+                if _p not in sys.path:
+                    sys.path.insert(0, _p)
             from rest_clients import JiraRestClient
             _client = JiraRestClient(logger_fn=lambda m: None)
             if _client.health_check():

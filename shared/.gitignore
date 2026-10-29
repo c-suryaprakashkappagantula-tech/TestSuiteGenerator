@@ -1,0 +1,6 @@
+# Runtime artifacts created by the vendored shared/ package at execution time.
+# mcp_gateway.transport writes its MCP usage/budget DB here on live MCP calls; it is a
+# per-machine cache, never source. Keep it (and bytecode caches) out of version control.
+state/
+__pycache__/
+*.pyc
