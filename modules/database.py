@@ -18,8 +18,10 @@ STALE_HOURS = 24  # data older than this shows a warning
 # Bump this whenever the Jira fetch logic changes in a way that must invalidate
 # already-cached rows. Rows written with a NULL or lower schema_version are treated
 # as stale by is_jira_stale, forcing a one-time re-fetch. v2 = epic-children captured
-# for any parent type (FEAT-001), not just issue_type == 'epic'.
-JIRA_FETCH_SCHEMA_VERSION = 2
+# for any parent type (FEAT-001), not just issue_type == 'epic'. v3 = comments
+# requested explicitly on both fetch paths (fields=*all,comment) so comments_json is
+# populated even where the instance default omits the comment field.
+JIRA_FETCH_SCHEMA_VERSION = 3
 
 
 def _get_pi_registry():

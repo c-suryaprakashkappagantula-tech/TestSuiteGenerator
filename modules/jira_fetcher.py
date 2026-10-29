@@ -233,7 +233,7 @@ def fetch_jira_issue(page, issue_key: str, log=print) -> JiraIssue:
 
     log(f'[JIRA] Fetching via REST API...')
     result = page.evaluate('''async (url) => {
-        const r = await fetch(url + '?expand=renderedFields', {
+        const r = await fetch(url + '?expand=renderedFields&fields=*all,comment', {
             credentials: 'include',
             headers: {'Accept': 'application/json'}
         });

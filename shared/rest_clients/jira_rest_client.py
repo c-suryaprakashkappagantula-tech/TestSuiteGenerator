@@ -295,7 +295,7 @@ class JiraRestClient:
         _log(f'[JIRA-REST] Fetching {issue_key}...')
 
         data = self._get(f'{JIRA_REST_V2}/issue/{issue_key}',
-                         params={'expand': 'renderedFields'})
+                         params={'expand': 'renderedFields', 'fields': '*all,comment'})
         if not data:
             return None
 
