@@ -1990,6 +1990,11 @@ if run_btn:
                         'max_expanded_tcs': max_expanded,
                         'plan_matrix': plan_matrix,
                         'data_only': (not analyst_mode),
+                        # FEAT-004 lean cap: opt-in top-N reduction. Default None = no cap,
+                        # so normal runs and all PI-60 features keep full coverage. A caller
+                        # or run can set this to an int N to reduce the suite to the N
+                        # highest-priority test cases after all generation + scope drops.
+                        'max_test_cases': None,
                     }
 
                     engine_result = pipe.run('Engine_V8_%s' % feature_id,

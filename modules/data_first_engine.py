@@ -846,6 +846,15 @@ def build_test_suite_v8(
 
     _attach_degraded(suite, log)
 
+    # ── LEAN CAP (FEAT-004): opt-in top-N reduction, LAST so it caps the already
+    #    scope-filtered + coverage-verified suite. No-op unless options['max_test_cases']
+    #    is set, so default runs and all PI-60 features keep full coverage. ──
+    try:
+        _apply_lean_cap(suite, options, jira, log)
+    except Exception as _lc_err:
+        log('[LEAN] WARNING: lean cap pass failed: %s — continuing' % str(_lc_err)[:120])
+        _record_degraded('lean cap', _lc_err)
+
     return suite
 
 
@@ -1315,6 +1324,14 @@ def _build_cr_suite_v8(jira, chalk, parsed_docs, options, deep_mine_result, log,
 
     _attach_degraded(suite, log)
 
+    # ── LEAN CAP (FEAT-004): same opt-in top-N reduction on the narrow-CR path,
+    #    LAST so it caps the already scope-filtered set. No-op unless requested. ──
+    try:
+        _apply_lean_cap(suite, options, jira, log)
+    except Exception as _lc_err:
+        log('[LEAN] WARNING: lean cap pass failed: %s — continuing' % str(_lc_err)[:120])
+        _record_degraded('lean cap', _lc_err)
+
     return suite
 
 
@@ -1472,6 +1489,158 @@ def _apply_scope_exclusion(suite, jira, chalk, log: Callable = print):
             pass
 
     return excluded, dropped_titles
+
+
+# ─── Lean cap (FEAT-004): opt-in top-N reduction of the already-filtered suite ──
+
+# Major categories the cap must keep represented when present, in selection priority
+# order. Positive/Happy Path (core) first, then Negative, then Regression. Mirrors the
+# humanizer _CATEGORY_ORDER buckets so the balance reflects the same taxonomy.
+_LEAN_MAJOR_CATEGORIES = ('Happy Path', 'Positive', 'Negative', 'Regression')
+
+
+def _lean_category_bucket(tc):
+    """Map a TC's category onto one of the major buckets for balance, or '' if none."""
+    cat = (getattr(tc, 'category', '') or '').strip().lower()
+    if cat in ('happy path', 'positive'):
+        return 'Positive'
+    if cat == 'negative':
+        return 'Negative'
+    if cat == 'regression':
+        return 'Regression'
+    return ''
+
+
+def _lean_is_chalk_core(tc):
+    """True when *tc* is a Chalk-grounded core TC (not an analyst/edge derivation).
+
+    Chalk-first protection: such a TC must never be evicted in favour of a
+    lower-priority analyst/edge TC. 'Core' = non-analyst (no analyst source_id prefix)
+    AND traced to a Chalk scenario / business rule.
+    """
+    try:
+        from .analyst_validity import is_analyst
+        if is_analyst(tc):
+            return False
+    except Exception:
+        pass
+    tr = getattr(tc, 'traceability', None)
+    st = (getattr(tr, 'source_type', '') or '').strip().lower() if tr else ''
+    return st in ('chalk scenario', 'business rule')
+
+
+def _apply_lean_cap(suite, options, jira, log: Callable = print):
+    """Reduce the suite to the N highest-priority TCs when options['max_test_cases']=N.
+
+    OPT-IN and GENERAL (FEAT-004): default None / absent -> NO-OP (byte-identical output
+    preserved). When N is set and the suite already has <= N TCs, also a no-op.
+
+    Otherwise it reuses the EXISTING humanizer machinery (no new ranking):
+      * dedup_and_merge — collapse near-duplicate restatements,
+      * score_priority — stamp tc._priority using the feature's Jira priority,
+      * reorder_by_risk — sort P1->P3 then by category.
+    It then selects the top N in that risk order while:
+      * keeping >= 1 TC from each major category present among
+        {Positive/Happy Path (core), Negative, Regression}, and
+      * never evicting a Chalk-grounded core TC in favour of a lower-priority
+        analyst/edge TC (user-requested TCs are likewise always kept).
+
+    Runs LAST (after scope drops) so the cap operates on the already-filtered set.
+    """
+    n = (options or {}).get('max_test_cases')
+    if not n:
+        return                                    # no cap requested — no-op
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return
+    if n <= 0:
+        return
+    tcs = list(getattr(suite, 'test_cases', None) or [])
+    before = len(tcs)
+    if before <= n:
+        return                                    # nothing to trim — full suite unchanged
+
+    from . import humanizer
+
+    feature_priority = (getattr(suite, 'jira_priority', '') or
+                        (getattr(jira, 'priority', '') if jira else '') or '')
+
+    # Reuse the existing ranking machinery — do NOT invent a new ranking.
+    ranked = humanizer.dedup_and_merge(tcs, log)
+    humanizer.score_priority(ranked, log, feature_priority=feature_priority)
+    humanizer.reorder_by_risk(ranked, log)
+
+    # Dedup may itself bring the suite to <= n; if so, keep the deduped set as-is.
+    if len(ranked) <= n:
+        suite.test_cases = ranked
+        _summary = ('[LEAN] capped suite %d -> %d (max_test_cases=%d); '
+                    'dedup alone met the cap' % (before, len(ranked), n))
+        log(_summary)
+        try:
+            suite.warnings = list(getattr(suite, 'warnings', None) or [])
+            if _summary not in suite.warnings:
+                suite.warnings.append(_summary)
+        except Exception:
+            pass
+        return
+
+    # Which major categories are present and must keep >= 1 representative.
+    present_majors = [c for c in ('Positive', 'Negative', 'Regression')
+                      if any(_lean_category_bucket(tc) == c for tc in ranked)]
+
+    selected, selected_ids = [], set()
+
+    def _take(tc):
+        if id(tc) not in selected_ids:
+            selected.append(tc)
+            selected_ids.add(id(tc))
+
+    # 1. Always keep user-requested TCs (protected, like every other pass).
+    for tc in ranked:
+        if getattr(tc, 'user_requested', False):
+            _take(tc)
+
+    # 2. Guarantee category balance: one highest-priority rep per present major category.
+    #    ranked is already in risk order, so the first match is the highest-priority one.
+    for cat in present_majors:
+        if len(selected) >= n:
+            break
+        for tc in ranked:
+            if id(tc) in selected_ids:
+                continue
+            if _lean_category_bucket(tc) == cat:
+                _take(tc)
+                break
+
+    # 3. Fill the remaining slots in risk order, Chalk core TCs before analyst/edge TCs
+    #    at the same rank so a Chalk core TC is never evicted for a lower-priority
+    #    analyst/edge TC. ranked is already risk-ordered; a stable sort on
+    #    (not chalk-core) preserves that order within each group.
+    remaining = [tc for tc in ranked if id(tc) not in selected_ids]
+    remaining.sort(key=lambda tc: 0 if _lean_is_chalk_core(tc) else 1)
+    for tc in remaining:
+        if len(selected) >= n:
+            break
+        _take(tc)
+
+    # Re-apply risk order to the final selection so the Excel reflects a clean ranking.
+    humanizer.reorder_by_risk(selected, log)
+
+    dropped = [tc for tc in ranked if id(tc) not in selected_ids]
+    dropped_titles = [getattr(tc, 'summary', '') or '' for tc in dropped]
+
+    suite.test_cases = selected
+    _summary = ('[LEAN] capped suite %d -> %d (max_test_cases=%d); '
+                'kept highest-priority balanced set; dropped: %s'
+                % (before, len(selected), n, '; '.join(dropped_titles)))
+    log(_summary)
+    try:
+        suite.warnings = list(getattr(suite, 'warnings', None) or [])
+        if _summary not in suite.warnings:
+            suite.warnings.append(_summary)
+    except Exception:
+        pass
 
 
 def _finalize_priorities(suite, feature_priority='', log: Callable = print, problem_text=''):
