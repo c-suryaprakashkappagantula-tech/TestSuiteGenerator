@@ -1415,6 +1415,18 @@ _SCOPE_DISTINCTIVE_FAMILY = frozenset({
 })
 
 
+def _scope_phrase_has_substance(phrase: str) -> bool:
+    """True when *phrase* carries at least one alphanumeric character.
+
+    Pre-screen for the drop site (tsg-scope-drop-fix): a captured subject that is pure
+    punctuation/whitespace (e.g. a bare '-' from a markdown bullet marker) is noise, not
+    a scope subject. A bare '-' trivially substring-matches the 'MWTGPROV-NNNN-' prefix
+    present in every TC title, so without this screen it would drop the whole suite. This
+    is strictly narrower than — and never replaces — ``_scope_phrase_is_distinctive``.
+    """
+    return any(ch.isalnum() for ch in (phrase or ''))
+
+
 def _scope_phrase_is_distinctive(phrase: str) -> bool:
     """True when *phrase* is specific enough to justify dropping a TC (FEAT-003 guard)."""
     p = (phrase or '').strip()
@@ -1437,7 +1449,12 @@ def _apply_scope_exclusion(suite, jira, chalk, log: Callable = print):
     stays byte-identical for features without exclusion language).
 
     Behaviour:
-      * never drops a user-requested TC;
+      * an EXPLICIT feature-owned scope exclusion wins over the QMetry near-dup
+        protection flag (``user_requested``): a distinctively-matched excluded TC is
+        dropped even when ``user_requested=True``. That flag is set by
+        ``qmetry_steps_source`` to shield authored QMetry TCs from dedup collapse, not
+        to veto an explicit scope-exclusion instruction. The conservative distinctive
+        guard below keeps in-scope TCs safe.
       * prefers DROP over flag;
       * conservative matcher (scope_exclusion.scenario_matches_excluded) never fires on a
         single broad keyword, so in-scope TCs are safe;
@@ -1460,14 +1477,20 @@ def _apply_scope_exclusion(suite, jira, chalk, log: Callable = print):
 
     kept, dropped_titles, phrases = [], set(), set()
     for tc in (suite.test_cases or []):
-        # Never drop a user-requested scenario.
-        if getattr(tc, 'user_requested', False):
-            kept.append(tc)
-            continue
+        # NOTE: we intentionally do NOT short-circuit on ``user_requested`` here. That
+        # flag is overloaded — ``qmetry_steps_source`` sets it on QMetry-auto-added TCs
+        # purely to protect them from near-dup collapse, not because the user asked for
+        # them. An explicit feature-owned scope exclusion must win over that protection,
+        # so every TC is tested; the distinctive guard below prevents collateral drops.
         matched, phrase = scope_exclusion.scenario_matches_excluded(tc, excluded)
         # Conservative guard: only drop on a DISTINCTIVE match (never a generic 2-word
         # fragment), so an in-scope TC is never nuked by an over-generalized subject.
-        if matched and _scope_phrase_is_distinctive(phrase):
+        # Degenerate screen: a matched phrase carrying no alphanumeric content (e.g. a
+        # bare '-' captured from a bullet-list marker) is punctuation noise, not a real
+        # subject. Such a phrase trivially substring-matches the 'MWTGPROV-NNNN-' id in
+        # every TC title, so it must never justify a drop. This is strictly narrower than
+        # the distinctive guard and does not alter it.
+        if matched and _scope_phrase_has_substance(phrase) and _scope_phrase_is_distinctive(phrase):
             title = getattr(tc, 'summary', '') or ''
             dropped_titles.add(title)
             phrases.add(phrase)

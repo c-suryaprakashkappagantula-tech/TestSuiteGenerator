@@ -7,7 +7,8 @@ absent (the cache_available fixture build_suite depends on calls pytest.skip).
 Asserts:
   * default-options builds are BYTE-COMPARABLE to explicit {'data_only': True} builds —
     identical ordered TC summaries AND identical per-TC step summaries — for 4628 (==17 TCs),
-    4074 (==16 TCs), and the 8 PI-60 features (the Analyst gate is a no-op in default mode);
+    4074 (==14 TCs after the scope-drop fix), and the 8 PI-60 features (the Analyst gate is
+    a no-op in default mode);
   * every PI-60 feature carries 0 banned tokens in BOTH default and data_only builds;
   * 4533 (manual/CR path) attempts the QMetry supplement — no _qmetry_skip_warning when the
     cache has it, else the test skips.
@@ -74,8 +75,12 @@ def test_4628_byte_comparable_17_tcs(build_suite):
     _assert_byte_comparable(build_suite, 'MWTGPROV-4628', expected_count=17)
 
 
-def test_4074_byte_comparable_16_tcs(build_suite):
-    _assert_byte_comparable(build_suite, 'MWTGPROV-4074', expected_count=16)
+def test_4074_byte_comparable_14_tcs(build_suite):
+    # 16 -> 14 after tsg-scope-drop-fix: the two scope-excluded fan-out TCs
+    # ('Multi-environment fan-out...' and 'Duplicate migrated pair across environments...')
+    # are now dropped end-to-end by _apply_scope_exclusion on both default and data_only
+    # builds, so the byte-comparable count drops from 16 to 14.
+    _assert_byte_comparable(build_suite, 'MWTGPROV-4074', expected_count=14)
 
 
 @pytest.mark.parametrize('feature_id', PI60_FEATURES)

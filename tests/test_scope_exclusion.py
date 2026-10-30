@@ -84,16 +84,68 @@ def test_drops_fanout_keeps_file_pickup():
     assert any('[SCOPE]' in w for w in suite.warnings)
 
 
-def test_user_requested_tc_never_dropped():
+def test_scope_exclusion_wins_over_user_requested_flag():
+    """Regression for tsg-scope-drop-fix: an EXPLICIT scope exclusion must drop a
+    matching TC even when it carries ``user_requested=True``.
+
+    QMetry-auto-added scenarios (modules/qmetry_steps_source) set ``user_requested=True``
+    only to protect them from near-dup collapse. The scope pass used to read that flag as
+    "user asked for this, never drop", so the two live 4074 fan-out TCs survived despite a
+    distinctive exclusion match. The pass must now test such TCs and drop a distinctive
+    match. This asserts the FIXED behaviour; it fails against the pre-fix early-continue.
+    """
     jira = _Jira(description=_EXCL_COMMENT)
     suite = TestSuite(feature_id=FID)
-    protected = _tc('Verify audit-file cross-environment fan-out custom scenario',
-                    steps=['Trigger cross-environment fan-out'])
-    protected.user_requested = True
-    suite.test_cases = [protected]
+    # Mirrors the two live 4074 QMetry-only fan-out TCs (summary carries the subject,
+    # title/validation are None, user_requested set by the QMetry near-dup protection).
+    fanout = _tc('MWTGPROV-4074 Verify Multi-environment fan-out locates the MDN',
+                 steps=['Trigger multi-environment fan-out'])
+    fanout.user_requested = True
+    cross = _tc('MWTGPROV-4074 Verify Duplicate migrated pair across environments resolves',
+                steps=['Resolve duplicate pair across environments'])
+    cross.user_requested = True
+    pickup = _tc('Verify audit-file pickup from the production temp folder',
+                 steps=['Place audit file in temp folder', 'Confirm file pickup'])
+    suite.test_cases = [fanout, cross, pickup]
 
-    _apply_scope_exclusion(suite, jira, chalk=None, log=_quiet)
-    assert protected in suite.test_cases              # protected despite matching exclusion
+    excluded, dropped = _apply_scope_exclusion(suite, jira, chalk=None, log=_quiet)
+
+    kept_summaries = [tc.summary for tc in suite.test_cases]
+    assert fanout.summary not in kept_summaries       # dropped despite user_requested
+    assert cross.summary not in kept_summaries        # dropped despite user_requested
+    assert pickup.summary in kept_summaries           # in-scope TC still kept
+    assert fanout.summary in dropped
+    assert cross.summary in dropped
+    assert any('[SCOPE]' in w for w in suite.warnings)
+
+
+def test_degenerate_hyphen_subject_never_drops():
+    """HARD GATE guard (tsg-scope-drop-fix / MWTGPROV-4628): a captured subject that is
+    pure punctuation (a bare '-' from a markdown bullet marker) must NOT drop any TC.
+
+    A bare '-' is 'distinctive' under the hyphen rule and substring-matches the
+    'MWTGPROV-NNNN-' id present in every TC title, so without the drop-site substance
+    screen it would nuke the whole suite. Here the exclusion comment uses a bullet list
+    ('- Verizon ... out of scope'), which yields a '-' subject; no TC may be dropped by
+    it. (Mirrors the live 4628 over-drop this fix prevents.)
+    """
+    bullet_comment = ('Scope Constraints:\n'
+                      '- Verizon (VZW) and CBRS billing record processing are out of scope '
+                      'and must be unaffected.')
+    jira = _Jira(description=bullet_comment)
+    suite = TestSuite(feature_id='MWTGPROV-4628')
+    # Titles carry the feature-id hyphen prefix, exactly like the live suite.
+    a = _tc('MWTGPROV-4628 Verify Both MT and MO records convert correctly',
+            steps=['Convert MT and MO records'])
+    b = _tc('MWTGPROV-4628 Verify end-to-end TMO PRR processing distribution',
+            steps=['Process PRR end-to-end'])
+    suite.test_cases = [a, b]
+
+    excluded, dropped = _apply_scope_exclusion(suite, jira, chalk=None, log=_quiet)
+
+    assert dropped == set()                            # bare '-' never justifies a drop
+    assert [tc.summary for tc in suite.test_cases] == [a.summary, b.summary]
+    assert not any('[SCOPE]' in w for w in (suite.warnings or []))
 
 
 # ── (b) no exclusion language → empty set, nothing dropped (byte-identical path) ──
