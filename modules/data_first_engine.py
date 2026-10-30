@@ -824,12 +824,23 @@ def build_test_suite_v8(
         log('[COVERAGE-GATE] Audit setup failed: %s' % str(_cov_err)[:160])
         raise
 
+    # ── SCOPE EXCLUSION (FEAT-003): drop scope-excluded TCs on the COMBINED set ──
+    # Runs AFTER reconcile / tc_name_polish / api_step_grounder and BEFORE the RULE #1
+    # coverage invariant, in BOTH default and analyst modes. No-op when the feature has
+    # no exclusion language (excluded set empty), so byte-identicality is preserved.
+    _excluded_subjects = set()
+    try:
+        _excluded_subjects, _ = _apply_scope_exclusion(suite, jira, chalk, log)
+    except Exception as _se_err:
+        log('[SCOPE] WARNING: scope exclusion pass failed: %s — continuing' % str(_se_err)[:120])
+        _record_degraded('scope exclusion', _se_err)
+
     # ── RULE #1 INVARIANT: every Chalk scenario must have a test case ──
     # Chalk is ground truth. Supplements may be added on top, never in place of it.
     # This is a verification gate, not a generator: it surfaces any Chalk scenario that
     # failed to reach the suite so the loss is visible instead of silent.
     try:
-        _assert_chalk_coverage(suite, chalk, log)
+        _assert_chalk_coverage(suite, chalk, log, excluded_subjects=_excluded_subjects)
     except Exception as _cc_err:
         log('[CHALK-GUARD] WARNING: coverage check failed: %s' % str(_cc_err)[:120])
 
@@ -906,7 +917,7 @@ def _populate_plan_combinations(suite, log: Callable = print) -> None:
         _record_degraded('plan combination population', exc)
 
 
-def _assert_chalk_coverage(suite, chalk, log=print):
+def _assert_chalk_coverage(suite, chalk, log=print, excluded_subjects=None):
     """Verify every Chalk scenario is represented by at least one TC (rule #1).
 
     Chalk is ground truth: supplements are added on top of it, never in place of it.
@@ -916,12 +927,25 @@ def _assert_chalk_coverage(suite, chalk, log=print):
 
     Titles are compared on a normalized-substring basis because builders prefix the
     feature id and may append qualifiers (device/state variants).
+
+    *excluded_subjects* (FEAT-003): when provided, a Chalk scenario whose own text
+    matches an excluded subject (via scope_exclusion.scenario_matches_excluded) was
+    intentionally dropped by the scope-exclusion pass, so it is skipped here and never
+    reported as a coverage violation. All other matching stays unchanged.
     """
     import re as _re
 
     scenarios = list(getattr(chalk, 'scenarios', None) or []) if chalk else []
     if not scenarios:
         return
+
+    # FEAT-003: a scenario intentionally scope-excluded is expected to have no TC; skip it.
+    _scenario_matches_excluded = None
+    if excluded_subjects:
+        try:
+            from .scope_exclusion import scenario_matches_excluded as _scenario_matches_excluded
+        except Exception:
+            _scenario_matches_excluded = None
 
     def _n(s):
         return ' '.join(_re.sub(r'[^a-z0-9 ]', ' ', (s or '').lower()).split())
@@ -999,8 +1023,17 @@ def _assert_chalk_coverage(suite, chalk, log=print):
 
     missing = []
     _by_fuzzy_only = []   # covered by fuzzy overlap but NOT by its own TC's provenance
+    _excluded_skipped = 0
     for sc in scenarios:
         raw = getattr(sc, 'title', '') or ''
+        # FEAT-003: skip scenarios the scope-exclusion pass intentionally dropped — but
+        # only on a DISTINCTIVE match (same guard as the drop pass), so a generic-fragment
+        # match never silently removes an in-scope scenario from the coverage denominator.
+        if _scenario_matches_excluded is not None:
+            _match, _mphrase = _scenario_matches_excluded(sc, excluded_subjects)
+            if _match and _scope_phrase_is_distinctive(_mphrase):
+                _excluded_skipped += 1
+                continue
         if _covered_by_provenance(raw):
             continue
         key = _n(_re.sub(r'^\s*verify\s+(?:that\s+)?', '', raw, flags=_re.IGNORECASE))
@@ -1015,7 +1048,13 @@ def _assert_chalk_coverage(suite, chalk, log=print):
             # TC, hiding a silent 3->2 drop. Surface it so the loss is never invisible.
             _by_fuzzy_only.append(raw)
 
-    covered = len(scenarios) - len(missing)
+    # FEAT-003: intentionally scope-excluded scenarios are removed from BOTH the covered
+    # numerator and the total denominator so the ratio reflects only in-scope scenarios.
+    _total = len(scenarios) - _excluded_skipped
+    covered = _total - len(missing)
+    if _excluded_skipped:
+        log('[CHALK-GUARD] %d Chalk scenario(s) intentionally scope-excluded — not counted'
+            % _excluded_skipped)
     if _by_fuzzy_only:
         log('[CHALK-GUARD] NOTE: %d scenario(s) matched only by fuzzy overlap, not by a TC '
             'built from them — verify these are genuine merges, not silent drops:'
@@ -1027,24 +1066,24 @@ def _assert_chalk_coverage(suite, chalk, log=print):
         except Exception:
             pass
     try:
-        suite.chalk_coverage = (covered, len(scenarios))
+        suite.chalk_coverage = (covered, _total)
     except Exception:
         pass
 
     if missing:
         log('[CHALK-GUARD] *** RULE #1 VIOLATION: %d/%d Chalk scenarios produced no TC ***'
-            % (len(missing), len(scenarios)))
+            % (len(missing), _total))
         for m in missing[:10]:
             log('[CHALK-GUARD]   MISSING: %s' % m[:100])
         try:
             suite.warnings = list(getattr(suite, 'warnings', None) or []) + [
                 'Chalk coverage incomplete: %d of %d Chalk scenarios produced no test case.'
-                % (len(missing), len(scenarios))]
+                % (len(missing), _total)]
         except Exception:
             pass
     else:
         log('[CHALK-GUARD] Chalk coverage OK: %d/%d scenarios -> TCs' % (
-            covered, len(scenarios)))
+            covered, _total))
 
 
 # ================================================================
@@ -1258,9 +1297,19 @@ def _build_cr_suite_v8(jira, chalk, parsed_docs, options, deep_mine_result, log,
     from .coverage_obligations import attach_coverage_audit
     attach_coverage_audit(suite, coverage_obligations or [], log=log)
 
+    # ── SCOPE EXCLUSION (FEAT-003): same drop pass on the narrow-CR path ──
+    # No-op when the feature carries no exclusion language, so CR suites without scope
+    # statements are unaffected. Runs regardless of mode (not gated on data_only).
+    _cr_excluded_subjects = set()
+    try:
+        _cr_excluded_subjects, _ = _apply_scope_exclusion(suite, jira, chalk, log)
+    except Exception as _se_err:
+        log('[SCOPE] WARNING: scope exclusion pass failed: %s — continuing' % str(_se_err)[:120])
+        _record_degraded('scope exclusion', _se_err)
+
     # Rule #1 applies to every branch, including the capped CR path.
     try:
-        _assert_chalk_coverage(suite, chalk, log)
+        _assert_chalk_coverage(suite, chalk, log, excluded_subjects=_cr_excluded_subjects)
     except Exception as _cc_err:
         log('[CHALK-GUARD] WARNING: coverage check failed: %s' % str(_cc_err)[:120])
 
@@ -1330,6 +1379,99 @@ def _prune_degenerate_tcs(suite, feature_id, log: Callable = print):
     if dropped:
         suite.test_cases = kept
         log('[V8-ENGINE]   Pruned %d degenerate/junk TC(s)' % dropped)
+
+
+# FEAT-003 conservative-drop guard. The FEAT-002 extractor can split a qualified
+# clause (e.g. "Verizon/CBRS billing-record processing out of scope") into a generic
+# 2-word fragment ("billing record") that would collide with an in-scope feature's own
+# subject. To honour the FEAT-003 mandate — "never a broad keyword that nukes in-scope
+# TCs" and "in-scope TCs are never dropped" — the engine only ACTS on a match when the
+# matched phrase is DISTINCTIVE: a hyphen compound (fan-out, cross-environment), the
+# bounded cross-env / across-environments family, or a phrase of >= 3 words. A generic
+# 2-word fragment never triggers a drop (it may still under-drop a vaguely-worded
+# exclusion — accepted, because do-no-harm to in-scope suites is the priority).
+_SCOPE_DISTINCTIVE_FAMILY = frozenset({
+    'fan-out', 'fan out',
+    'multi-environment', 'multi environment',
+    'cross-environment', 'cross environment',
+    'across environments',
+})
+
+
+def _scope_phrase_is_distinctive(phrase: str) -> bool:
+    """True when *phrase* is specific enough to justify dropping a TC (FEAT-003 guard)."""
+    p = (phrase or '').strip()
+    if not p:
+        return False
+    if p in _SCOPE_DISTINCTIVE_FAMILY:
+        return True
+    if '-' in p:                      # hyphen compound (fan-out, cross-environment)
+        return True
+    return len(p.split()) >= 3        # otherwise require >= 3 words (not a 2-word fragment)
+
+
+def _apply_scope_exclusion(suite, jira, chalk, log: Callable = print):
+    """Drop scope-excluded TCs in place (FEAT-003), modelled on _prune_degenerate_tcs.
+
+    Uses modules/scope_exclusion.py (FEAT-002): derives the feature's own excluded
+    subjects from its evidence (Jira comments + AC + description + Chalk), then drops any
+    TC whose own text conservatively matches an excluded subject. Runs in BOTH default and
+    analyst modes. When the excluded set is empty this is a NO-OP (default/grounded output
+    stays byte-identical for features without exclusion language).
+
+    Behaviour:
+      * never drops a user-requested TC;
+      * prefers DROP over flag;
+      * conservative matcher (scope_exclusion.scenario_matches_excluded) never fires on a
+        single broad keyword, so in-scope TCs are safe;
+      * logs each drop with the matched exclusion phrase;
+      * appends ONE summary line to suite.warnings (rendered on the Summary sheet).
+
+    Returns (excluded_subjects, dropped_titles): the excluded-subject set and the set of
+    dropped TC summaries — used by _assert_chalk_coverage to suppress false coverage
+    warnings for intentionally-excluded Chalk scenarios.
+    """
+    try:
+        from . import scope_exclusion
+    except Exception as _se_imp_err:
+        log('[SCOPE] WARNING: scope_exclusion import failed: %s — skipping' % str(_se_imp_err)[:100])
+        return set(), set()
+
+    excluded = scope_exclusion.extract_excluded_subjects(jira, chalk, log=log)
+    if not excluded:
+        return set(), set()                       # no-op — byte-identical output preserved
+
+    kept, dropped_titles, phrases = [], set(), set()
+    for tc in (suite.test_cases or []):
+        # Never drop a user-requested scenario.
+        if getattr(tc, 'user_requested', False):
+            kept.append(tc)
+            continue
+        matched, phrase = scope_exclusion.scenario_matches_excluded(tc, excluded)
+        # Conservative guard: only drop on a DISTINCTIVE match (never a generic 2-word
+        # fragment), so an in-scope TC is never nuked by an over-generalized subject.
+        if matched and _scope_phrase_is_distinctive(phrase):
+            title = getattr(tc, 'summary', '') or ''
+            dropped_titles.add(title)
+            phrases.add(phrase)
+            log("[SCOPE] dropped TC '%s' — excluded by comment: '%s'" % (title, phrase))
+            continue
+        kept.append(tc)
+
+    if dropped_titles:
+        suite.test_cases = kept
+        # Deterministic phrase list in the single summary warning.
+        _phrase_text = ', '.join(sorted(phrases))
+        _summary = ('[SCOPE] Dropped %d test case(s) excluded by scope language: %s'
+                    % (len(dropped_titles), _phrase_text))
+        try:
+            suite.warnings = list(getattr(suite, 'warnings', None) or [])
+            if _summary not in suite.warnings:
+                suite.warnings.append(_summary)
+        except Exception:
+            pass
+
+    return excluded, dropped_titles
 
 
 def _finalize_priorities(suite, feature_priority='', log: Callable = print, problem_text=''):

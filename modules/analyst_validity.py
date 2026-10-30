@@ -320,6 +320,30 @@ def _field_tokens(subject):
     return {t for t in tokens if t}
 
 
+# FEAT-003 conservative-drop guard (mirrors data_first_engine._scope_phrase_is_distinctive).
+# Only a DISTINCTIVE matched phrase — a hyphen compound, the bounded cross-env family, or a
+# phrase of >= 3 words — may drop an analyst TC. A generic 2-word fragment (e.g. a qualifier-
+# stripped 'billing record') must never nuke an in-scope analyst TC.
+_SCOPE_DISTINCTIVE_FAMILY = frozenset({
+    'fan-out', 'fan out',
+    'multi-environment', 'multi environment',
+    'cross-environment', 'cross environment',
+    'across environments',
+})
+
+
+def _scope_phrase_is_distinctive(phrase: str) -> bool:
+    """True when *phrase* is specific enough to justify dropping an analyst TC."""
+    p = (phrase or '').strip()
+    if not p:
+        return False
+    if p in _SCOPE_DISTINCTIVE_FAMILY:
+        return True
+    if '-' in p:
+        return True
+    return len(p.split()) >= 3
+
+
 def _concept_grounded(blob) -> bool:
     """Coarse provisioning-grounding pre-check via qmetry_pattern_library.concept_grounded.
 
@@ -353,6 +377,21 @@ def apply_analyst_validity_gate(suite, jira, chalk, log=print):
     _log = log or (lambda *_a, **_k: None)
     evidence = build_feature_evidence(jira, chalk)
 
+    # FEAT-003: derive the feature's excluded subjects once (same source the engine's
+    # scope-exclusion pass uses) so analyst TCs matching an excluded subject are dropped
+    # BEFORE the kind-based verdict / reconcile. Empty set => no-op. Grounded TCs are still
+    # handled by the engine pass; the gate keeps its grounded-always-keep behaviour.
+    try:
+        from .scope_exclusion import (
+            extract_excluded_subjects as _extract_excluded,
+            scenario_matches_excluded as _scope_matches,
+        )
+        _excluded = _extract_excluded(jira, chalk, log=_log)
+    except Exception as _se_err:
+        _log('[ANALYST-GATE]   WARNING: scope-exclusion unavailable: %s — skipping'
+             % str(_se_err)[:100])
+        _excluded, _scope_matches = set(), None
+
     kept = []
     dropped = 0
     flagged = 0
@@ -363,6 +402,16 @@ def apply_analyst_validity_gate(suite, jira, chalk, log=print):
             kept.append(tc)                       # (c) grounded — always kept
             continue
         analyst_total += 1
+        # FEAT-003: scope-excluded analyst TC -> drop (never flag), before the verdict.
+        # Conservative guard: only on a DISTINCTIVE matched phrase, never a generic 2-word
+        # fragment, so an in-scope analyst TC is never nuked by an over-generalized subject.
+        if _excluded and _scope_matches is not None:
+            _match, _phrase = _scope_matches(tc, _excluded)
+            if _match and _scope_phrase_is_distinctive(_phrase):
+                dropped += 1
+                _log("[SCOPE] dropped TC '%s' — excluded by comment: '%s'"
+                     % (getattr(tc, 'summary', '') or getattr(tc, 'title', '') or '', _phrase))
+                continue
         verdict, reason = scenario_is_valid(tc, evidence)   # (b)
         if verdict == 'drop':
             dropped += 1
